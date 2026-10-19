@@ -8716,6 +8716,55 @@ fn osc_52_write_is_not_forwarded() {
 }
 
 #[test]
+fn kitty_clipboard_support_is_negotiated_with_the_actual_host() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut grid, b"\x1b[?5522$p");
+    assert!(grid.pending_messages_to_pty.is_empty());
+    assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboardSupport]);
+}
+
+#[test]
+fn kitty_clipboard_read_preserves_mime_selection_password_and_name() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    let request = b"\x1b]5522;type=read:loc=primary:pw=cHc=:name=RWRpdG9y:id=app;dGV4dC9wbGFpbiBpbWFnZS9wbmc=\x1b\\";
+    parser.advance(&mut grid, request);
+    assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboard {
+        bytes: request.to_vec(), write: false,
+    }]);
+    assert!(grid.pending_messages_to_pty.is_empty());
+}
+
+#[test]
+fn kitty_clipboard_write_is_not_forwarded_until_all_mime_chunks_and_aliases_arrive() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    let start = b"\x1b]5522;type=write:id=writer\x1b\\";
+    let data = b"\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;iVBO\x1b\\\
+        \x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;Rw==\x1b\\\
+        \x1b]5522;type=walias:mime=aW1hZ2UvcG5n;aW1hZ2UveC1wbmc=\x1b\\";
+    let end = b"\x1b]5522;type=wdata\x1b\\";
+    parser.advance(&mut grid, start);
+    parser.advance(&mut grid, data);
+    assert!(grid.pending_forwarded_queries.is_empty());
+    parser.advance(&mut grid, end);
+    assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboard {
+        bytes: [start.as_slice(), data, end].concat(), write: true,
+    }]);
+}
+
+#[test]
+fn kitty_clipboard_response_packets_and_other_osc_types_are_not_forward_requests() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut grid, b"\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;YQ==\x1b\\\
+        \x1b]5522;type=unknown;YQ==\x1b\\\
+        \x1b]5522;type=write:status=EPERM\x1b\\");
+    assert!(grid.pending_forwarded_queries.is_empty());
+}
+
+#[test]
 fn xtgettcap_answers_the_ms_capability() {
     let mut grid = create_grid_with_content("");
     let mut vte_parser = vte::Parser::new();

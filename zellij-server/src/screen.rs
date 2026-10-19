@@ -2833,9 +2833,32 @@ impl Screen {
             self.answer_color_palette_mode_query_locally(pane_id);
             return STARTUP_SENTINEL_TOKEN; // sentinel: no real forward happened
         }
-        if let crate::host_query::HostQuery::ClipboardContent { .. } = query {
-            if !self.paste_buffer_read_enabled {
-                let _ = self.resume_pane_after_forward(pane_id, Vec::new());
+        if matches!(query, crate::host_query::HostQuery::ClipboardContent { .. }
+            | crate::host_query::HostQuery::KittyClipboard { .. })
+        {
+            if !self.paste_buffer_read_enabled
+                && !matches!(query, crate::host_query::HostQuery::KittyClipboard { write: true, .. })
+            {
+                let reply = query.clipboard_error_reply(b"EPERM");
+                let _ = self.resume_pane_after_forward(pane_id, reply);
+                return STARTUP_SENTINEL_TOKEN;
+            }
+            let queued_bytes: usize = self.clipboard_forward_queue.iter().map(|pending| {
+                match &pending.query {
+                    crate::host_query::HostQuery::KittyClipboard { bytes, .. } => bytes.len(),
+                    _ => 0,
+                }
+            }).sum();
+            let incoming_bytes = match &query {
+                crate::host_query::HostQuery::KittyClipboard { bytes, .. } => bytes.len(),
+                _ => 0,
+            };
+            if self.clipboard_forward_queue.len() >= 32
+                || (self.clipboard_forward_in_flight_token.is_some()
+                    && queued_bytes.saturating_add(incoming_bytes) > zellij_utils::kitty_clipboard::MAX_TRANSFER_BYTES)
+            {
+                let reply = query.clipboard_error_reply(b"EBUSY");
+                let _ = self.resume_pane_after_forward(pane_id, reply);
                 return STARTUP_SENTINEL_TOKEN;
             }
             return self.enqueue_clipboard_forward(pane_id, query);
@@ -4149,7 +4172,9 @@ impl Screen {
                     Vec::new()
                 }
             },
-            HostQuery::ClipboardContent { .. } => query.empty_reply_bytes(),
+            HostQuery::ClipboardContent { .. }
+            | HostQuery::KittyClipboard { .. }
+            | HostQuery::KittyClipboardSupport => query.empty_reply_bytes(),
             // Should not reach here: ColorPaletteMode short-circuits in
             // `forward_host_query` before any cache-fallback path runs.
             HostQuery::ColorPaletteMode => match self.effective_host_terminal_theme_mode() {

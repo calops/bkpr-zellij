@@ -860,6 +860,7 @@ pub struct Grid {
     /// Zellij should forward to the host terminal; the host's reply is
     /// later routed back to this pane's pty.
     pub pending_forwarded_queries: Vec<crate::host_query::HostQuery>,
+    kitty_clipboard_write: zellij_utils::kitty_clipboard::WriteBuffer,
     pub pending_nested_session_messages: Vec<NestedSessionMessage>,
     ui_component_bytes: Option<Vec<u8>>,
     nested_frame_bytes: Option<Vec<u8>>,
@@ -1243,6 +1244,7 @@ impl Grid {
             pending_desktop_notifications: Vec::new(),
             notification_tracker: NotificationTracker::default(),
             pending_forwarded_queries: Vec::new(),
+            kitty_clipboard_write: Default::default(),
             pending_nested_session_messages: Vec::new(),
             ui_component_bytes: None,
             nested_frame_bytes: None,
@@ -4801,6 +4803,43 @@ impl Perform for Grid {
                     },
                 }
             },
+            b"5522" => {
+                use zellij_utils::kitty_clipboard::Packet;
+                // vte separates OSC parameters on semicolons. Preserve an empty
+                // payload and all metadata; binary contents stay base64 encoded.
+                let payload = params.join(&b';');
+                let packet = match Packet::parse(&payload) {
+                    Some(packet) => packet,
+                    None => return,
+                };
+                let terminator = crate::host_query::OscTerminator::from_bell_terminated(bell_terminated);
+                let raw = packet.with_id(packet.field(b"id"), terminator.as_bytes());
+                match packet.field(b"type") {
+                    Some(b"read") if packet.field(b"status").is_none() => {
+                        self.pending_forwarded_queries.push(
+                            crate::host_query::HostQuery::KittyClipboard { bytes: raw, write: false },
+                        );
+                    },
+                    Some(b"write") | Some(b"wdata") | Some(b"walias")
+                        if packet.field(b"status").is_none() =>
+                    {
+                        match self.kitty_clipboard_write.push(&packet, &raw) {
+                            Ok(Some(bytes)) => self.pending_forwarded_queries.push(
+                                crate::host_query::HostQuery::KittyClipboard { bytes, write: true },
+                            ),
+                            Ok(None) => {},
+                            Err(status) => {
+                                let metadata = format!("5522;type=write:status={}", status);
+                                let response = Packet::parse(metadata.as_bytes()).unwrap();
+                                self.pending_messages_to_pty.push(
+                                    response.with_id(self.kitty_clipboard_write.id(), b"\x1b\\"),
+                                );
+                            },
+                        }
+                    },
+                    _ => {},
+                }
+            },
 
             // Reset color index.
             b"104" => {
@@ -5250,6 +5289,11 @@ impl Perform for Grid {
             if first_intermediate_is_questionmark {
                 for param in params_iter.map(|param| param[0]) {
                     match param {
+                        5522 if intermediates.contains(&b'$') => {
+                            self.pending_forwarded_queries.push(
+                                crate::host_query::HostQuery::KittyClipboardSupport,
+                            );
+                        },
                         2026 => {
                             let response = "\u{1b}[?2026;2$y";
                             self.pending_messages_to_pty

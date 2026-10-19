@@ -771,8 +771,13 @@ impl SessionState {
     pub fn mark_forward_in_flight(&mut self, token: u32, client_id: ClientId) {
         self.forwards_in_flight.insert(token, client_id);
     }
-    pub fn clear_forward_in_flight(&mut self, token: u32) {
+    /// Only the client to which a token was dispatched can complete it.
+    pub fn clear_forward_in_flight(&mut self, token: u32, client_id: ClientId) -> bool {
+        if self.forwards_in_flight.get(&token) != Some(&client_id) {
+            return false;
+        }
         self.forwards_in_flight.remove(&token);
+        true
     }
     /// Client to route a host-query forward to. Prefers whichever
     /// client most recently interacted with the session; falls back
@@ -791,6 +796,21 @@ impl SessionState {
 #[cfg(test)]
 mod session_state_tests {
     use super::*;
+
+    #[test]
+    fn clipboard_reply_from_another_client_cannot_claim_or_cancel_the_owner() {
+        let mut session = SessionState::new();
+        session.clients.insert(1, None);
+        session.clients.insert(2, None);
+        session.mark_forward_in_flight(7, 1);
+        assert!(!session.clear_forward_in_flight(7, 2));
+        assert_eq!(session.forwards_in_flight.get(&7), Some(&1));
+        assert!(session.clear_forward_in_flight(7, 1));
+        assert!(!session.clear_forward_in_flight(7, 1));
+        session.mark_forward_in_flight(8, 2);
+        assert!(session.remove_client(1).is_empty());
+        assert_eq!(session.remove_client(2), vec![8]);
+    }
 
     fn with_client(id: ClientId) -> SessionState {
         let mut s = SessionState::new();

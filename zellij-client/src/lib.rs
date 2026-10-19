@@ -1491,7 +1491,7 @@ pub fn start_client(
                 query_bytes,
                 resolve_async: true,
             } => {
-                {
+                let query_bytes = {
                     let mut stdin_ansi_parser = stdin_ansi_parser.lock().unwrap();
                     if let Some((stale_token, stale_reply_bytes)) =
                         stdin_ansi_parser.take_active_clipboard_forward()
@@ -1510,8 +1510,8 @@ pub fn start_client(
                             },
                         );
                     }
-                    stdin_ansi_parser.open_clipboard_forward(token);
-                }
+                    stdin_ansi_parser.prepare_clipboard_forward(token, query_bytes)
+                };
                 let runtime = stdin_ansi_parser::forward_timeout_runtime();
                 let parser_for_timer = stdin_ansi_parser.clone();
                 let sender_for_timer = send_input_instructions.clone();
