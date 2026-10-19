@@ -212,6 +212,9 @@ pub(crate) struct Tab {
     pub senders: ThreadSenders,
     synchronize_is_active: bool,
     should_clear_display_before_rendering: bool,
+    previous_ui_overlay_geometries: Vec<(PaneId, PaneGeom)>,
+    ui_overlay_geometries: Vec<(PaneId, PaneGeom)>,
+    ui_overlay_damage: Vec<Viewport>,
     mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
     default_mode_info: ModeInfo,
     pub style: Style,
@@ -564,6 +567,26 @@ pub trait Pane {
         None
     }
     fn render_full_viewport(&mut self) {}
+    fn render_region(
+        &mut self,
+        _region: Viewport,
+        _output: &mut Output,
+        _z_index: Option<usize>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn content_region(&self, region: Viewport) -> Option<Viewport> {
+        let x = region.x.max(self.get_content_x());
+        let y = region.y.max(self.get_content_y());
+        let right = (region.x + region.cols).min(self.get_content_x() + self.get_content_columns());
+        let bottom = (region.y + region.rows).min(self.get_content_y() + self.get_content_rows());
+        (x < right && y < bottom).then(|| Viewport {
+            x: x - self.get_content_x(),
+            y: y - self.get_content_y(),
+            cols: right - x,
+            rows: bottom - y,
+        })
+    }
     fn relative_position(&self, position_on_screen: &Position) -> Position {
         position_on_screen.relative_to(self.get_content_y(), self.get_content_x())
     }
@@ -988,6 +1011,9 @@ impl Tab {
             os_api,
             senders,
             should_clear_display_before_rendering: false,
+            previous_ui_overlay_geometries: Vec::new(),
+            ui_overlay_geometries: Vec::new(),
+            ui_overlay_damage: Vec::new(),
             style,
             mode_info,
             default_mode_info,
@@ -1735,7 +1761,6 @@ impl Tab {
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
         match LayoutApplier::new(
-            &self.viewport,
             &self.senders,
             &self.sixel_image_store,
             &self.kitty_image_store,
@@ -1824,7 +1849,6 @@ impl Tab {
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
         match LayoutApplier::new(
-            &self.viewport,
             &self.senders,
             &self.sixel_image_store,
             &self.kitty_image_store,
@@ -1879,12 +1903,7 @@ impl Tab {
                 self.tiled_panes.reapply_pane_frames();
                 self.is_pending = false;
 
-                LayoutApplier::offset_viewport(
-                    self.viewport.clone(),
-                    self.display_area.clone(),
-                    &mut self.tiled_panes,
-                    self.pane_frame_style,
-                );
+                self.tiled_panes.set_pane_frames(self.pane_frame_style);
 
                 self.apply_buffered_instructions().non_fatal();
             },
@@ -1918,7 +1937,6 @@ impl Tab {
             .swap_floating_panes(&self.floating_panes, search_backwards)
         {
             LayoutApplier::new(
-                &self.viewport,
                 &self.senders,
                 &self.sixel_image_store,
                 &self.kitty_image_store,
@@ -1960,7 +1978,6 @@ impl Tab {
             .swap_tiled_panes(&self.tiled_panes, search_backwards)
         {
             let application_res = LayoutApplier::new(
-                &self.viewport,
                 &self.senders,
                 &self.sixel_image_store,
                 &self.kitty_image_store,
@@ -2289,6 +2306,7 @@ impl Tab {
         Ok(())
     }
     pub fn remove_client(&mut self, client_id: ClientId) {
+        self.clear_mouse_hover_for_client(client_id);
         self.focus_pane_id = None;
         self.mode_info
             .borrow_mut()
@@ -4866,6 +4884,82 @@ impl Tab {
         Ok(())
     }
 
+    fn render_vacated_ui_overlay_surface(
+        &mut self,
+        output: &mut Output,
+        connected_clients: &HashSet<ClientId>,
+    ) -> Result<()> {
+        self.ui_overlay_damage.clear();
+        self.ui_overlay_geometries.clear();
+        if !self.tiled_panes.fullscreen_covers_ui() {
+            self.floating_panes
+                .collect_ui_overlay_geometries(&mut self.ui_overlay_geometries);
+        }
+        let display = *self.display_area.borrow();
+        for (id, old) in &self.previous_ui_overlay_geometries {
+            let right = (old.x + old.cols.as_usize()).min(display.cols);
+            let bottom = (old.y + old.rows.as_usize()).min(display.rows);
+            let mut add_damage = |x: usize, y: usize, right: usize, bottom: usize| {
+                if x < right && y < bottom {
+                    self.ui_overlay_damage.push(Viewport {
+                        x,
+                        y,
+                        cols: right - x,
+                        rows: bottom - y,
+                    });
+                }
+            };
+            let current = self
+                .ui_overlay_geometries
+                .binary_search_by_key(id, |(id, _)| *id)
+                .ok()
+                .map(|index| &self.ui_overlay_geometries[index].1);
+            if let Some(current) = current {
+                let left = old.x.max(current.x);
+                let top = old.y.max(current.y);
+                let shared_right = right.min(current.x + current.cols.as_usize());
+                let shared_bottom = bottom.min(current.y + current.rows.as_usize());
+                if left < shared_right && top < shared_bottom {
+                    // Only the old-minus-new strips are exposed by a move or shrink.
+                    add_damage(old.x, old.y, right, top);
+                    add_damage(old.x, shared_bottom, right, bottom);
+                    add_damage(old.x, top, left, shared_bottom);
+                    add_damage(shared_right, top, right, shared_bottom);
+                    continue;
+                }
+            }
+            add_damage(old.x, old.y, right, bottom);
+        }
+        std::mem::swap(
+            &mut self.previous_ui_overlay_geometries,
+            &mut self.ui_overlay_geometries,
+        );
+        for region in &self.ui_overlay_damage {
+            // Clear unowned cells through the normal occlusion pipeline, not raw ECH:
+            // a surviving overlay must never be erased by another overlay's repair.
+            let blanks = (region.y..region.y + region.rows)
+                .map(|y| CharacterChunk::new(vec![EMPTY_TERMINAL_CHARACTER; region.cols], region.x, y))
+                .collect();
+            output.add_character_chunks_to_multiple_clients(
+                blanks,
+                connected_clients.iter().copied(),
+                None,
+            )?;
+            self.tiled_panes.render_region(*region, output)?;
+            if !self.tiled_panes.fullscreen_covers_ui() {
+                self.floating_panes.render_region(*region, output)?;
+            }
+            if !self.tiled_panes.fullscreen_is_active() {
+                for member in self.stack_list_of_member.keys() {
+                    if let Some((_is_scrollback_editor, pane)) = self.suppressed_panes.get_mut(member) {
+                        pane.render_region(*region, output, None)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn render(
         &mut self,
         output: &mut Output,
@@ -4896,6 +4990,10 @@ impl Tab {
             self.link_handler.clone(),
             floating_panes_stack,
         );
+        if client_id_override.is_none() {
+            self.render_vacated_ui_overlay_surface(output, &connected_clients)
+                .with_context(err_context)?;
+        }
 
         let current_pane_group: HashMap<ClientId, Vec<PaneId>> =
             { self.current_pane_group.borrow().clone_inner() };
@@ -5157,12 +5255,7 @@ impl Tab {
         self.senders
             .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
             .with_context(|| format!("failed to update plugins with mode info"))?;
-        LayoutApplier::offset_viewport(
-            self.viewport.clone(),
-            self.display_area.clone(),
-            &mut self.tiled_panes,
-            self.pane_frame_style,
-        );
+        self.tiled_panes.set_pane_frames(self.pane_frame_style);
         if let Some(pane_id) = fullscreen_pane_to_restore {
             if self.tiled_panes.panes_contain(&pane_id) {
                 if fullscreen_covered_ui {
@@ -5672,12 +5765,7 @@ impl Tab {
         }
         // we do this here because if there is a non-selectable pane on the edge, we consider it
         // outside the viewport (a ui-pane, eg. the status-bar and tab-bar) and need to adjust for it
-        LayoutApplier::offset_viewport(
-            self.viewport.clone(),
-            self.display_area.clone(),
-            &mut self.tiled_panes,
-            self.pane_frame_style,
-        );
+        self.tiled_panes.set_pane_frames(self.pane_frame_style);
     }
     pub fn set_mouse_selection_support(&mut self, pane_id: PaneId, selection_support: bool) {
         MouseHandler::set_mouse_selection_support(self, pane_id, selection_support);
@@ -5720,7 +5808,9 @@ impl Tab {
                 },
             };
         }
-        let closed_pane = if self.floating_panes.panes_contain(&id) {
+        let closed_pane = if self.floating_panes.is_passive_ui_overlay(id) {
+            self.extract_pane(id, true)
+        } else if self.floating_panes.panes_contain(&id) {
             if self.floating_panes.fullscreen_pane_id() == Some(id) {
                 self.floating_panes.unset_fullscreen();
             }
@@ -5808,6 +5898,23 @@ impl Tab {
                     None
                 },
             };
+        }
+        if self.floating_panes.is_passive_ui_overlay(id) {
+            // Passive pinned UI never took focus or participated in auto-layout.
+            // Its previous geometry is repaired by the next normal render.
+            let mut pane = self.floating_panes.remove_pane(id);
+            if !self.floating_panes.has_panes() {
+                self.swap_layouts.reset_floating_damage();
+                let were_shown = self.floating_panes.panes_are_shown();
+                self.floating_panes.toggle_show_panes(false);
+                if were_shown {
+                    self.notify_floating_plugins_of_visibility(false);
+                }
+            }
+            if let Some(pane) = pane.as_mut() {
+                pane.reset_logical_position();
+            }
+            return pane;
         }
         if self.floating_panes.panes_contain(&id) {
             if self.floating_panes.fullscreen_pane_id() == Some(id) {
@@ -6572,6 +6679,27 @@ impl Tab {
         MouseHandler::handle_mouse_event(self, event, client_id, passthrough_pane_id)
     }
 
+    pub(crate) fn replay_mouse_hover(
+        &mut self,
+        position: Position,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        MouseHandler::replay_mouse_hover(self, position, client_id)
+    }
+
+    pub(crate) fn can_replay_mouse_hover(&self) -> bool {
+        MouseHandler::can_replay_mouse_hover(self)
+    }
+
+    pub(crate) fn clear_mouse_hover_for_client(&mut self, client_id: ClientId) {
+        MouseHandler::clear_mouse_hover_for_client(self, client_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_plugin_mouse_hover_for_client(&self, client_id: ClientId) -> bool {
+        self.plugin_hover_pane_id.contains_key(&client_id)
+    }
+
     pub fn copy_selection(&self, client_id: ClientId) -> Result<()> {
         let selected_text = self
             .get_active_pane(client_id)
@@ -6672,8 +6800,7 @@ impl Tab {
             .send_to_plugin(PluginInstruction::Update(plugin_updates))
             .with_context(|| format!("failed to set visibility of tab to {visible}"))?;
         if !visible {
-            self.mouse_hover_pane_id.clear();
-            self.plugin_hover_pane_id.clear();
+            self.clear_mouse_hover_state();
         }
         Ok(())
     }
@@ -7319,6 +7446,11 @@ impl Tab {
         client_id: Option<ClientId>,
     ) -> Result<()> {
         let err_context = || format!("failed to add floating pane");
+        let pane_is_selectable = pane.selectable();
+        let is_passive_ui_overlay = !pane_is_selectable
+            && pane.borderless()
+            && pane.position_and_size().is_pinned
+            && matches!(pane_id, PaneId::Plugin(_));
         if self.floating_panes.fullscreen_is_active() {
             self.floating_panes.unset_fullscreen();
         }
@@ -7335,7 +7467,7 @@ impl Tab {
             pane.set_geom(new_pane_geom);
             let is_borderless = floating_pane_coordinates
                 .and_then(|c| c.borderless)
-                .unwrap_or(false);
+                .unwrap_or(is_passive_ui_overlay);
             if is_borderless {
                 pane.set_content_offset(Offset::frame(0));
                 pane.set_borderless(true);
@@ -7346,7 +7478,7 @@ impl Tab {
             resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
                 .with_context(err_context)?;
             self.floating_panes.add_pane(pane_id, pane);
-            if should_focus_new_pane {
+            if should_focus_new_pane && pane_is_selectable {
                 if let Some(client_id) = client_id {
                     self.floating_panes.focus_pane(pane_id, client_id);
                 } else {
@@ -7354,7 +7486,7 @@ impl Tab {
                 }
             }
         }
-        if self.auto_layout && !self.swap_layouts.is_floating_damaged() {
+        if !is_passive_ui_overlay && self.auto_layout && !self.swap_layouts.is_floating_damaged() {
             // only do this if we're already in this layout, otherwise it might be
             // confusing and not what the user intends
             self.swap_layouts.set_is_floating_damaged(); // we do this so that we won't skip to the
@@ -7673,10 +7805,15 @@ impl Tab {
         self.word_separators = word_separators;
     }
     pub fn clear_mouse_hover_state(&mut self) {
-        self.mouse_hover_pane_id.clear();
-        self.plugin_hover_pane_id.clear();
+        while let Some(client_id) = self.plugin_hover_pane_id.keys().next().copied() {
+            self.clear_mouse_hover_for_client(client_id);
+        }
+        while let Some(client_id) = self.mouse_hover_pane_id.keys().next().copied() {
+            self.clear_mouse_hover_for_client(client_id);
+        }
         self.mouse_last_pane_id.clear();
         self.mouse_help_text_visible.clear();
+        self.last_mouse_activity_time.clear();
     }
     pub fn update_web_sharing(&mut self, web_sharing: WebSharing) {
         let old_value = self.web_sharing;
@@ -7789,9 +7926,12 @@ impl Tab {
                 }
             }
         }
+        let was_passive_overlay = self.floating_panes.is_passive_ui_overlay(*pane_id);
         self.floating_panes
             .change_pane_coordinates(*pane_id, floating_pane_coordinates)?;
-        self.set_force_render();
+        if !was_passive_overlay || !self.floating_panes.is_passive_ui_overlay(*pane_id) {
+            self.set_force_render();
+        }
         self.swap_layouts.set_is_floating_damaged();
         Ok(())
     }

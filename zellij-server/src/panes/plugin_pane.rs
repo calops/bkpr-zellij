@@ -24,7 +24,7 @@ use zellij_utils::data::PaneContents;
 use zellij_utils::data::{
     BareKey, KeyWithModifier, PermissionStatus, PermissionType, PluginPermission,
 };
-use zellij_utils::pane_size::{Offset, SizeInPixels};
+use zellij_utils::pane_size::{Offset, SizeInPixels, Viewport};
 use zellij_utils::position::Position;
 use zellij_utils::{
     channels::SenderWithContext,
@@ -377,6 +377,29 @@ impl Pane for PluginPane {
         for grid in self.grids.values_mut() {
             grid.render_full_viewport();
         }
+    }
+    fn render_region(
+        &mut self,
+        region: Viewport,
+        output: &mut crate::output::Output,
+        z_index: Option<usize>,
+    ) -> Result<()> {
+        if let Some(content) = self.content_region(region) {
+            for (client_id, grid) in &mut self.grids {
+                grid.output_buffer.update_region(content);
+                self.should_render.insert(*client_id, true);
+            }
+        }
+        if !self.borderless {
+            for (client_id, frame) in &self.frame {
+                output.add_character_chunks_to_client(
+                    *client_id,
+                    frame.render_region(region)?,
+                    z_index,
+                )?;
+            }
+        }
+        Ok(())
     }
     fn selectable(&self) -> bool {
         self.selectable

@@ -1272,12 +1272,31 @@ impl PaneFrame {
         false
     }
     pub fn render(&self) -> Result<(Vec<CharacterChunk>, Option<String>)> {
+        self.render_inner(None)
+    }
+    pub fn render_region(&self, region: Viewport) -> Result<Vec<CharacterChunk>> {
+        let (mut chunks, _) = self.render_inner(Some(region))?;
+        chunks.retain_mut(|chunk| {
+            if chunk.y < region.y || chunk.y >= region.y + region.rows {
+                return false;
+            }
+            chunk.retain_columns(region.x, region.x + region.cols);
+            !chunk.terminal_characters.is_empty()
+        });
+        Ok(chunks)
+    }
+    fn render_inner(&self, region: Option<Viewport>) -> Result<(Vec<CharacterChunk>, Option<String>)> {
         let err_context = || "failed to render pane frame";
         let mut character_chunks = vec![];
         if self.omit_title {
             return Ok((character_chunks, None));
         }
         if let Some(entry) = &self.stack_list_entry {
+            if region.is_some_and(|region| {
+                self.geom.y < region.y || self.geom.y >= region.y + region.rows
+            }) {
+                return Ok((character_chunks, None));
+            }
             character_chunks.push(CharacterChunk::new(
                 self.render_stack_list_entry(entry),
                 self.geom.x,
@@ -1290,6 +1309,14 @@ impl PaneFrame {
             // if this is a stacked pane with pane frames off (and it doesn't necessarily have only
             // 1 row because it could also be a flexible stacked pane)
             // in this case we should always draw the pane title line, and only the title line
+            let title_y = if self.pane_is_stacked_under && !self.should_draw_pane_frames {
+                self.geom.y.saturating_sub(self.content_offset.bottom)
+            } else {
+                self.geom.y
+            };
+            if region.is_some_and(|region| title_y < region.y || title_y >= region.y + region.rows) {
+                return Ok((character_chunks, None));
+            }
             let mut one_line_title = self.render_one_line_title().with_context(err_context)?;
 
             if self.content_offset.right != 0 && !self.should_draw_pane_frames {
@@ -1312,7 +1339,15 @@ impl PaneFrame {
                 y_coords_of_title,
             ));
         } else {
-            for row in 0..self.geom.rows {
+            let first_row = region
+                .map(|region| region.y.saturating_sub(self.geom.y))
+                .unwrap_or(0)
+                .min(self.geom.rows);
+            let last_row = region
+                .map(|region| (region.y + region.rows).saturating_sub(self.geom.y))
+                .unwrap_or(self.geom.rows)
+                .min(self.geom.rows);
+            for row in first_row..last_row {
                 if row == 0 {
                     // top row
                     let title = self.render_title().with_context(err_context)?;
@@ -1361,7 +1396,15 @@ impl PaneFrame {
                         ));
                     } else {
                         let mut bottom_row = vec![];
-                        for col in 0..self.geom.cols {
+                        let first_col = region
+                            .map(|region| region.x.saturating_sub(self.geom.x))
+                            .unwrap_or(0)
+                            .min(self.geom.cols);
+                        let last_col = region
+                            .map(|region| (region.x + region.cols).saturating_sub(self.geom.x))
+                            .unwrap_or(self.geom.cols)
+                            .min(self.geom.cols);
+                        for col in first_col..last_col {
                             let boundary = if col == 0 {
                                 // bottom left corner
                                 self.get_corner(boundary_type::BOTTOM_LEFT)
@@ -1375,7 +1418,7 @@ impl PaneFrame {
                             let mut boundary_character = foreground_color(boundary, self.color);
                             bottom_row.append(&mut boundary_character);
                         }
-                        let x = self.geom.x;
+                        let x = self.geom.x + first_col;
                         let y = self.geom.y + row;
                         character_chunks.push(CharacterChunk::new(bottom_row, x, y));
                     }

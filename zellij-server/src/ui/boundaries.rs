@@ -454,6 +454,14 @@ impl Boundaries {
             boundary_characters: HashMap::new(),
         }
     }
+    pub fn invalidate_region(&mut self, region: Viewport) {
+        self.boundary_characters.retain(|coordinates, _| {
+            coordinates.x < region.x
+                || coordinates.x >= region.x + region.cols
+                || coordinates.y < region.y
+                || coordinates.y >= region.y + region.rows
+        });
+    }
     pub fn add_rect(
         &mut self,
         rect: &dyn Pane,
@@ -469,8 +477,8 @@ impl Boundaries {
         if !self.is_fully_inside_screen(rect) {
             return;
         }
-        if rect.x() > self.viewport.x {
-            // left boundary
+        if rect.x() > 0 {
+            // Include the shared resize boundary reserved by UI left of the viewport.
             let boundary_x_coords = rect.x() - 1;
             let first_row_coordinates =
                 self.rect_right_boundary_row_start(rect, pane_is_stacked_under, content_offset);
@@ -510,7 +518,9 @@ impl Boundaries {
                 let coordinates = Coordinates::new(col, boundary_y_coords);
                 let symbol_to_add = if col == first_col_coordinates && col != self.viewport.x {
                     BoundarySymbol::new(boundary_type::TOP_LEFT).color(color)
-                } else if col == last_col_coordinates - 1 && col != self.viewport.cols - 1 {
+                } else if col == last_col_coordinates - 1
+                    && col != self.viewport.x + self.viewport.cols - 1
+                {
                     BoundarySymbol::new(boundary_type::TOP_RIGHT).color(color)
                 } else {
                     BoundarySymbol::new(boundary_type::HORIZONTAL).color(color)
@@ -564,7 +574,9 @@ impl Boundaries {
                 let coordinates = Coordinates::new(col, boundary_y_coords);
                 let symbol_to_add = if col == first_col_coordinates && col != self.viewport.x {
                     BoundarySymbol::new(boundary_type::BOTTOM_LEFT).color(color)
-                } else if col == last_col_coordinates - 1 && col != self.viewport.cols - 1 {
+                } else if col == last_col_coordinates - 1
+                    && col != self.viewport.x + self.viewport.cols - 1
+                {
                     BoundarySymbol::new(boundary_type::BOTTOM_RIGHT).color(color)
                 } else {
                     BoundarySymbol::new(boundary_type::HORIZONTAL).color(color)
@@ -602,7 +614,7 @@ impl Boundaries {
         Ok(character_chunks)
     }
     fn rect_right_boundary_is_before_screen_edge(&self, rect: &dyn Pane) -> bool {
-        rect.x() + rect.cols() < self.viewport.cols
+        rect.x() + rect.cols() < self.viewport.x + self.viewport.cols
     }
     fn rect_bottom_boundary_is_before_screen_edge(&self, rect: &dyn Pane) -> bool {
         rect.y() + rect.rows() < self.viewport.y + self.viewport.rows
@@ -637,8 +649,8 @@ impl Boundaries {
         rect.y() + rect.rows()
     }
     fn rect_bottom_boundary_col_start(&self, rect: &dyn Pane) -> usize {
-        if rect.x() == 0 {
-            0
+        if rect.x() == self.viewport.x {
+            self.viewport.x
         } else {
             rect.x() - 1
         }

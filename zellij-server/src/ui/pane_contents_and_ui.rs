@@ -492,9 +492,10 @@ impl<'a> PaneContentsAndUi<'a> {
                 },
                 _ => Some((self.style.colors.frame_highlight.base, 3)),
             }
-        } else if self
-            .mouse_is_hovering_over_pane_for_clients
-            .contains(&client_id)
+        } else if self.should_draw_pane_frames
+            && self
+                .mouse_is_hovering_over_pane_for_clients
+                .contains(&client_id)
         {
             Some((self.style.colors.frame_highlight.base, 1))
         } else {

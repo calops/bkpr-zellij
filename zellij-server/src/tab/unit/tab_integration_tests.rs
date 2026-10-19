@@ -1412,6 +1412,666 @@ fn passive_popup_outside_press_uses_current_bounds_and_visibility() {
 }
 
 #[test]
+fn viewport_geometry_regressions_separator_does_not_highlight_on_hover() {
+    use crate::ui::boundaries::{Boundaries, Coordinates};
+    use crate::ui::pane_contents_and_ui::PaneContentsAndUi;
+    use zellij_utils::data::{PaletteColor, Style};
+
+    let size = Size {
+        cols: 200,
+        rows: 30,
+    };
+    let layout = r#"
+        layout {
+            pane split_direction="vertical" {
+                pane size="20%" borderless=true {
+                    plugin location="zellij:strider"
+                }
+                pane
+                pane focus=true
+            }
+        }
+    "#;
+    let (tiled_layout, floating_layout) =
+        Layout::from_kdl(layout, Some("separator-hover.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(
+        RunPluginOrAlias::from_url("zellij:strider", &None, None, None).unwrap(),
+        vec![1],
+    );
+    let mut tab = create_new_tab_with_swap_layouts(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            tiled_layout,
+            floating_layout,
+            vec![(1, None), (2, None)],
+            vec![],
+            plugin_ids,
+        )),
+        false,
+        false,
+    );
+    tab.set_pane_selectable(PaneId::Plugin(1), false);
+    let viewport = *tab.viewport.borrow();
+    let mut style = Style::default();
+    style.colors.frame_selected.base = PaletteColor::Rgb((20, 30, 40));
+    style.colors.frame_highlight.base = PaletteColor::Rgb((70, 80, 90));
+    let mut separator = |hovered, focused, mode| {
+        let active = HashMap::from([(1, PaneId::Terminal(if focused { 1 } else { 2 }))]);
+        let hover = if hovered {
+            HashMap::from([(1, PaneId::Terminal(1))])
+        } else {
+            HashMap::new()
+        };
+        let mut output = Output::default();
+        let mut boundaries = Boundaries::new(viewport);
+        let pane = tab.tiled_panes.get_pane_mut(PaneId::Terminal(1)).unwrap();
+        let ui = PaneContentsAndUi::new(
+            pane,
+            &mut output,
+            style,
+            &active,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &hover,
+            HashMap::new(),
+            false,
+            false,
+            false,
+            false,
+            Default::default(),
+        );
+        ui.render_pane_boundaries(1, mode, &mut boundaries, false, false, false);
+        boundaries.boundary_characters[&Coordinates::new(viewport.x - 1, 5)]
+            .as_terminal_character()
+            .unwrap()
+    };
+    let idle = separator(false, false, InputMode::Normal);
+    assert_eq!(separator(true, false, InputMode::Normal), idle);
+    let focused = separator(false, true, InputMode::Normal);
+    assert_eq!(separator(true, true, InputMode::Normal), focused);
+    assert_ne!(separator(true, true, InputMode::Resize), focused);
+}
+
+#[test]
+fn viewport_geometry_regressions_follow_borderless_sidebar_pane_and_display_resizes() {
+    let size = Size {
+        cols: 200,
+        rows: 30,
+    };
+    let layout = r#"
+        layout {
+            pane split_direction="vertical" {
+                pane size="20%" borderless=true {
+                    plugin location="zellij:strider"
+                }
+                pane focus=true
+            }
+        }
+    "#;
+    let (tiled_layout, floating_layout) =
+        Layout::from_kdl(layout, Some("viewport.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(
+        RunPluginOrAlias::from_url("zellij:strider", &None, None, None).unwrap(),
+        vec![1],
+    );
+    let mut tab = create_new_tab_with_swap_layouts(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            tiled_layout,
+            floating_layout,
+            vec![(1, None)],
+            vec![],
+            plugin_ids,
+        )),
+        false,
+        false,
+    );
+    tab.set_pane_selectable(PaneId::Plugin(1), false);
+
+    let assert_geometry = |tab: &Tab, size: Size| {
+        let sidebar = tab.get_pane_info(PaneId::Plugin(1)).unwrap();
+        let terminal = tab.get_pane_info(PaneId::Terminal(1)).unwrap();
+        let viewport = tab.viewport.borrow();
+        let sidebar_right = sidebar.pane_x + sidebar.pane_columns;
+        assert!(!sidebar.is_selectable);
+        assert_eq!((sidebar.pane_x, sidebar.pane_y), (0, 0));
+        assert_eq!(sidebar.pane_rows, size.rows);
+        assert_eq!((sidebar.pane_content_x, sidebar.pane_content_y), (0, 0));
+        assert_eq!(sidebar.pane_content_columns + 1, sidebar.pane_columns);
+        assert_eq!(sidebar.pane_content_rows, sidebar.pane_rows);
+        assert_eq!((viewport.x, viewport.y), (sidebar_right, 0));
+        assert_eq!(
+            (viewport.cols, viewport.rows),
+            (size.cols - sidebar_right, size.rows)
+        );
+        assert_eq!(viewport.x + viewport.cols, size.cols);
+        assert_eq!(
+            (terminal.pane_x, terminal.pane_y),
+            (viewport.x, viewport.y)
+        );
+        assert_eq!(
+            (terminal.pane_columns, terminal.pane_rows),
+            (viewport.cols, viewport.rows)
+        );
+        // With frames disabled, the application fills the viewport without an extra separator cell.
+        assert_eq!(
+            (terminal.pane_content_x, terminal.pane_content_y),
+            (terminal.pane_x, terminal.pane_y)
+        );
+        assert_eq!(
+            (terminal.pane_content_columns, terminal.pane_content_rows),
+            (terminal.pane_columns, terminal.pane_rows)
+        );
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+        sidebar.pane_columns
+    };
+    let mut previous_width = assert_geometry(&tab, size);
+    for resize in [Resize::Increase, Resize::Decrease] {
+        for _ in 0..3 {
+            tab.resize_pane_with_id(
+                ResizeStrategy::new(resize, Some(Direction::Right)),
+                PaneId::Plugin(1),
+            )
+            .unwrap();
+            let width = assert_geometry(&tab, size);
+            match resize {
+                Resize::Increase => assert!(width > previous_width),
+                Resize::Decrease => assert!(width < previous_width),
+            }
+            previous_width = width;
+        }
+    }
+    for size in [
+        Size {
+            cols: 250,
+            rows: 35,
+        },
+        Size {
+            cols: 150,
+            rows: 25,
+        },
+    ] {
+        tab.resize_whole_tab(size).unwrap();
+        assert_geometry(&tab, size);
+    }
+}
+
+#[test]
+fn viewport_geometry_regressions_plain_mouse_drag_borderless_sidebar_gutter() {
+    let size = Size {
+        cols: 200,
+        rows: 30,
+    };
+    let layout = r#"
+        layout {
+            pane split_direction="vertical" {
+                pane size="20%" borderless=true {
+                    plugin location="zellij:strider"
+                }
+                pane focus=true
+            }
+        }
+    "#;
+    let (tiled_layout, floating_layout) =
+        Layout::from_kdl(layout, Some("viewport-mouse.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(
+        RunPluginOrAlias::from_url("zellij:strider", &None, None, None).unwrap(),
+        vec![1],
+    );
+    let mut tab = create_new_tab_with_swap_layouts(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            tiled_layout,
+            floating_layout,
+            vec![(1, None)],
+            vec![],
+            plugin_ids,
+        )),
+        false,
+        false,
+    );
+    tab.set_pane_frames(PaneFrameStyle::None);
+    tab.set_pane_selectable(PaneId::Plugin(1), false);
+
+    let assert_geometry = |tab: &Tab| {
+        let sidebar = tab.get_pane_info(PaneId::Plugin(1)).unwrap();
+        let terminal = tab.get_pane_info(PaneId::Terminal(1)).unwrap();
+        let viewport = tab.viewport.borrow();
+        let sidebar_right = sidebar.pane_x + sidebar.pane_columns;
+        assert!(!sidebar.is_selectable);
+        assert_eq!((sidebar.pane_x, sidebar.pane_y), (0, 0));
+        assert_eq!(sidebar.pane_rows, size.rows);
+        assert_eq!((sidebar.pane_content_x, sidebar.pane_content_y), (0, 0));
+        assert_eq!(sidebar.pane_content_columns + 1, sidebar.pane_columns);
+        assert_eq!(sidebar.pane_content_rows, sidebar.pane_rows);
+        assert_eq!((viewport.x, viewport.y), (sidebar_right, 0));
+        assert_eq!(
+            (viewport.cols, viewport.rows),
+            (size.cols - sidebar_right, size.rows)
+        );
+        assert_eq!(viewport.x + viewport.cols, size.cols);
+        assert_eq!(
+            (terminal.pane_x, terminal.pane_y),
+            (viewport.x, viewport.y)
+        );
+        assert_eq!(
+            (terminal.pane_columns, terminal.pane_rows),
+            (viewport.cols, viewport.rows)
+        );
+        assert_eq!(
+            (terminal.pane_content_x, terminal.pane_content_y),
+            (terminal.pane_x, terminal.pane_y)
+        );
+        assert_eq!(
+            (terminal.pane_content_columns, terminal.pane_content_rows),
+            (terminal.pane_columns, terminal.pane_rows)
+        );
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+        let gutter = Position::new(5, (sidebar_right - 1).try_into().unwrap());
+        let pane = tab.tiled_panes.get_pane(PaneId::Plugin(1)).unwrap();
+        assert!(pane.position_is_on_frame(&gutter));
+        let content = Position::new(5, (sidebar_right - 2).try_into().unwrap());
+        assert!(!pane.position_is_on_frame(&content));
+        sidebar.pane_columns
+    };
+    let initial_width = assert_geometry(&tab);
+    // Each drag starts on the current gutter, without first clicking a plugin row.
+    // Cross the old startup viewport edge in both directions, then repeat wider.
+    for delta in [20isize, -30, 70, -20] {
+        let before = assert_geometry(&tab);
+        let gutter = Position::new(5, (before - 1).try_into().unwrap());
+        let target_column = (before as isize - 1 + delta) as usize;
+        let target = Position::new(5, target_column.try_into().unwrap());
+        tab.handle_mouse_event(&MouseEvent::new_left_press_event(gutter), 1)
+            .unwrap();
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+        tab.handle_mouse_event(&MouseEvent::new_left_motion_event(target), 1)
+            .unwrap();
+        let after_motion = assert_geometry(&tab);
+        let expected_width = (before as isize + delta) as usize;
+        assert!(
+            after_motion.abs_diff(expected_width) <= 2,
+            "sidebar width {after_motion} should follow pointer to {expected_width}"
+        );
+        if delta > 0 {
+            assert!(after_motion > before);
+        } else {
+            assert!(after_motion < before);
+        }
+        tab.handle_mouse_event(&MouseEvent::new_left_release_event(target), 1)
+            .unwrap();
+        assert_eq!(assert_geometry(&tab), after_motion);
+    }
+    assert!(assert_geometry(&tab) > initial_width);
+}
+
+#[test]
+fn pinned_borderless_plugin_overlay_uses_display_coordinates() {
+    use zellij_utils::data::FloatingPaneCoordinates;
+    use zellij_utils::pane_size::Viewport;
+
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut tab, _plugin_receiver) =
+        create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    for (pane_id, selectable, pinned, borderless) in [
+        (PaneId::Plugin(2), false, true, true),
+        (PaneId::Plugin(3), true, true, true),
+        (PaneId::Plugin(4), false, false, true),
+        (PaneId::Plugin(5), false, true, false),
+        (PaneId::Terminal(2), false, true, true),
+    ] {
+        tab.new_floating_pane(pane_id, None, None, false, false, None, None)
+            .unwrap();
+        tab.set_pane_selectable(pane_id, selectable);
+        *tab.viewport.borrow_mut() = Viewport {
+            x: 38,
+            y: 2,
+            cols: 83,
+            rows: 18,
+        };
+        let coordinates = FloatingPaneCoordinates {
+            pinned: Some(pinned),
+            borderless: Some(borderless),
+            ..FloatingPaneCoordinates::default()
+                .with_x_fixed(37)
+                .with_y_fixed(1)
+                .with_width_fixed(30)
+                .with_height_fixed(8)
+        };
+        tab.floating_panes
+            .change_pane_coordinates(pane_id, coordinates)
+            .unwrap();
+        let info = tab.get_pane_info(pane_id).unwrap();
+        let overlay = matches!(pane_id, PaneId::Plugin(_)) && pinned && borderless;
+        assert_eq!(
+            (info.pane_x, info.pane_y),
+            if overlay { (37, 1) } else { (38, 2) }
+        );
+        assert_eq!(
+            tab.floating_panes
+                .get_pane(pane_id)
+                .unwrap()
+                .position_and_size()
+                .is_pinned,
+            pinned
+        );
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+        if overlay {
+            tab.floating_panes.resize(Size {
+                cols: 100,
+                rows: 18,
+            });
+            let resized = tab.get_pane_info(pane_id).unwrap();
+            assert_eq!((resized.pane_x, resized.pane_y), (37, 1));
+            tab.floating_panes
+                .change_pane_coordinates(
+                    pane_id,
+                    FloatingPaneCoordinates {
+                        pinned: Some(false),
+                        ..FloatingPaneCoordinates::default()
+                            .with_x_fixed(37)
+                            .with_y_fixed(1)
+                    },
+                )
+                .unwrap();
+            let unpinned = tab.get_pane_info(pane_id).unwrap();
+            assert_eq!((unpinned.pane_x, unpinned.pane_y), (38, 2));
+            assert!(
+                !tab.floating_panes
+                    .get_pane(pane_id)
+                    .unwrap()
+                    .position_and_size()
+                    .is_pinned
+            );
+        }
+    }
+}
+
+#[test]
+fn pinned_nonselectable_plugin_overlay_clears_vacated_separator() {
+    use zellij_utils::data::FloatingPaneCoordinates;
+    use zellij_utils::pane_size::{Dimension, Offset, Viewport};
+
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut tab, _plugin_receiver) =
+        create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    let app = tab.tiled_panes.get_pane_mut(PaneId::Terminal(1)).unwrap();
+    let mut app_geom = app.position_and_size();
+    app_geom.x = 38;
+    app_geom.cols = Dimension::fixed(size.cols - 38);
+    app.set_geom(app_geom);
+    app.set_content_offset(Offset::default());
+    tab.new_floating_pane(PaneId::Plugin(2), None, None, false, false, None, None)
+        .unwrap();
+    tab.set_pane_selectable(PaneId::Plugin(2), false);
+    *tab.viewport.borrow_mut() = Viewport {
+        x: 38,
+        y: 0,
+        cols: 83,
+        rows: 20,
+    };
+    let coordinates = |y, height| FloatingPaneCoordinates {
+        pinned: Some(true),
+        borderless: Some(true),
+        ..FloatingPaneCoordinates::default()
+            .with_x_fixed(37)
+            .with_y_fixed(y)
+            .with_width_fixed(30)
+            .with_height_fixed(height)
+    };
+    let paint = |rows| {
+        let mut bytes = String::from("\x1b[2J");
+        for row in 1..=rows {
+            bytes.push_str(&format!("\x1b[{row};1HX"));
+        }
+        bytes.into_bytes()
+    };
+    let mut tape = String::new();
+    let snapshot = |tab: &mut Tab, tape: &mut String| {
+        let mut output = Output::default();
+        tab.render(&mut output, None).unwrap();
+        tape.push_str(&output.serialize().unwrap().remove(&1).unwrap());
+        take_snapshot(tape, size.rows, size.cols, Palette::default())
+    };
+    let baseline = snapshot(&mut tab, &mut tape);
+    tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates(0, 18))
+        .unwrap();
+    tab.handle_plugin_bytes(2, 1, paint(18)).unwrap();
+    assert_eq!(snapshot(&mut tab, &mut tape).matches('X').count(), 18);
+    tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates(4, 3))
+        .unwrap();
+    tab.handle_plugin_bytes(2, 1, paint(3)).unwrap();
+    assert_eq!(snapshot(&mut tab, &mut tape).matches('X').count(), 3);
+    tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates(8, 3))
+        .unwrap();
+    assert_eq!(snapshot(&mut tab, &mut tape).matches('X').count(), 3);
+    tab.suppress_pane(PaneId::Plugin(2), Some(1));
+    assert_eq!(snapshot(&mut tab, &mut tape), baseline);
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+}
+
+fn passive_popup_render(tab: &mut Tab) -> HashMap<ClientId, String> {
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    output.serialize().unwrap()
+}
+
+fn passive_popup_coordinates(x: usize, y: usize, cols: usize, rows: usize) -> FloatingPaneCoordinates {
+    FloatingPaneCoordinates {
+        pinned: Some(true),
+        borderless: Some(true),
+        ..FloatingPaneCoordinates::default()
+            .with_x_fixed(x)
+            .with_y_fixed(y)
+            .with_width_fixed(cols)
+            .with_height_fixed(rows)
+    }
+}
+
+#[test]
+fn passive_popup_move_shrink_and_hide_restore_content_with_bounded_output() {
+    let mut hide_sizes = vec![];
+    for size in [Size { cols: 120, rows: 40 }, Size { cols: 300, rows: 90 }] {
+        let (mut tab, _receiver) = create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+        tab.set_pane_frames(PaneFrameStyle::None);
+        let mut app_bytes = String::from("\x1b[48;5;25m");
+        for row in 1..size.rows {
+            app_bytes.push_str(&format!("\x1b[{row};1H{}", "a界bc".repeat(size.cols / 5)));
+        }
+        app_bytes.push_str("\x1b[3;4H\x1b[?25h");
+        tab.handle_pty_bytes(1, app_bytes.into_bytes()).unwrap();
+        let mut tape = passive_popup_render(&mut tab).remove(&1).unwrap();
+        tab.new_floating_pane(PaneId::Plugin(2), None, None, false, false, None, None)
+            .unwrap();
+        tab.set_pane_selectable(PaneId::Plugin(2), false);
+        // The left edge cuts through a wide character in the underlying terminal.
+        for coordinates in [
+            passive_popup_coordinates(12, 6, 24, 6),
+            passive_popup_coordinates(17, 9, 24, 6),
+            passive_popup_coordinates(17, 9, 11, 3),
+        ] {
+            tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates).unwrap();
+            tab.handle_plugin_bytes(2, 1, b"\x1b[2JPOPUP".to_vec()).unwrap();
+            tape.push_str(&passive_popup_render(&mut tab).remove(&1).unwrap());
+            let repaired = take_snapshot(&tape, size.rows, size.cols, Palette::default());
+            tab.set_force_render();
+            let reference = passive_popup_render(&mut tab).remove(&1).unwrap();
+            assert_eq!(repaired, take_snapshot(&reference, size.rows, size.cols, Palette::default()));
+        }
+        // Ordinary pending PTY updates outside the damage must not be consumed or clipped.
+        tab.handle_pty_bytes(1, b"\x1b[30;50HPENDING\x1b[3;4H".to_vec()).unwrap();
+        tab.suppress_pane(PaneId::Plugin(2), Some(1));
+        tape.push_str(&passive_popup_render(&mut tab).remove(&1).unwrap());
+        let repaired = take_snapshot(&tape, size.rows, size.cols, Palette::default());
+        assert!(repaired.contains("PENDING"));
+        tab.set_force_render();
+        let reference = passive_popup_render(&mut tab).remove(&1).unwrap();
+        assert_eq!(repaired, take_snapshot(&reference, size.rows, size.cols, Palette::default()));
+        let (_, cursor) = take_snapshot_and_cursor_position(
+            &tape, size.rows, size.cols, Palette::default());
+        assert_eq!(cursor, Some((3, 2)));
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+
+        // Exercise the warm show/hide route, including the last floating pane.
+        tab.unsuppress_or_expand_pane(PaneId::Plugin(2), true);
+        tab.change_floating_pane_coordinates(
+            &PaneId::Plugin(2), passive_popup_coordinates(12, 6, 24, 6)).unwrap();
+        tab.handle_plugin_bytes(2, 1, b"\x1b[2JWARM".to_vec()).unwrap();
+        tape.push_str(&passive_popup_render(&mut tab).remove(&1).unwrap());
+        tab.suppress_pane(PaneId::Plugin(2), Some(1));
+        let hidden = passive_popup_render(&mut tab).remove(&1).unwrap();
+        assert!(!hidden.contains("\x1b[2J"), "a passive hide must not clear the display");
+        assert!(hidden.len() < 4000, "{} bytes for {}x{}", hidden.len(), size.cols, size.rows);
+        hide_sizes.push(hidden.len());
+        tape.push_str(&hidden);
+        assert_eq!(repaired, take_snapshot(&tape, size.rows, size.cols, Palette::default()));
+    }
+    assert!(
+        hide_sizes[1] <= hide_sizes[0] + 128,
+        "fixed popup damage must not grow with the window: {hide_sizes:?}"
+    );
+}
+
+#[test]
+fn passive_popup_repairs_overlapping_cards_native_frames_and_client_plugin_grids() {
+    let size = Size { cols: 160, rows: 50 };
+    let (mut tab, _receiver) = create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    tab.new_pane(
+        PaneId::Plugin(5), None, None, false, true, NewPanePlacement::default(), Some(1), None,
+    ).unwrap();
+    tab.add_client(2, None).unwrap();
+    for (client, text) in [(1, "CLIENT-ONE"), (2, "CLIENT-TWO")] {
+        tab.handle_plugin_bytes(5, client, format!("\x1b[2J{text}\x1b[8;1H{text}").into_bytes()).unwrap();
+    }
+    let plugin = tab.get_pane_info(PaneId::Plugin(5)).unwrap();
+    let native_x = plugin.pane_x.saturating_sub(5);
+    tab.new_floating_pane(
+        PaneId::Terminal(8), None, None, false, false,
+        Some(FloatingPaneCoordinates {
+            pinned: Some(true),
+            borderless: Some(false),
+            ..FloatingPaneCoordinates::default()
+                .with_x_fixed(native_x)
+                .with_y_fixed(8)
+                .with_width_fixed(45)
+                .with_height_fixed(14)
+        }),
+        None,
+    ).unwrap();
+    tab.handle_pty_bytes(8, b"NATIVE FLOAT\x1b[4;3Hpreserved".to_vec()).unwrap();
+    let active = tab.get_active_pane_id(1);
+    let mut tapes = passive_popup_render(&mut tab);
+    for (id, coordinates, text) in [
+        (6, passive_popup_coordinates(native_x.saturating_sub(2), 7, 28, 10), "LOWER"),
+        (7, passive_popup_coordinates(native_x + 8, 10, 20, 6), "UPPER"),
+    ] {
+        tab.new_floating_pane(
+            PaneId::Plugin(id), None, None, false, false, Some(coordinates.clone()), None,
+        ).unwrap();
+        tab.set_pane_selectable(PaneId::Plugin(id), false);
+        tab.change_floating_pane_coordinates(&PaneId::Plugin(id), coordinates).unwrap();
+        for client in [1, 2] {
+            tab.handle_plugin_bytes(id, client, format!("\x1b[2J{text}").into_bytes()).unwrap();
+        }
+        for (client, bytes) in passive_popup_render(&mut tab) {
+            tapes.entry(client).or_default().push_str(&bytes);
+        }
+    }
+    for id in [6, 7] {
+        if id == 6 {
+            tab.suppress_pane(PaneId::Plugin(id), Some(1));
+        } else {
+            tab.close_pane(PaneId::Plugin(id), false, None);
+        }
+        let repaired = passive_popup_render(&mut tab);
+        for (client, bytes) in repaired {
+            assert!(bytes.len() < 6000, "bounded overlap repair produced {} bytes", bytes.len());
+            tapes.entry(client).or_default().push_str(&bytes);
+        }
+        tab.set_force_render();
+        let reference = passive_popup_render(&mut tab);
+        for client in [1, 2] {
+            let actual = take_snapshot(&tapes[&client], size.rows, size.cols, Palette::default());
+            assert_eq!(actual,
+                take_snapshot(&reference[&client], size.rows, size.cols, Palette::default()));
+            assert!(actual.contains(if client == 1 { "CLIENT-ONE" } else { "CLIENT-TWO" }));
+            if id == 6 {
+                assert!(actual.contains("UPPER"), "removing a lower card must preserve the top card");
+            }
+        }
+        assert_eq!(tab.get_active_pane_id(1), active);
+        assert!(tab.has_pane_with_pid(&PaneId::Terminal(8)));
+    }
+}
+
+
+#[test]
+fn passive_popup_warm_unsuppress_preserves_native_float_focus_and_cursor() {
+    let size = Size { cols: 160, rows: 50 };
+    let (mut tab, _receiver) = create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.new_floating_pane(
+        PaneId::Terminal(8), None, None, false, true,
+        Some(FloatingPaneCoordinates::default()
+            .with_x_fixed(30).with_y_fixed(6)
+            .with_width_fixed(45).with_height_fixed(14)),
+        None,
+    ).unwrap();
+    tab.handle_pty_bytes(8, b"\x1b[4;3HNATIVE\x1b[4;3H\x1b[?25h".to_vec()).unwrap();
+    passive_popup_render(&mut tab);
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(8)));
+    let cursor = tab.get_active_terminal_cursor_position(1);
+    tab.new_floating_pane(PaneId::Plugin(2), None, None, false, false, None, None).unwrap();
+    tab.set_pane_selectable(PaneId::Plugin(2), false);
+    let coordinates = passive_popup_coordinates(35, 8, 20, 5);
+    tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates.clone()).unwrap();
+    tab.handle_plugin_bytes(2, 1, b"\x1b[2JCARD".to_vec()).unwrap();
+    passive_popup_render(&mut tab);
+    for _ in 0..2 {
+        tab.suppress_pane(PaneId::Plugin(2), Some(1));
+        passive_popup_render(&mut tab);
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(8)));
+        assert_eq!(tab.get_active_terminal_cursor_position(1), cursor);
+        tab.unsuppress_or_expand_pane(PaneId::Plugin(2), true);
+        tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates.clone()).unwrap();
+        tab.handle_plugin_bytes(2, 1, b"\x1b[2JCARD".to_vec()).unwrap();
+        passive_popup_render(&mut tab);
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(8)));
+        assert_eq!(tab.get_active_terminal_cursor_position(1), cursor);
+        assert_eq!(tab.tiled_panes.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+    }
+}
+
+#[test]
 fn increase_tiled_pane_sizes_with_stacked_resizes() {
     // this is the default resizing algorithm
     let size = Size {
