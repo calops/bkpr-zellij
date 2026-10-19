@@ -2403,3 +2403,53 @@ fn kitty_clipboard_late_header_first_arrival_after_timeout_never_becomes_keyboar
         }
     }
 }
+
+#[test]
+fn kitty_clipboard_idle_discard_keeps_nested_extractors_split_st_escape_off_keyboard() {
+    let mut parser = StdinAnsiParser::new();
+    parser.prepare_clipboard_forward(105, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+    parser.feed(b"\x1b]5522;type=read:status=DATA;QUFB");
+    parser.close_clipboard_forward_on_timeout(105);
+    assert!(parser.finalize_force().is_empty());
+    assert!(parser.feed(b"QkJC\x1b").residue.is_empty());
+    assert_eq!(parser.nested_frame_extractor.partial_bytes(), [0x1b]);
+    assert!(parser.finalize_force().is_empty());
+    assert!(parser.finalize_force().is_empty());
+    assert!(parser.discard_kitty_osc);
+    let out = parser.feed(b"\\typing");
+    assert_eq!(out.residue, b"typing");
+    assert!(!parser.discard_kitty_osc);
+}
+
+#[test]
+fn kitty_clipboard_replacing_a_query_does_not_let_old_buffered_rejection_abort_the_new_one() {
+    for force_old_partial in [false, true] {
+        let mut parser = StdinAnsiParser::new();
+        parser.prepare_clipboard_forward(106, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+        parser.feed(b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;");
+        parser.close_clipboard_forward_on_timeout(106);
+        let query = parser.prepare_clipboard_forward(107, b"\x1b]5522;type=read:id=new;Lg==\x1b\\".to_vec());
+        let id = kitty_clipboard_host_id(&query);
+        if force_old_partial {
+            assert!(parser.finalize_force().is_empty());
+            assert!(parser.feed(b"QUFB\x1b\\").residue.is_empty());
+        }
+        let packets: &[&[u8]] = &[
+            b"5522;type=read:status=OK",
+            b"5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbgo=",
+            b"5522;type=read:status=DONE",
+        ];
+        let mut expected = Vec::new();
+        for (index, payload) in packets.iter().enumerate() {
+            expected.extend_from_slice(&kitty_clipboard_reply(payload, b"new", b"\x1b\\"));
+            let out = parser.feed(&kitty_clipboard_reply(payload, &id, b"\x1b\\"));
+            assert!(out.residue.is_empty());
+            if index + 1 == packets.len() {
+                assert_eq!(out.completed_clipboard_forward, Some((107, expected.clone())));
+            } else {
+                assert!(out.completed_clipboard_forward.is_none());
+                assert_eq!(parser.active_clipboard_forward_token(), Some(107));
+            }
+        }
+    }
+}
