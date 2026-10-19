@@ -1106,6 +1106,67 @@ fn shared_sidebar_width_fullscreen_and_unrelated_tabs_do_not_rewrite_intent() {
     assert_eq!(unrelated.cols(), 200);
 }
 
+#[test]
+fn shared_sidebar_incompatible_layout_is_neither_width_source_nor_destination() {
+    use zellij_utils::pane_size::{Constraint, Dimension};
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    // A native layout override may retain plugin configuration while imposing
+    // fixed geometry. It must not become a shared resize observation.
+    for columns in [70, 80] {
+        let tab = screen.tabs.get_mut(&1).unwrap();
+        let sidebar = tab.get_pane_with_id_mut(PaneId::Plugin(11)).unwrap();
+        let mut geometry = sidebar.position_and_size();
+        geometry.cols = Dimension::fixed(columns);
+        sidebar.set_geom(geometry);
+        let application = tab.get_pane_with_id_mut(PaneId::Terminal(2)).unwrap();
+        let mut geometry = application.position_and_size();
+        geometry.x = columns;
+        geometry.cols.set_inner(200 - columns);
+        application.set_geom(geometry);
+        screen.log_and_report_session_state().unwrap();
+        assert_eq!(shared_width_columns(&screen, 0), 47);
+        assert_eq!(shared_width_columns(&screen, 1), columns);
+    }
+    // Becoming eligible again is a registration, not a manual resize of the
+    // formerly observed rail. Inherit remembered intent rather than fixed width.
+    let sidebar = screen.tabs.get_mut(&1).unwrap()
+        .get_pane_with_id_mut(PaneId::Plugin(11)).unwrap();
+    let mut geometry = sidebar.position_and_size();
+    geometry.cols.constraint = Constraint::Percent(40.0);
+    sidebar.set_geom(geometry);
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+}
+
+#[test]
+fn shared_sidebar_fit_reference_departure_publishes_restored_width_immediately() {
+    let size = Size { cols: 200, rows: 30 };
+    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, false);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    screen.go_to_tab(1, 1).unwrap();
+    screen.set_client_size(2, Size { cols: 80, rows: 30 });
+    screen.add_client(2, true).unwrap();
+    screen.go_to_tab(1, 2).unwrap();
+    screen.set_mobile_render_preferences(2, false, false).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(screen.tabs[&0].get_display_area().cols, 200);
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    // The native reference client leaves. Tab sizing first has no reference for
+    // fit-disabled client 2; publication then restores its own 80-column fit.
+    screen.go_to_tab(2, 1).unwrap();
+    assert_eq!(screen.tabs[&0].get_display_area().cols, 80);
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+    let panes = screen.generate_and_report_pane_state().unwrap();
+    let sidebar = panes.panes[&0].iter().find(|pane| pane.is_plugin).unwrap();
+    assert_eq!(sidebar.pane_columns, 47);
+    assert_eq!(sidebar.pane_content_columns, 46);
+}
+
 fn tab_switch_mouse_fixture(
     mirrored: bool,
 ) -> (

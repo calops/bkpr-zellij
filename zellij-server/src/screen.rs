@@ -1657,6 +1657,29 @@ fn shared_tiled_width_configuration(pane: &dyn crate::tab::Pane) -> Option<(&str
     (!group.is_empty() && initial > 0).then_some((group, initial))
 }
 
+fn shared_tiled_width_pane(tab: &Tab) -> Option<(PaneId, &str, usize, usize)> {
+    if tab.is_fullscreen_active() {
+        return None;
+    }
+    let display = tab.get_display_area();
+    tab.get_tiled_panes().find_map(|(id, pane)| {
+        let (group, initial) = shared_tiled_width_configuration(pane.as_ref())?;
+        let geom = pane.position_and_size();
+        let columns = geom.cols.as_usize();
+        if geom.x != 0 || geom.y != 0 || geom.rows.as_usize() != display.rows
+            || !geom.cols.is_percent() || columns >= display.cols
+        {
+            return None;
+        }
+        // The same eligibility applies to width sources and destinations. An opt-in
+        // carried through an unrelated native layout must not rewrite shared intent.
+        tab.get_tiled_panes().all(|(other_id, other)| {
+            *other_id == *id || (other.position_and_size().x >= columns
+                && other.position_and_size().cols.is_percent())
+        }).then_some((*id, group, initial, columns))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThemePolicy {
     Auto,
@@ -5567,43 +5590,28 @@ impl Screen {
         }
     }
     fn synchronize_shared_tiled_widths(&mut self) {
-        self.shared_tiled_width_observations.retain(|pane_id, _| {
-            self.tabs.values().any(|tab| !tab.is_fullscreen_active()
-                && tab.get_tiled_panes().any(|(id, _)| id == pane_id))
+        self.shared_tiled_width_observations.retain(|pane_id, (tab_id, _, _)| {
+            self.tabs.get(tab_id).and_then(shared_tiled_width_pane)
+                .is_some_and(|(id, _, _, _)| id == *pane_id)
         });
-        for tab in self.tabs.values().filter(|tab| !tab.is_fullscreen_active()) {
-            let display = tab.get_display_area();
-            for (id, pane) in tab.get_tiled_panes() {
-                let Some((group, initial)) = shared_tiled_width_configuration(pane.as_ref()) else {
-                    continue;
-                };
-                let geom = pane.position_and_size();
-                if geom.x != 0 || geom.y != 0 || geom.rows.as_usize() != display.rows {
-                    self.shared_tiled_width_observations.remove(id);
-                    continue;
+        for tab in self.tabs.values() {
+            let Some((id, group, initial, columns)) = shared_tiled_width_pane(tab) else {
+                continue;
+            };
+            let changed = self.shared_tiled_width_observations.get(&id)
+                .is_some_and(|previous| previous.0 == tab.id
+                    && previous.1 == tab.get_display_area().cols && previous.2 != columns);
+            if let Some(intended) = self.shared_tiled_widths.get_mut(group) {
+                if changed {
+                    *intended = columns;
                 }
-                let columns = geom.cols.as_usize();
-                let changed = self.shared_tiled_width_observations.get(id)
-                    .is_some_and(|previous| previous.0 == tab.id
-                        && previous.1 == display.cols && previous.2 != columns);
-                if let Some(intended) = self.shared_tiled_widths.get_mut(group) {
-                    if changed {
-                        *intended = columns;
-                    }
-                } else {
-                    self.shared_tiled_widths.insert(group.to_owned(), initial);
-                }
+            } else {
+                self.shared_tiled_widths.insert(group.to_owned(), initial);
             }
         }
-        for tab in self.tabs.values_mut().filter(|tab| !tab.is_fullscreen_active()) {
-            // Only a full-height left rail is eligible, so there is at most one per tab.
-            let desired = tab.get_tiled_panes().find_map(|(id, pane)| {
-                let (group, _) = shared_tiled_width_configuration(pane.as_ref())?;
-                let geom = pane.position_and_size();
-                (geom.x == 0 && geom.y == 0
-                    && geom.rows.as_usize() == tab.get_display_area().rows)
-                    .then(|| (*id, self.shared_tiled_widths[group]))
-            });
+        for tab in self.tabs.values_mut() {
+            let desired = shared_tiled_width_pane(tab)
+                .map(|(id, group, _, _)| (id, self.shared_tiled_widths[group]));
             if let Some((id, intended)) = desired {
                 tab.set_left_pane_outer_width(id, intended);
                 if let Some((_, pane)) = tab.get_tiled_panes().find(|(pane_id, _)| **pane_id == id) {
@@ -5617,14 +5625,14 @@ impl Screen {
 
     fn log_and_report_session_state(&mut self) -> Result<()> {
         let err_context = || format!("Failed to log and report session state");
-        // All state-changing native controls already publish here. Synchronize before
-        // PaneUpdate/TabUpdate so plugins and popup geometry see one coherent result.
-        self.synchronize_shared_tiled_widths();
 
         self.update_active_pane_ids();
         self.revert_fit_disabled_without_reference_client()
             .with_context(err_context)?;
         self.reconcile_all_single_pane_focus();
+        // All state-changing native controls already publish here. Synchronize before
+        // PaneUpdate/TabUpdate so plugins and popup geometry see one coherent result.
+        self.synchronize_shared_tiled_widths();
         // generate own session info
         let pane_manifest = self.generate_and_report_pane_state()?;
         let tab_infos = self.generate_and_report_tab_state()?;
