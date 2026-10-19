@@ -547,8 +547,8 @@ impl<'a> LayoutApplier<'a> {
             self.styled_underlines,
         );
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
-            new_plugin.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_plugin.handle_pty_bytes("\n\r".as_bytes().into());
+            new_plugin.handle_pty_bytes(pane_initial_contents.as_bytes().into(), &|| None);
+            new_plugin.handle_pty_bytes("\n\r".as_bytes().into(), &|| None);
         }
 
         new_plugin.set_borderless(layout.borderless.unwrap_or(false));
@@ -597,8 +597,8 @@ impl<'a> LayoutApplier<'a> {
             self.styled_underlines,
         );
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
-            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_pane.handle_pty_bytes("\n\r".as_bytes().into());
+            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into(), &|| None);
+            new_pane.handle_pty_bytes("\n\r".as_bytes().into(), &|| None);
         }
         if floating_pane_layout.borderless.unwrap_or(false) {
             new_pane.set_borderless(true);
@@ -654,8 +654,8 @@ impl<'a> LayoutApplier<'a> {
             None,
         );
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
-            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_pane.handle_pty_bytes("\n\r".as_bytes().into());
+            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into(), &|| None);
+            new_pane.handle_pty_bytes("\n\r".as_bytes().into(), &|| None);
         }
         if floating_pane_layout.borderless.unwrap_or(false) {
             new_pane.set_borderless(true);
@@ -731,8 +731,8 @@ impl<'a> LayoutApplier<'a> {
             notification_end,
         );
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
-            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_pane.handle_pty_bytes("\n\r".as_bytes().into());
+            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into(), &|| None);
+            new_pane.handle_pty_bytes("\n\r".as_bytes().into(), &|| None);
         }
         new_pane.set_borderless(layout.borderless.unwrap_or(false));
         if let Some(exclude_from_sync) = layout.exclude_from_sync {

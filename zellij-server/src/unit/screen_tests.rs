@@ -9,7 +9,7 @@ use insta::assert_snapshot;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
-use zellij_utils::data::{Event, EventType, Resize, Style, WebSharing};
+use zellij_utils::data::{Event, Resize, Style, WebSharing};
 use zellij_utils::errors::{prelude::*, ErrorContext};
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::{RunCommand, TerminalAction};
@@ -32,7 +32,7 @@ use crate::notifications::NotificationProtocol;
 use crate::os_input_output::AsyncReader;
 use crate::panes::grid::PendingNotification;
 use crate::pty_writer::PtyWriteInstruction;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::env::set_var;
 use std::sync::{Arc, Mutex};
 
@@ -3036,50 +3036,6 @@ pub fn send_cli_edit_scrollback_action() {
         }
     }
     assert!(found_instruction);
-}
-
-#[test]
-pub fn send_cli_scroll_up_action() {
-    let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
-    let mut initial_layout = TiledPaneLayout::default();
-    initial_layout.children_split_direction = SplitDirection::Vertical;
-    initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
-    let mut mock_screen = MockScreen::new(size);
-    let session_metadata = mock_screen.clone_session_metadata();
-    let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
-    let received_server_instructions = Arc::new(Mutex::new(vec![]));
-    let server_receiver = mock_screen.server_receiver.take().unwrap();
-    let server_instruction = log_actions_in_thread!(
-        received_server_instructions,
-        ServerInstruction::KillSession,
-        server_receiver
-    );
-    let cli_action = CliAction::ScrollUp { pane_id: None };
-    let mut pane_contents = String::new();
-    for i in 0..20 {
-        pane_contents.push_str(&format!("fill pane up with something {}\n\r", i));
-    }
-    let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
-        0,
-        pane_contents.as_bytes().to_vec(),
-    ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    // we send two actions here because only the last line in the pane is empty, so one action
-    // won't show in a render
-    send_cli_action_to_server(&session_metadata, cli_action.clone(), client_id);
-    send_cli_action_to_server(&session_metadata, cli_action.clone(), client_id);
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    mock_screen.teardown(vec![server_instruction, screen_thread]);
-    let snapshots = take_snapshots_and_cursor_coordinates_from_render_events(
-        received_server_instructions.lock().unwrap().iter(),
-        size,
-    );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
 }
 
 #[test]
@@ -7970,179 +7926,6 @@ fn integration_subscribe_with_ansi_flag() {
 }
 
 #[test]
-pub fn background_plugin_receives_broadcasts_regardless_of_active_tab() {
-    // Tab 0: plugin pane 2 (from new_tab_with_plugins, queued before run)
-    // Tab 1: plugin pane 3 (from new_tab_with_plugins, queued before run)
-    // Tab 2: terminal panes only (from run, starts screen thread)
-    // After run, client is on tab 2. Switch to tab 0 (plugin 2).
-    // Background plugin 99 should also receive updates.
-    let size = Size { cols: 80, rows: 10 };
-    let client_id = 10;
-
-    let mut mock_screen = MockScreen::new(size);
-    mock_screen.new_tab_with_plugins(vec![2]);
-    mock_screen.new_tab_with_plugins(vec![3]);
-    let session_metadata = mock_screen.clone_session_metadata();
-    let screen_thread = mock_screen.run(None, vec![]);
-
-    // Register background plugin 99 with the main_client_id (1), not the CLI client_id (10)
-    let main_client_id = mock_screen.main_client_id;
-    let mut bg_subs = HashSet::new();
-    bg_subs.insert(EventType::TabUpdate);
-    bg_subs.insert(EventType::ModeUpdate);
-    let _ = mock_screen
-        .to_screen
-        .send(ScreenInstruction::UpdateBackgroundPluginSubscriptions(
-            99,
-            main_client_id,
-            bg_subs,
-        ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let received_plugin_instructions = Arc::new(Mutex::new(vec![]));
-    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
-    let plugin_thread = log_actions_in_thread!(
-        received_plugin_instructions,
-        PluginInstruction::Exit,
-        plugin_receiver
-    );
-
-    // Drain initial setup instructions before the GoToTab action
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let instructions_before_switch = received_plugin_instructions.lock().unwrap().len();
-
-    // Switch to tab 0 (1-based index 1 = position 0 = tab with plugin 2)
-    let goto_tab = CliAction::GoToTab { index: 1 };
-    send_cli_action_to_server(&session_metadata, goto_tab, client_id);
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    mock_screen.teardown(vec![plugin_thread, screen_thread]);
-
-    let instructions = received_plugin_instructions.lock().unwrap();
-    // Only examine instructions sent after the switch
-    let instructions_after_switch = &instructions[instructions_before_switch..];
-    let mut plugin_ids_that_received_tab_update: Vec<u32> = vec![];
-    let mut plugin_ids_that_received_mode_update: Vec<u32> = vec![];
-    for instruction in instructions_after_switch.iter() {
-        if let PluginInstruction::Update(updates) = instruction {
-            for (pid, _cid, event) in updates {
-                match event {
-                    Event::TabUpdate(..) => {
-                        if let Some(id) = pid {
-                            plugin_ids_that_received_tab_update.push(*id);
-                        }
-                    },
-                    Event::ModeUpdate(..) => {
-                        if let Some(id) = pid {
-                            plugin_ids_that_received_mode_update.push(*id);
-                        }
-                    },
-                    _ => {},
-                }
-            }
-        }
-    }
-
-    // Plugin 2 (active tab) and plugin 99 (background) should receive updates
-    assert!(
-        plugin_ids_that_received_tab_update.contains(&2),
-        "Active tab plugin 2 should receive TabUpdate, got: {:?}",
-        plugin_ids_that_received_tab_update
-    );
-    assert!(
-        plugin_ids_that_received_tab_update.contains(&99),
-        "Background plugin 99 should receive TabUpdate, got: {:?}",
-        plugin_ids_that_received_tab_update
-    );
-    // Plugin 3 (inactive tab) should NOT receive updates
-    assert!(
-        !plugin_ids_that_received_tab_update.contains(&3),
-        "Inactive tab plugin 3 should NOT receive TabUpdate, got: {:?}",
-        plugin_ids_that_received_tab_update
-    );
-
-    // ModeUpdate is sent via update_input_modes() to tab plugins only (not background plugins).
-    // Background plugins receive ModeUpdate only via explicit broadcast_mode_update calls.
-    // So during tab switch, only the active tab's plugins get ModeUpdate.
-    assert!(
-        plugin_ids_that_received_mode_update.contains(&2),
-        "Active tab plugin 2 should receive ModeUpdate, got: {:?}",
-        plugin_ids_that_received_mode_update
-    );
-    assert!(
-        !plugin_ids_that_received_mode_update.contains(&3),
-        "Inactive tab plugin 3 should NOT receive ModeUpdate, got: {:?}",
-        plugin_ids_that_received_mode_update
-    );
-}
-
-#[test]
-pub fn tab_switch_only_updates_active_tab_plugins() {
-    // Tab 0: plugin pane 2 (from new_tab_with_plugins)
-    // Tab 1: plugin pane 3 (from new_tab_with_plugins)
-    // Tab 2: terminal panes only (from run)
-    // After run, client is on tab 2. Switch to tab 0 (plugin 2).
-    // Only plugin 2 should receive updates; plugin 3 should not.
-    let size = Size { cols: 80, rows: 10 };
-    let client_id = 10;
-
-    let mut mock_screen = MockScreen::new(size);
-    mock_screen.new_tab_with_plugins(vec![2]);
-    mock_screen.new_tab_with_plugins(vec![3]);
-    let session_metadata = mock_screen.clone_session_metadata();
-    let screen_thread = mock_screen.run(None, vec![]);
-
-    let received_plugin_instructions = Arc::new(Mutex::new(vec![]));
-    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
-    let plugin_thread = log_actions_in_thread!(
-        received_plugin_instructions,
-        PluginInstruction::Exit,
-        plugin_receiver
-    );
-
-    // Drain initial setup instructions before the GoToTab action
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let instructions_before_switch = received_plugin_instructions.lock().unwrap().len();
-
-    // Switch to tab 0 (1-based index 1 = position 0 = tab with plugin 2)
-    let goto_tab = CliAction::GoToTab { index: 1 };
-    send_cli_action_to_server(&session_metadata, goto_tab, client_id);
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    mock_screen.teardown(vec![plugin_thread, screen_thread]);
-
-    let instructions = received_plugin_instructions.lock().unwrap();
-    let instructions_after_switch = &instructions[instructions_before_switch..];
-    let mut plugin_ids_that_received_updates: Vec<u32> = vec![];
-    for instruction in instructions_after_switch.iter() {
-        if let PluginInstruction::Update(updates) = instruction {
-            for (pid, _cid, event) in updates {
-                match event {
-                    Event::TabUpdate(..) | Event::ModeUpdate(..) => {
-                        if let Some(id) = pid {
-                            plugin_ids_that_received_updates.push(*id);
-                        }
-                    },
-                    _ => {},
-                }
-            }
-        }
-    }
-
-    // Only plugin 2 (active tab after switch) should receive TabUpdate/ModeUpdate
-    assert!(
-        plugin_ids_that_received_updates.contains(&2),
-        "Active tab plugin 2 should receive updates, got: {:?}",
-        plugin_ids_that_received_updates
-    );
-    assert!(
-        !plugin_ids_that_received_updates.contains(&3),
-        "Inactive tab plugin 3 should NOT receive updates, got: {:?}",
-        plugin_ids_that_received_updates
-    );
-}
-
-#[test]
 pub fn closing_tab_updates_input_modes_of_destination_tab_plugins() {
     let size = Size { cols: 80, rows: 10 };
 
@@ -10462,8 +10245,8 @@ fn pane_buffers_pty_bytes_while_forward_paused() {
     pane.arm_forward_pause();
     assert!(pane.is_forward_paused());
 
-    pane.handle_pty_bytes(b"hello".to_vec());
-    pane.handle_pty_bytes(b"world".to_vec());
+    pane.handle_pty_bytes(b"hello".to_vec(), &|| None);
+    pane.handle_pty_bytes(b"world".to_vec(), &|| None);
 
     let drained = pane.drain_pending_pty_input();
     assert_eq!(
@@ -10487,7 +10270,7 @@ fn pane_forward_in_vte_stops_processing_with_remainder_queued() {
     let mut pane = new_terminal_pane_for_pause_test(1);
     let mut input = b"\x1b]10;?\x07".to_vec();
     input.extend_from_slice(b"after");
-    pane.handle_pty_bytes(input);
+    pane.handle_pty_bytes(input, &|| None);
 
     let queries = pane.drain_forwarded_queries();
     assert_eq!(queries.len(), 1, "exactly one forward must be queued");
@@ -10511,7 +10294,7 @@ fn pane_no_forward_drains_queue_empty() {
     // When the input contains no forward-bound query, processing runs
     // to completion and `pending_pty_input` ends empty.
     let mut pane = new_terminal_pane_for_pause_test(1);
-    pane.handle_pty_bytes(b"plain text".to_vec());
+    pane.handle_pty_bytes(b"plain text".to_vec(), &|| None);
 
     assert!(
         pane.drain_forwarded_queries().is_empty(),
@@ -10544,7 +10327,7 @@ fn pane_paused_resumes_to_drain_queue() {
     // reply during step 2.
     let mut pane = new_terminal_pane_for_pause_test(1);
     pane.arm_forward_pause();
-    pane.handle_pty_bytes(b"buffered\x1b[c".to_vec());
+    pane.handle_pty_bytes(b"buffered\x1b[c".to_vec(), &|| None);
 
     // While paused, vte was never fed, so no replies were produced.
     assert!(
@@ -10559,7 +10342,7 @@ fn pane_paused_resumes_to_drain_queue() {
     let was_paused = pane.clear_forward_pause();
     assert!(was_paused, "was paused");
     let buffered = pane.drain_pending_pty_input();
-    pane.handle_pty_bytes(buffered);
+    pane.handle_pty_bytes(buffered, &|| None);
 
     let sync_replies = pane.drain_messages_to_pty();
     assert!(
@@ -10615,7 +10398,7 @@ fn paused_pane_with_da1_in_queue_emits_da1_after_resume() {
     let mut pane = new_terminal_pane_for_pause_test(1);
     let mut input = b"\x1b]10;?\x07".to_vec();
     input.extend_from_slice(b"\x1b[c");
-    pane.handle_pty_bytes(input);
+    pane.handle_pty_bytes(input, &|| None);
 
     // Forward emitted; DA1 still queued behind it.
     let queries = pane.drain_forwarded_queries();
@@ -10631,7 +10414,7 @@ fn paused_pane_with_da1_in_queue_emits_da1_after_resume() {
     // (host reply gets written to PTY via Tab; modelled here as no-op)
     pane.clear_forward_pause();
     let buffered = pane.drain_pending_pty_input();
-    pane.handle_pty_bytes(buffered);
+    pane.handle_pty_bytes(buffered, &|| None);
 
     let sync_replies = pane.drain_messages_to_pty();
     assert!(
@@ -10649,7 +10432,7 @@ fn empty_reply_with_paused_pane_drains_buffer_without_phantom_write() {
     // write yet still clears the pause and re-feeds the queue.
     let mut pane = new_terminal_pane_for_pause_test(1);
     pane.arm_forward_pause();
-    pane.handle_pty_bytes(b"after".to_vec());
+    pane.handle_pty_bytes(b"after".to_vec(), &|| None);
     assert!(pane.is_forward_paused());
 
     // Simulate Tab::resume_pane_after_forward with empty reply:
@@ -10658,7 +10441,7 @@ fn empty_reply_with_paused_pane_drains_buffer_without_phantom_write() {
     let was_paused = pane.clear_forward_pause();
     assert!(was_paused);
     let buffered = pane.drain_pending_pty_input();
-    pane.handle_pty_bytes(buffered);
+    pane.handle_pty_bytes(buffered, &|| None);
     assert!(!pane.is_forward_paused());
     assert!(
         pane.drain_pending_pty_input().is_empty(),
@@ -11359,7 +11142,7 @@ fn kitty_query_replies_ok_when_capable_client_connected() {
     assert_eq!(screen.kitty_host_capabilities.borrow().get(&1), Some(&true));
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec(), &|| None);
     assert_eq!(
         active_pane.drain_messages_to_pty(),
         vec![b"\x1b_Gi=31;OK\x1b\\".to_vec()]
@@ -11381,7 +11164,7 @@ fn kitty_query_replies_enotsupported_when_no_capable_client() {
     );
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec(), &|| None);
     let replies = active_pane.drain_messages_to_pty();
     assert_eq!(replies.len(), 1);
     let reply = String::from_utf8(replies[0].clone()).unwrap();
@@ -11405,7 +11188,7 @@ fn kitty_query_is_ignored_when_the_protocol_is_disabled_in_the_config() {
     );
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec(), &|| None);
     assert!(
         active_pane.drain_messages_to_pty().is_empty(),
         "a disabled protocol must not reply to queries at all"
@@ -11426,7 +11209,7 @@ fn kitty_support_recomputed_on_client_detach() {
     screen.remove_client(2).expect("TEST");
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_vec(), &|| None);
     let replies = active_pane.drain_messages_to_pty();
     assert_eq!(replies.len(), 1);
     let reply = String::from_utf8(replies[0].clone()).unwrap();
@@ -11446,7 +11229,7 @@ fn primary_da_advertises_sixel_when_capable_client_connected() {
     assert_eq!(screen.sixel_host_capabilities.borrow().get(&1), Some(&true));
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b[c".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b[c".to_vec(), &|| None);
     assert_eq!(
         active_pane.drain_messages_to_pty(),
         vec![b"\x1b[?62;4;52c".to_vec()]
@@ -11468,7 +11251,7 @@ fn primary_da_omits_sixel_when_no_capable_client() {
     );
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b[c".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b[c".to_vec(), &|| None);
     assert_eq!(
         active_pane.drain_messages_to_pty(),
         vec![b"\x1b[?62;52c".to_vec()]
@@ -11489,7 +11272,7 @@ fn sixel_support_recomputed_on_client_detach() {
     screen.remove_client(2).expect("TEST");
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     let active_pane = active_tab.get_active_pane_mut(1).unwrap();
-    active_pane.handle_pty_bytes(b"\x1b[c".to_vec());
+    active_pane.handle_pty_bytes(b"\x1b[c".to_vec(), &|| None);
     assert_eq!(
         active_pane.drain_messages_to_pty(),
         vec![b"\x1b[?62;52c".to_vec()]

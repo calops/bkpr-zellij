@@ -248,7 +248,7 @@ fn terminal_pane_grid_shows_ab_around_captured_apc() {
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
-    terminal_pane.handle_pty_bytes(Vec::from(&b"A\x1b_Gq=2,a=d,d=A\x1b\\B"[..]));
+    terminal_pane.handle_pty_bytes(Vec::from(&b"A\x1b_Gq=2,a=d,d=A\x1b\\B"[..]), &|| None);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
     assert_eq!(terminal_pane.grid.kitty_commands_handled(), 1);
 }

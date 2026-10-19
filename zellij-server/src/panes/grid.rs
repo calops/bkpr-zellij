@@ -834,6 +834,7 @@ pub struct Grid {
     pub pending_messages_to_pty: Vec<Vec<u8>>,
     pub selection: Selection,
     pub title: Option<String>,
+    pub pending_title_changed: bool,
     pub is_scrolled: bool,
     pub link_handler: Rc<RefCell<LinkHandler>>,
     pub ring_bell: bool,
@@ -1219,6 +1220,7 @@ impl Grid {
             selection: Default::default(),
             title_stack: vec![],
             title: None,
+            pending_title_changed: false,
             changed_colors: None,
             is_scrolled: false,
             link_handler,
@@ -3691,7 +3693,10 @@ impl Grid {
         }
     }
     fn set_title(&mut self, title: String) {
-        self.title = Some(title);
+        if self.title.as_ref() != Some(&title) {
+            self.title = Some(title);
+            self.pending_title_changed = true;
+        }
     }
     fn push_current_title_to_stack(&mut self) {
         if self.title_stack.len() > MAX_TITLE_STACK_SIZE {
@@ -3703,7 +3708,7 @@ impl Grid {
     }
     fn pop_title_from_stack(&mut self) {
         if let Some(popped_title) = self.title_stack.pop() {
-            self.title = Some(popped_title);
+            self.set_title(popped_title);
         }
     }
     fn transfer_rows_to_lines_above(&mut self, count: usize) {
@@ -4728,16 +4733,11 @@ impl Perform for Grid {
                         self.pending_messages_to_pty.push(
                             format!("\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth{}", terminator).into_bytes(),
                         );
-                    } else {
-                        self.program_status.report(params[1]);
                     }
                 }
             },
 
             b"133" => {
-                if params.get(1) == Some(&b"A".as_slice()) {
-                    self.program_status.expire_running();
-                }
                 let marker = params.get(1).and_then(|subcommand| match *subcommand {
                     b"A" | b"P" => Some(Osc133MarkerKind::Prompt),
                     b"B" | b"I" => Some(Osc133MarkerKind::Input),
