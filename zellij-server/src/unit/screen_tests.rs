@@ -1212,7 +1212,7 @@ fn shared_sidebar_width_resizes_inactive_stack_list_members_and_their_ptys() {
     screen.tabs.get_mut(&1).unwrap().new_pane(
         PaneId::Terminal(3), None, None, false, true,
         NewPanePlacement::Stacked {
-            pane_id_to_stack_under: Some(PaneId::Terminal(2)),
+            pane_id_to_stack_under: Some(PaneId::Terminal(2).into()),
             borderless: None,
         },
         Some(1), None,
