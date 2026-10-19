@@ -1832,3 +1832,123 @@ fn clipboard_timeout_only_fires_for_the_open_token() {
     );
     assert_eq!(parser.close_clipboard_forward_on_timeout(3), None);
 }
+
+#[test]
+fn outstanding_queries_do_not_consume_literal_text_or_escape_chords() {
+    let mut parser = StdinAnsiParser::new();
+    parser.expect_host_replies();
+    assert_eq!(parser.feed(b"6;17;7t").residue, b"6;17;7t");
+    assert_eq!(parser.feed(b"\x1ba").residue, b"\x1ba");
+    assert_eq!(parser.pending_partial(), PendingPartial::None);
+}
+
+#[test]
+fn each_outstanding_query_requires_its_own_boundary() {
+    let mut parser = StdinAnsiParser::new();
+    parser.expect_host_replies();
+    parser.expect_host_replies();
+    parser.feed(b"\x1b[?62;4c");
+
+    parser.feed(b"\x1b");
+    assert_eq!(parser.pending_partial(), PendingPartial::ExpectedReply);
+    assert!(parser.finalize_fast_partial().is_empty());
+    assert_eq!(parser.feed(b"a").residue, b"\x1ba");
+
+    parser.feed(b"\x1b[?62;4c");
+    parser.feed(b"\x1b");
+    assert_eq!(parser.pending_partial(), PendingPartial::LoneEsc);
+    assert_eq!(parser.finalize_fast_partial(), b"\x1b");
+}
+
+#[test]
+fn a_silent_query_eventually_releases_genuine_escape_and_alt_brackets() {
+    for prefix in [b"\x1b".as_ref(), b"\x1b[".as_ref(), b"\x1b]".as_ref()] {
+        let mut parser = StdinAnsiParser::new();
+        parser.expect_host_replies();
+        parser.feed(prefix);
+        assert_eq!(parser.pending_partial(), PendingPartial::ExpectedReply);
+        assert!(parser.finalize_fast_partial().is_empty());
+
+        // Drive the deadline without sleeping or relying on scheduler timing.
+        parser.host_reply_deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
+        let drained = parser.finalize_fast_partial();
+        assert_eq!(drained, prefix);
+        assert_eq!(parser.pending_partial(), PendingPartial::None);
+        let expected_key = match prefix {
+            b"\x1b" => InputEvent::Key(KeyEvent {
+                key: KeyCode::Escape,
+                modifiers: Modifiers::NONE,
+            }),
+            b"\x1b[" => alt_char('['),
+            _ => alt_char(']'),
+        };
+        assert_eq!(keys_from_flushed_bytes(&drained), vec![expected_key]);
+        assert_eq!(parser.feed(b"6;17;7t").residue, b"6;17;7t");
+    }
+}
+
+#[test]
+fn startup_replies_and_expired_forwards_cannot_leak_into_a_new_forward() {
+    let mut parser = StdinAnsiParser::new();
+    parser.expect_host_replies();
+    assert!(parser.feed(b"\x1b[6;").residue.is_empty());
+
+    // Fish can issue color queries while the startup cell-size reply
+    // is still arriving, and retry after its first forward times out.
+    parser.open_forward(1);
+    assert_eq!(parser.close_forward_on_timeout(1), Some((1, Vec::new())));
+    parser.open_forward(2);
+
+    let cell_tail = parser.feed(b"17;7t");
+    assert!(cell_tail.residue.is_empty());
+    assert!(cell_tail.completed_forward.is_none());
+    let startup_tail = parser.feed(
+        b"\x1b[4;816;1120t\x1b]11;rgb:0000/0000/0000\x1b\\\
+          \x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b[?2026;2$y\x1b[?1;2c",
+    );
+    assert!(startup_tail.residue.is_empty());
+    assert!(startup_tail.completed_forward.is_none());
+    assert_eq!(parser.active_forward_token(), Some(2));
+    assert!(startup_tail
+        .replies
+        .iter()
+        .any(|reply| matches!(reply, HostReply::PixelDimensions(_))));
+
+    let expired_reply = parser.feed(b"\x1b]11;rgb:1111/1111/1111\x1b\\\x1b[?1;2c");
+    assert!(expired_reply.residue.is_empty());
+    assert!(expired_reply.completed_forward.is_none());
+    assert_eq!(parser.active_forward_token(), Some(2));
+
+    let current_reply = b"\x1b]11;rgb:2222/2222/2222\x1b\\";
+    let current = parser.feed(current_reply);
+    assert!(current.residue.is_empty());
+    let boundary = parser.feed(b"\x1b[?1;2c");
+    assert_eq!(
+        boundary.completed_forward,
+        Some((2, current_reply.to_vec())),
+        "only this forward's response may reach the application's PTY"
+    );
+}
+
+#[test]
+fn resize_boundary_between_forwards_preserves_each_batch_owner() {
+    let mut parser = StdinAnsiParser::new();
+    parser.open_forward(1);
+    parser.expect_host_replies(); // resize query written after forward 1
+    let first = parser.feed(b"\x1b]11;rgb:1111/1111/1111\x1b\\\x1b[?1;2c");
+    assert_eq!(
+        first.completed_forward,
+        Some((1, b"\x1b]11;rgb:1111/1111/1111\x1b\\".to_vec()))
+    );
+
+    parser.open_forward(2); // written before the resize response arrives
+    let resize = parser.feed(b"\x1b[4;816;1120t\x1b[6;17;7t\x1b[?1;2c");
+    assert!(resize.residue.is_empty());
+    assert!(resize.completed_forward.is_none());
+    assert_eq!(parser.active_forward_token(), Some(2));
+    let second = parser.feed(b"\x1b]11;rgb:2222/2222/2222\x1b\\\x1b[?1;2c");
+    assert_eq!(
+        second.completed_forward,
+        Some((2, b"\x1b]11;rgb:2222/2222/2222\x1b\\".to_vec()))
+    );
+}

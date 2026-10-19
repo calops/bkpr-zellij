@@ -1290,6 +1290,8 @@ pub fn start_client(
         .name("signal_listener".to_string())
         .spawn({
             let os_input = os_input.clone();
+            #[cfg(not(windows))]
+            let stdin_ansi_parser = stdin_ansi_parser.clone();
             move || {
                 os_input.handle_signals(
                     Box::new({
@@ -1299,9 +1301,15 @@ pub fn start_client(
                                 new_size: os_api.get_terminal_size(),
                             });
                             #[cfg(not(windows))]
-                            let _ = os_api
-                                .get_stdout_writer()
-                                .write(crate::stdin_handler::PIXEL_SIZE_QUERY.as_bytes());
+                            {
+                                let mut parser = stdin_ansi_parser.lock().unwrap();
+                                parser.expect_host_replies();
+                                let mut stdout = os_api.get_stdout_writer();
+                                let _ = stdout.write_all(
+                                    crate::stdin_handler::PIXEL_SIZE_QUERY_WITH_BARRIER.as_bytes(),
+                                );
+                                let _ = stdout.flush();
+                            }
                         }
                     }),
                     Box::new({
@@ -1527,8 +1535,8 @@ pub fn start_client(
             ClientInstruction::ForwardQueryToHost {
                 token, query_bytes, ..
             } => {
-                // 1. Open a forwarding window on the parser so any reply
-                //    events that arrive before the barrier are captured.
+                // 1. Register and write this batch under the parser lock,
+                //    preserving the order of all host-query boundaries.
                 //    A slot may still be open here: the server's backstop
                 //    timeout can give up on the previous token and dispatch
                 //    this one before this client's per-slot timer got to
@@ -1537,6 +1545,11 @@ pub fn start_client(
                     let mut stdin_ansi_parser = stdin_ansi_parser.lock().unwrap();
                     let stale_forward = stdin_ansi_parser.take_active_forward();
                     stdin_ansi_parser.open_forward(token);
+                    let mut blob = query_bytes;
+                    blob.extend_from_slice(b"\x1b[c");
+                    let mut out = os_input.get_stdout_writer();
+                    let _ = out.write_all(&blob);
+                    let _ = out.flush();
                     stale_forward
                 };
                 if let Some((stale_token, stale_reply_bytes)) = stale_forward {
@@ -1574,16 +1587,6 @@ pub fn start_client(
                         );
                     },
                 );
-                // 3. Write the query + Primary-DA barrier in a single
-                //    write_all. The barrier closes the window on the
-                //    parser side when its reply arrives — the timer
-                //    task's eventual wake-up finds an empty slot for
-                //    this token and no-ops.
-                let mut blob = query_bytes;
-                blob.extend_from_slice(b"\x1b[c");
-                let mut out = os_input.get_stdout_writer();
-                let _ = out.write_all(&blob);
-                let _ = out.flush();
             },
             ClientInstruction::EmitNestedSessionFrame(payload_bytes) => {
                 if nested_reannounce.host_contacted() {

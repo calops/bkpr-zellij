@@ -46,13 +46,17 @@ pub(crate) fn stdin_loop(
 
         if can_query_terminal {
             let query_string = build_startup_query_string(support_kitty_graphics_protocol);
-            let _ = os_input
-                .get_stdout_writer()
-                .write(query_string.as_bytes())
-                .unwrap();
-            if support_kitty_graphics_protocol {
-                stdin_ansi_parser.lock().unwrap().expect_kitty_probe_reply();
-            } else {
+            {
+                let mut parser = stdin_ansi_parser.lock().unwrap();
+                parser.expect_host_replies();
+                if support_kitty_graphics_protocol {
+                    parser.expect_kitty_probe_reply();
+                }
+                let mut stdout = os_input.get_stdout_writer();
+                stdout.write_all(query_string.as_bytes()).unwrap();
+                stdout.flush().unwrap();
+            }
+            if !support_kitty_graphics_protocol {
                 let _ =
                     send_input_instructions.send(InputInstruction::AnsiStdinInstructions(vec![
                         HostReply::KittyGraphicsSupport(false),
@@ -258,26 +262,12 @@ pub(crate) fn stdin_loop(
                 }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let pending = stdin_ansi_parser.lock().unwrap().pending_partial();
-                if pending.uses_reply_flush_guard() {
-                    let elapsed = reply_in_progress_since
-                        .map(|since| since.elapsed())
-                        .unwrap_or_default();
-                    if elapsed >= PARTIAL_REPLY_FLUSH_GUARD {
-                        let drained = stdin_ansi_parser.lock().unwrap().finalize_force();
-                        drain_partial_to_keyboard(
-                            &mut input_parser,
-                            &mut current_buffer,
-                            send_input_instructions.clone(),
-                            drained,
-                        );
-                        needs_finalization = false;
-                        reply_in_progress_since = None;
-                    } else {
-                        needs_finalization = true;
-                    }
-                } else {
-                    let drained = stdin_ansi_parser.lock().unwrap().finalize_fast_partial();
+                let elapsed = reply_in_progress_since
+                    .map(|since| since.elapsed())
+                    .unwrap_or_default();
+                let drained =
+                    finalize_idle_partial(&mut stdin_ansi_parser.lock().unwrap(), elapsed);
+                if let Some(drained) = drained {
                     drain_partial_to_keyboard(
                         &mut input_parser,
                         &mut current_buffer,
@@ -294,6 +284,17 @@ pub(crate) fn stdin_loop(
                 break;
             },
         }
+    }
+}
+
+fn finalize_idle_partial(parser: &mut StdinAnsiParser, elapsed: Duration) -> Option<Vec<u8>> {
+    match parser.pending_partial() {
+        // A solicited reply can split at even a lone ESC. The query's
+        // boundary, not a keyboard idle timer, decides when it is input.
+        PendingPartial::ExpectedReply => None,
+        PendingPartial::ReplyInProgress if elapsed < PARTIAL_REPLY_FLUSH_GUARD => None,
+        PendingPartial::ReplyInProgress => Some(parser.finalize_force()),
+        _ => Some(parser.finalize_fast_partial()),
     }
 }
 
@@ -406,13 +407,16 @@ fn build_startup_query_string(support_kitty_graphics_protocol: bool) -> String {
 }
 
 pub(crate) const PIXEL_SIZE_QUERY: &str = "\u{1b}[14t\u{1b}[16t";
+pub(crate) const PIXEL_SIZE_QUERY_WITH_BARRIER: &str = "\u{1b}[14t\u{1b}[16t\u{1b}[c";
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_startup_query_string, extract_focus_reports, realign_current_buffer, InputParser,
-        PIXEL_SIZE_QUERY,
+        build_startup_query_string, extract_focus_reports, finalize_idle_partial,
+        realign_current_buffer, InputParser, PIXEL_SIZE_QUERY,
     };
+    use crate::stdin_ansi_parser::{HostReply, StdinAnsiParser};
+    use std::time::Duration;
 
     #[test]
     fn realign_after_lone_paste_start_empties_the_buffer() {
@@ -505,5 +509,41 @@ mod tests {
         assert!(!query.contains("\u{1b}_G"));
         assert!(query.ends_with("\u{1b}[c"));
         assert!(query.starts_with("\u{1b}[14t\u{1b}[16t"));
+    }
+
+    #[test]
+    fn solicited_cell_size_reply_never_reaches_keyboard_across_idle_flushes() {
+        let reply = b"\x1b[6;17;7t";
+        for split in 1..reply.len() {
+            let mut parser = StdinAnsiParser::new();
+            parser.expect_host_replies();
+            let prefix = parser.feed(&reply[..split]);
+            assert!(prefix.residue.is_empty(), "prefix split at {}", split);
+
+            // Exercise both idle boundaries that previously forwarded
+            // a host prefix and then treated its tail as keyboard input.
+            assert!(finalize_idle_partial(&mut parser, Duration::from_millis(80)).is_none());
+            assert!(finalize_idle_partial(&mut parser, Duration::from_secs(2)).is_none());
+
+            let suffix = parser.feed(&reply[split..]);
+            assert!(suffix.residue.is_empty(), "suffix split at {}", split);
+            assert_eq!(prefix.replies.len() + suffix.replies.len(), 1);
+            match &suffix.replies[0] {
+                HostReply::PixelDimensions(dimensions) => {
+                    let cell = dimensions.character_cell_size.expect("cell size");
+                    assert_eq!((cell.height, cell.width), (17, 7));
+                },
+                other => panic!("expected cell-size reply, got {:?}", other),
+            }
+
+            assert!(parser.feed(b"\x1b[?62;4c").residue.is_empty());
+            parser.feed(b"\x1b");
+            assert_eq!(
+                finalize_idle_partial(&mut parser, Duration::from_millis(80)),
+                Some(vec![0x1b]),
+                "the completed query must restore ordinary Escape timing"
+            );
+            assert_eq!(parser.feed(b"6;17;7t").residue, b"6;17;7t");
+        }
     }
 }
