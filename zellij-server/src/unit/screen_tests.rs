@@ -1331,9 +1331,23 @@ fn passive_popup_content_clicks_and_hover_still_reach_the_popup() {
     screen.get_active_tab_mut(1).unwrap().render(&mut output, None).unwrap();
     let rendered = output.serialize().unwrap().remove(&1).unwrap();
     assert!(rendered.contains("https://example.invalid/details"));
+    let (popup_rows, popup_columns) = {
+        let popup = screen.tabs[&0].get_pane_with_id(PaneId::Plugin(20)).unwrap();
+        (popup.get_content_rows(), popup.get_content_columns())
+    };
     screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(20, 190)), 1);
     assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
-        .iter().any(|(id, _, mouse)| *id == 20 && matches!(mouse, Mouse::Hover(-1, _))));
+        .iter().any(|(id, client, mouse)| {
+            *id == 20 && *client == 1 && matches!(mouse, Mouse::Hover(row, column)
+                if *row < 0 || *row >= popup_rows as isize || *column >= popup_columns)
+        }), "leaving the card must notify its owning plugin with an outside hover");
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 41)), 1);
+    assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
+        .iter().any(|(id, client, mouse)| {
+            *id == 20 && *client == 1 && matches!(mouse, Mouse::Hover(row, column)
+                if *row >= 0 && *row < popup_rows as isize && *column < popup_columns)
+        }), "returning to the card must restore its owning plugin's inside hover");
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
 }
 
 #[test]
