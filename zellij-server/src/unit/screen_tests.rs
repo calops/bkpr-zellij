@@ -1251,6 +1251,21 @@ fn passive_popup_over_tiled_gutter_fixture(popup_width: usize) -> (
             None,
         ).unwrap();
         tab.set_pane_selectable(PaneId::Plugin(tab_id as u32 + 20), false);
+        // Creation precedes the plugin's passive registration and initially clamps
+        // to the application viewport. Mirror the real controller's readiness
+        // coordinate update, which may place the outline over the native gutter.
+        let popup = PaneId::Plugin(tab_id as u32 + 20);
+        tab.change_floating_pane_coordinates(&popup, FloatingPaneCoordinates {
+            pinned: Some(true),
+            borderless: Some(true),
+            ..FloatingPaneCoordinates::default()
+                .with_x_fixed(39).with_y_fixed(3)
+                .with_width_fixed(popup_width).with_height_fixed(12)
+        }).unwrap();
+        assert_eq!(tab.get_pane_with_id(popup).unwrap().x(), 39);
+        assert_eq!(tab.get_pane_with_id(popup).unwrap().cols(), popup_width);
+        assert_eq!(tab.get_pane_with_id(PaneId::Plugin(tab_id as u32 + 10))
+            .unwrap().get_content_columns(), 39);
         tab.handle_pty_bytes(
             tab_id as u32 + 1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
         ).unwrap();
