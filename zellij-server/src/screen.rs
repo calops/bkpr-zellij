@@ -5376,6 +5376,13 @@ impl Screen {
         }
 
         fn create_pane_list_entry(pane_info: PaneInfo, tab: &crate::tab::Tab) -> PaneListEntry {
+            let program_status = if pane_info.is_plugin {
+                Vec::new()
+            } else {
+                tab.get_pane_with_id(PaneId::Terminal(pane_info.id))
+                    .map(|pane| pane.program_status())
+                    .unwrap_or_default()
+            };
             PaneListEntry {
                 pane_info,
                 tab_id: tab.id,
@@ -5383,6 +5390,7 @@ impl Screen {
                 tab_name: tab.name.clone(),
                 pane_command: None,
                 pane_cwd: None,
+                program_status,
             }
         }
 

@@ -4,6 +4,8 @@ pub mod hyperlink_tracker;
 pub mod kitty_graphics;
 pub mod link_handler;
 pub mod nested_session_modal;
+pub mod program_status;
+pub mod program_status_vte;
 pub mod selection;
 pub mod sixel;
 pub mod terminal_character;

@@ -403,6 +403,9 @@ pub trait Pane {
     fn get_pane_default_colors(&self) -> (Option<String>, Option<String>) {
         (None, None)
     }
+    fn program_status(&self) -> Vec<zellij_utils::data::ProgramStatus> {
+        Vec::new()
+    }
 
     fn right_boundary_x_coords(&self) -> usize {
         self.x() + self.cols()

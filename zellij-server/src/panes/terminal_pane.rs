@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::time::{self, Instant};
-use vte;
 use zellij_utils::data::PaneContents;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
@@ -137,7 +136,7 @@ pub struct TerminalPane {
     pub geom_override: Option<PaneGeom>,
     pub active_at: Instant,
     pub style: Style,
-    vte_parser: vte::Parser,
+    vte_parser: super::program_status_vte::ProgramStatusVteParser,
     selection_scrolled_at: time::Instant,
     content_offset: Offset,
     pane_title: String,
@@ -1088,7 +1087,13 @@ impl Pane for TerminalPane {
     fn is_alternate_mode_active(&self) -> bool {
         self.grid.is_alternate_mode_active()
     }
+    fn program_status(&self) -> Vec<zellij_utils::data::ProgramStatus> {
+        self.grid.program_status.snapshot()
+    }
     fn hold(&mut self, exit_status: Option<i32>, is_first_run: bool, run_command: RunCommand) {
+        if !is_first_run {
+            self.grid.program_status.expire_running();
+        }
         self.invoked_with = Some(Run::Command(run_command.clone()));
         self.is_held = Some((exit_status, is_first_run, run_command));
         if let Some(notification_end) = self.notification_end.as_mut() {
@@ -1407,7 +1412,7 @@ impl TerminalPane {
             selectable: true,
             geom: position_and_size,
             geom_override: None,
-            vte_parser: vte::Parser::new(),
+            vte_parser: super::program_status_vte::ProgramStatusVteParser::new(),
             active_at: Instant::now(),
             style,
             selection_scrolled_at: time::Instant::now(),

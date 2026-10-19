@@ -2408,6 +2408,18 @@ pub struct PaneInfo {
     pub default_bg: Option<String>,
 }
 
+/// One terminal-owned OSC 7501 record. Empty id addresses the root.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProgramStatus {
+    pub id: String,
+    pub state: String,
+    pub kind: Option<String>,
+    pub progress: Option<u8>,
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub msg: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PaneListEntry {
     #[serde(flatten)]
@@ -2419,6 +2431,8 @@ pub struct PaneListEntry {
     pub pane_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane_cwd: Option<String>,
+    #[serde(default)]
+    pub program_status: Vec<ProgramStatus>,
 }
 
 pub type ListPanesResponse = Vec<PaneListEntry>;
