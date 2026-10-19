@@ -145,9 +145,9 @@ async function main() {
         '',
         '**Human review and merge only. This automation never merges PRs or enables auto-merge.**',
         '- Review the entire diff and resolve conflicts, then mark the draft ready if applicable.',
-        '- Review the SHA-bound `Rust release verification` status and its linked Rust workflow run. The GITHUB_TOKEN-created PR does not automatically trigger normal pull_request workflows.',
-        '- After any human resolution push, wait for CI on the new head SHA. To rerun explicitly: `gh workflow run rust.yml --repo calops/bkpr-zellij --ref main -f checkout_ref=<FULL_PR_HEAD_SHA>`.',
-        '- Run the manual Nix/build/runtime smoke checks in `docs/NIX.md`, and any missing end-to-end checks. Rust dispatch is not the pull_request merge-ref or e2e suite.',
+        '- Review the SHA-bound `Upstream verification` status and its linked Nix build and packaged regression checks. Bot-created PRs are verified through an explicit workflow dispatch.',
+        '- After any resolution push, wait for checks on the new head SHA. To rerun explicitly: `gh workflow run upstream-check.yml --repo calops/bkpr-zellij --ref main -f checkout_ref=<FULL_PR_HEAD_SHA>`.',
+        '- Validate interactive behavior manually using `docs/NIX.md` before merging.',
         '- Merge with **Create a merge commit**, never squash or rebase: future release detection depends on the upstream tag remaining an ancestor of main.',
       ].join('\n');
       if (dryRun) {
@@ -164,21 +164,21 @@ async function main() {
       report('Resolve conflicts and merge main into the update branch before trusting verification or marking the PR ready.');
     }
     if (dryRun) {
-      report(`Would set pending Rust release verification on ${headSha} and dispatch trusted rust.yml on main with checkout_ref=${headSha}. No remote changes made.`);
+      report(`Would set pending Upstream verification on ${headSha} and dispatch trusted upstream-check.yml on main with checkout_ref=${headSha}. No remote changes made.`);
       return;
     }
     await api(`${repository}/statuses/${headSha}`, {
       method: 'POST',
       body: {
-        state: 'pending', context: 'Rust release verification',
-        description: 'Trusted main Rust workflow requested; human validation still required',
+        state: 'pending', context: 'Upstream verification',
+        description: 'Trusted main Nix verification requested; human validation required',
         ...(process.env.GITHUB_RUN_ID ? { target_url: `https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}` } : {}),
       },
     });
-    await api(`${repository}/actions/workflows/rust.yml/dispatches`, {
+    await api(`${repository}/actions/workflows/upstream-check.yml/dispatches`, {
       method: 'POST', body: { ref: 'main', inputs: { checkout_ref: headSha } },
     });
-    report(`Dispatched trusted main Rust workflow for ${headSha}; it will publish a commit status on that exact SHA. No PR was merged.`);
+    report(`Dispatched trusted main Nix verification for ${headSha}; it will publish a commit status on that exact SHA. No PR was merged.`);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

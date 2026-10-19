@@ -73,5 +73,6 @@ To update a dependency, change its revision in `flake.nix`, then run
 `nix flake lock`. Keep the nixpkgs recipe compatible with this fork's release
 base when updating it.
 
-The fork has no Bkpr build or cache workflow. Release builds and cache uploads
-belong to the Bkpr repository; no cache credentials are required in this fork.
+The fork builds and runs packaged regression checks only for upstream-update
+PRs. It does not publish releases or upload caches. Release builds and cache
+uploads belong to the Bkpr repository; no cache credentials are required here.

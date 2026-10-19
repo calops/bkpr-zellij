@@ -37,7 +37,7 @@ if (process.env.RELEASE_FIXTURE) {
     } else if (method === 'POST' && path.startsWith('calops/bkpr-zellij/statuses/')) {
       state.statuses.push({ sha: path.split('/').at(-1), ...body });
       result = {};
-    } else if (method === 'POST' && path === 'calops/bkpr-zellij/actions/workflows/rust.yml/dispatches') {
+    } else if (method === 'POST' && path === 'calops/bkpr-zellij/actions/workflows/upstream-check.yml/dispatches') {
       state.dispatches.push(body);
       status = 204;
     } else {
