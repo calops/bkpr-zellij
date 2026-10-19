@@ -1678,7 +1678,16 @@ fn passive_popup_content_clicks_and_hover_still_reach_the_popup() {
     }));
     assert_eq!(screen.tabs[&0].get_pane_with_id(PaneId::Plugin(10)).unwrap().cols(), 40);
     assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
-    let mut output = crate::output::Output::default();
+    let mut output = crate::output::Output::new(
+        screen.sixel_image_store.clone(),
+        screen.character_cell_size.clone(),
+        true,
+        true,
+        screen.kitty_image_store.clone(),
+        screen.kitty_host_capabilities.clone(),
+        screen.client_kitty_host_state.clone(),
+        screen.sixel_host_capabilities.clone(),
+    );
     screen.get_active_tab_mut(1).unwrap().render(&mut output, None).unwrap();
     let rendered = output.serialize().unwrap().remove(&1).unwrap();
     assert!(rendered.contains("https://example.invalid/details"));
