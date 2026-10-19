@@ -14078,10 +14078,15 @@ fn native_clipboard_mode_disables_for_ui_and_plugin_focus_then_uses_fresh_contex
     let new_context = screen.clipboard_paste_targets[&1].0;
     assert_ne!(new_context, context);
     assert_eq!(capture.drain_clipboard_modes(), vec![(1, Some(new_context))]);
+    let (plugin_tx, _plugin_rx) = channels::unbounded::<(PluginInstruction, ErrorContext)>();
+    let plugin_sender = SenderWithContext::new(plugin_tx);
+    screen.bus.senders.to_plugin = Some(plugin_sender.clone());
+    screen.get_active_tab_mut(1).unwrap().senders.to_plugin = Some(plugin_sender);
     screen.get_active_tab_mut(1).unwrap().new_pane(
         PaneId::Plugin(9), None, None, false, true,
         NewPanePlacement::default(), Some(1), None,
     ).unwrap();
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Plugin(9)));
     screen.render(None).unwrap();
     assert!(!screen.clipboard_paste_targets.contains_key(&1));
     assert_eq!(capture.drain_clipboard_modes(), vec![(1, None)]);
