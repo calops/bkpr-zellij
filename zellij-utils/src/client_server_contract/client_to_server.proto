@@ -33,7 +33,12 @@ message ClientToServerMsg {
     SetMobileRenderPreferencesMsg set_mobile_render_preferences = 26;
     HostTerminalFocusChangedMsg host_terminal_focus_changed = 27;
     ClipboardPasteMsg clipboard_paste = 28;
+    TruecolorSupportMsg truecolor_support = 29;
   }
+}
+
+message TruecolorSupportMsg {
+  bool supported = 1;
 }
 
 message DetachSessionMsg {

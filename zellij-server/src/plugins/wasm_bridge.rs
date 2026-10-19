@@ -2087,7 +2087,7 @@ fn check_event_permission(
         | Event::InputReceived
         | Event::InitialKeybinds(..) => PermissionType::ReadApplicationState,
         Event::CustomMessage(name, _)
-            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info") => {
+            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors") => {
             PermissionType::ReadApplicationState
         },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
@@ -2175,6 +2175,13 @@ pub fn apply_event_to_plugin(
                         // we always render in this case, otherwise the request permission screen stays on
                         // screen
                         should_render = true;
+                        if matches!(event, Event::PermissionRequestResult(PermissionStatus::Granted))
+                            && plugin_subscriptions.contains(&EventType::CustomMessage)
+                        {
+                            senders.send_to_screen(ScreenInstruction::BootstrapProgramStatuses(
+                                plugin_id, client_id, plugin_subscriptions.clone(),
+                            ))?;
+                        }
                     }
                     if rows > 0 && columns > 0 && should_render {
                         let plugin_render_asset = running_plugin.render().with_context(err_context)?;

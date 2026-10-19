@@ -14885,3 +14885,42 @@ fn clipboard_cancellation_retires_only_its_owner_without_inventing_contents() {
     assert_eq!(capture.drain_pty_writes(), vec![(authentic_empty, 10)]);
     assert!(screen.clipboard_forward_in_flight_token.is_none());
 }
+
+#[test]
+fn terminal_palette_updates_and_bootstrap_are_client_scoped() {
+    use crate::terminal_colors::TerminalColorUpdate;
+    use zellij_utils::data::EventType;
+    let (mut screen, capture) = create_new_screen_with_theme_capture(Size { cols: 80, rows: 24 });
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::Truecolor(true)).unwrap();
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::Background("rgb:1111/2222/3333".into())).unwrap();
+    let mut updates = Vec::new();
+    while let Ok((instruction, _)) = capture.plugin_rx.try_recv() {
+        if let PluginInstruction::Update(events) = instruction {
+            updates.extend(events);
+        }
+    }
+    assert_eq!(updates.len(), 2);
+    assert!(updates.iter().all(|(plugin, client, _) | plugin.is_none() && *client == Some(1)));
+    assert!(!screen.terminal_colors.contains_key(&2));
+
+    let subscriptions = std::collections::HashSet::from([EventType::CustomMessage]);
+    for client_id in [1, 2] {
+        screen.bootstrap_program_statuses(17, client_id, &subscriptions).unwrap();
+        let (PluginInstruction::Update(events), _) = capture.plugin_rx.try_recv().unwrap() else { panic!() };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, Some(17));
+        assert_eq!(events[0].1, Some(client_id));
+        let Event::CustomMessage(name, payload) = &events[0].2 else { panic!() };
+        assert_eq!(name, "bkpr_terminal_colors");
+        let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(value["truecolor"], client_id == 1);
+        if client_id == 2 {
+            assert!(value["background"].is_null());
+            assert!(value["ansi"].as_array().unwrap().iter().all(serde_json::Value::is_null));
+        }
+    }
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::ResetPalette).unwrap();
+    let value = serde_json::to_value(&screen.terminal_colors[&1]).unwrap();
+    assert_eq!(value["truecolor"], true);
+    assert!(value["background"].is_null());
+}

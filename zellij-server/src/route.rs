@@ -2551,6 +2551,14 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::BackgroundColor {
                             color: ref background_color_instruction,
                         } => {
+                            if let Some(senders) = senders.as_ref() {
+                                senders.send_to_screen(ScreenInstruction::UpdateTerminalColors(
+                                    client_id,
+                                    crate::terminal_colors::TerminalColorUpdate::Background(
+                                        background_color_instruction.clone(),
+                                    ),
+                                ))?;
+                            }
                             send_to_screen_or_retry_queue!(
                                 senders,
                                 ScreenInstruction::TerminalBackgroundColor(
@@ -2564,6 +2572,14 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::ForegroundColor {
                             color: ref foreground_color_instruction,
                         } => {
+                            if let Some(senders) = senders.as_ref() {
+                                senders.send_to_screen(ScreenInstruction::UpdateTerminalColors(
+                                    client_id,
+                                    crate::terminal_colors::TerminalColorUpdate::Foreground(
+                                        foreground_color_instruction.clone(),
+                                    ),
+                                ))?;
+                            }
                             send_to_screen_or_retry_queue!(
                                 senders,
                                 ScreenInstruction::TerminalForegroundColor(
@@ -2577,6 +2593,17 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::ColorRegisters {
                             ref color_registers,
                         } => {
+                            if let Some(senders) = senders.as_ref() {
+                                senders.send_to_screen(ScreenInstruction::UpdateTerminalColors(
+                                    client_id,
+                                    crate::terminal_colors::TerminalColorUpdate::Ansi(
+                                        color_registers.iter()
+                                            .filter(|color| color.index < 16)
+                                            .map(|color| (color.index, color.color.clone()))
+                                            .collect(),
+                                    ),
+                                ))?;
+                            }
                             send_to_screen_or_retry_queue!(
                                 senders,
                                 ScreenInstruction::TerminalColorRegisters(
@@ -2589,6 +2616,17 @@ pub(crate) fn route_thread_main(
                                 retry_queue
                             )
                             .with_context(err_context)?;
+                        },
+                        ClientToServerMsg::TruecolorSupport { supported } => {
+                            send_to_screen_or_retry_queue!(
+                                senders,
+                                ScreenInstruction::UpdateTerminalColors(
+                                    client_id,
+                                    crate::terminal_colors::TerminalColorUpdate::Truecolor(supported),
+                                ),
+                                instruction,
+                                retry_queue
+                            ).with_context(err_context)?;
                         },
                         ClientToServerMsg::FirstClientConnected {
                             cli_assets,
@@ -2744,6 +2782,12 @@ pub(crate) fn route_thread_main(
                             );
                         },
                         ClientToServerMsg::HostTerminalThemeChanged { mode } => {
+                            if let Some(senders) = senders.as_ref() {
+                                senders.send_to_screen(ScreenInstruction::UpdateTerminalColors(
+                                    client_id,
+                                    crate::terminal_colors::TerminalColorUpdate::ResetPalette,
+                                ))?;
+                            }
                             let _ = send_to_screen_or_retry_queue!(
                                 senders,
                                 ScreenInstruction::HostTerminalThemeChanged(mode),

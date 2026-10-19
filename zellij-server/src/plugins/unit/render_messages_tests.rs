@@ -424,6 +424,7 @@ fn mode_info_json_requires_read_application_state_permission() {
         Event::InitialKeybinds(vec![]),
         Event::CustomMessage("mode_info".into(), "{}".into()),
         Event::CustomMessage("keybinds_info".into(), "[]".into()),
+        Event::CustomMessage("bkpr_terminal_colors".into(), "{}".into()),
     ] {
         assert_eq!(check_event_permission(guest.store.data(), &event),
             (PermissionStatus::Denied, Some(PermissionType::ReadApplicationState)));

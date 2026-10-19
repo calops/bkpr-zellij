@@ -347,6 +347,10 @@ impl InputHandler {
                 self.os_input
                     .send_to_server(ClientToServerMsg::ColorRegisters { color_registers });
             },
+            AnsiStdinInstruction::TruecolorSupport(supported) => {
+                self.os_input
+                    .send_to_server(ClientToServerMsg::TruecolorSupport { supported });
+            },
             AnsiStdinInstruction::SynchronizedOutput(enabled) => {
                 self.send_client_instructions
                     .send(ClientInstruction::SetSynchronizedOutput(enabled))

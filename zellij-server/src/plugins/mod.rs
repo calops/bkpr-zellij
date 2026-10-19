@@ -746,6 +746,11 @@ pub(crate) fn plugin_thread_main(
                 )?;
             },
             PluginInstruction::PostMessageToPlugin(plugin_id, client_id, message, payload) => {
+                // This name is reserved for permission-gated host metadata.
+                // A plugin worker must not impersonate a terminal response.
+                if message == "bkpr_terminal_colors" {
+                    continue;
+                }
                 let updates = vec![(
                     Some(plugin_id),
                     Some(client_id),

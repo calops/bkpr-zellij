@@ -172,6 +172,9 @@ pub enum ClientToServerMsg {
     ColorRegisters {
         color_registers: Vec<ColorRegister>,
     },
+    TruecolorSupport {
+        supported: bool,
+    },
     TerminalResize {
         new_size: Size,
     },

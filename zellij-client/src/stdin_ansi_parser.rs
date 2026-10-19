@@ -65,6 +65,7 @@ pub enum HostReply {
     HostTerminalThemeChanged(HostTerminalThemeMode),
     KittyGraphicsSupport(bool),
     SixelSupport(bool),
+    TruecolorSupport(bool),
 }
 
 /// Retained alias for the pre-refactor type name used by other modules in
@@ -1038,7 +1039,9 @@ impl StdinAnsiParser {
 
     fn extract_kitty_probe_reply(&mut self, bytes: &[u8], replies: &mut Vec<HostReply>) -> Vec<u8> {
         let mut working = std::mem::take(&mut self.partial_apc);
-        if working.is_empty() && self.partial_osc == [0x1b] && bytes.first() == Some(&b'_') {
+        if working.is_empty() && self.partial_osc == [0x1b]
+            && matches!(bytes.first(), Some(b'_') | Some(b'P'))
+        {
             working.append(&mut self.partial_osc);
         }
         working.extend_from_slice(bytes);
@@ -1046,6 +1049,39 @@ impl StdinAnsiParser {
         let mut i = 0;
         while i < working.len() {
             let rest = &working[i..];
+            // XTGETTCAP is answered by the attached terminal, including over
+            // SSH. Only an explicit successful RGB/Tc advertisement enables
+            // direct color; OSC RGB answers and Zellij themes cannot do so.
+            if rest.starts_with(b"\x1bP") {
+                match apc_status(rest) {
+                    SeqStatus::Complete(len) => {
+                        let payload = &rest[2..len - 2];
+                        if let Some(capabilities) = payload.strip_prefix(b"1+r") {
+                            if capabilities.split(|byte| *byte == b';').any(|capability| {
+                                matches!(capability,
+                                    b"524742" | b"524742=31" | b"524742=38" | b"524742=3234"
+                                    | b"5463" | b"5463=31")
+                            }) {
+                                replies.push(HostReply::TruecolorSupport(true));
+                            }
+                        }
+                        // Keep forwarded-query replies intact. The DCS parser
+                        // otherwise has no typed consumer for these replies.
+                        if let Some(slot) = self.active_forward.as_mut()
+                            .filter(|slot| slot.barriers_ahead == 0)
+                        {
+                            slot.reply_bytes.extend_from_slice(&rest[..len]);
+                        }
+                        i += len;
+                        continue;
+                    },
+                    SeqStatus::NeedMore if rest.len() <= PARTIAL_BUFFER_CAP_BYTES => {
+                        self.partial_apc = rest.to_vec();
+                        return out;
+                    },
+                    _ => {},
+                }
+            }
             if rest.len() >= 2 && rest[0] == 0x1b && rest[1] == b'_' {
                 match rest.get(2) {
                     Some(&b'G') => {},
@@ -1382,7 +1418,7 @@ fn osc_status(buf: &[u8]) -> SeqStatus {
 }
 
 fn apc_status(buf: &[u8]) -> SeqStatus {
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b'_') {
+    if buf.first() != Some(&0x1b) || !matches!(buf.get(1), Some(b'_') | Some(b'P')) {
         return SeqStatus::Malformed;
     }
     let mut i = 2;

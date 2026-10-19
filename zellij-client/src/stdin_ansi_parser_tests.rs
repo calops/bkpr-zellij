@@ -2563,3 +2563,41 @@ fn osc52_idle_or_malformed_replies_never_cancel_an_independent_kitty_request() {
         assert!(out.residue.is_empty());
     }
 }
+
+#[test]
+fn xtgettcap_truecolor_boolean_survives_every_split_and_negative_rgb() {
+    let response = b"\x1bP0+r524742\x1b\\\x1bP1+r5463\x1b\\\x1b[?1;2c";
+    for split in 0..=response.len() {
+        let mut parser = StdinAnsiParser::new();
+        parser.expect_host_replies();
+        let mut first = parser.feed(&response[..split]);
+        let second = parser.feed(&response[split..]);
+        first.replies.extend(second.replies);
+        assert_eq!(first.replies.iter().filter(|reply| {
+            matches!(reply, HostReply::TruecolorSupport(true))
+        }).count(), 1, "split {}", split);
+        assert!(!first.replies.iter().any(|reply| {
+            matches!(reply, HostReply::TruecolorSupport(false))
+        }));
+        assert!(first.residue.is_empty(), "split {}", split);
+        assert!(second.residue.is_empty(), "split {}", split);
+    }
+}
+
+#[test]
+fn osc_rgb_and_unknown_capabilities_do_not_advertise_truecolor() {
+    let mut parser = StdinAnsiParser::new();
+    parser.expect_host_replies();
+    let out = parser.feed(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1bP1+r436f=323536\x1b\\\x1bP0+r5463\x1b\\\x1b[?1;2c");
+    assert!(!out.replies.iter().any(|reply| matches!(reply, HostReply::TruecolorSupport(_))));
+    assert!(out.residue.is_empty());
+}
+
+#[test]
+fn forwarded_capability_replies_retain_the_original_wire_bytes() {
+    let mut parser = StdinAnsiParser::new();
+    parser.open_forward(91);
+    let out = parser.feed(b"\x1bP1+r5463\x1b\\\x1b[?1;2c");
+    assert_eq!(out.completed_forward, Some((91, b"\x1bP1+r5463\x1b\\".to_vec())));
+    assert!(out.residue.is_empty());
+}

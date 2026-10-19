@@ -22,6 +22,7 @@ use crate::{
         SoftKeyboardVisibilityChangedMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
         SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
+        TruecolorSupportMsg,
         UnblockInputThreadMsg, WebServerStartedMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
@@ -59,6 +60,9 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 client_to_server_msg::Message::ColorRegisters(ColorRegistersMsg {
                     color_registers: color_registers.into_iter().map(|cr| cr.into()).collect(),
                 })
+            },
+            ClientToServerMsg::TruecolorSupport { supported } => {
+                client_to_server_msg::Message::TruecolorSupport(TruecolorSupportMsg { supported })
             },
             ClientToServerMsg::TerminalResize { new_size } => {
                 client_to_server_msg::Message::TerminalResize(TerminalResizeMsg {
@@ -234,6 +238,9 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                         .map(|cr| cr.try_into())
                         .collect::<Result<Vec<_>>>()?,
                 })
+            },
+            Some(client_to_server_msg::Message::TruecolorSupport(support)) => {
+                Ok(ClientToServerMsg::TruecolorSupport { supported: support.supported })
             },
             Some(client_to_server_msg::Message::TerminalResize(resize)) => {
                 Ok(ClientToServerMsg::TerminalResize {
