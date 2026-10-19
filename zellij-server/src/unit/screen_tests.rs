@@ -915,6 +915,258 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
         .expect("TEST");
 }
 
+fn shared_width_tab(screen: &mut Screen, tab_id: usize, initial_width: usize) {
+    use zellij_utils::input::layout::SplitSize;
+    let plugin = RunPluginOrAlias::from_url(
+        "file:/shared-width-fixture.wasm",
+        &Some(BTreeMap::from([
+            ("shared_tiled_width_group".to_owned(), "sidebar".to_owned()),
+            ("shared_tiled_width_initial".to_owned(), initial_width.to_string()),
+        ])),
+        None,
+        None,
+    ).unwrap();
+    let sidebar = TiledPaneLayout {
+        run: Some(Run::Plugin(plugin.clone())),
+        split_size: Some(SplitSize::Percent(20)),
+        borderless: Some(true),
+        ..TiledPaneLayout::default()
+    };
+    let layout = TiledPaneLayout {
+        children_split_direction: SplitDirection::Vertical,
+        children: vec![sidebar, TiledPaneLayout {
+            focus: Some(true),
+            ..TiledPaneLayout::default()
+        }],
+        ..TiledPaneLayout::default()
+    };
+    screen.new_tab(tab_id, (vec![], vec![]), None, Some(1)).unwrap();
+    screen.apply_layout(
+        layout, vec![], vec![(tab_id as u32 + 1, None)], vec![],
+        HashMap::from([(plugin, vec![tab_id as u32 + 10])]),
+        tab_id, true, (1, false), None,
+    ).unwrap();
+}
+
+fn shared_width_columns(screen: &Screen, tab_id: usize) -> usize {
+    screen.tabs[&tab_id].get_tiled_panes()
+        .find(|(id, _)| **id == PaneId::Plugin(tab_id as u32 + 10))
+        .unwrap().1.position_and_size().cols.as_usize()
+}
+
+#[test]
+fn shared_sidebar_width_follows_native_resize_switch_and_new_tabs() {
+    use zellij_utils::data::ResizeStrategy;
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    shared_width_tab(&mut screen, 0, 38);
+    shared_width_tab(&mut screen, 1, 38);
+    assert_eq!(shared_width_columns(&screen, 0), 38);
+    assert_eq!(shared_width_columns(&screen, 1), 38);
+    screen.go_to_tab(1, 1).unwrap();
+    screen.tabs.get_mut(&0).unwrap().resize_pane_with_id(
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
+        PaneId::Plugin(10),
+    ).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    let resized = shared_width_columns(&screen, 0);
+    assert!(resized > 38);
+    assert_eq!(shared_width_columns(&screen, 1), resized);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+    screen.go_to_tab(2, 1).unwrap();
+    assert_eq!(shared_width_columns(&screen, 1), resized);
+    // Stock new-tab layouts carry their configured width, not the latest width.
+    shared_width_tab(&mut screen, 2, 38);
+    assert_eq!(shared_width_columns(&screen, 2), resized);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(3)));
+}
+
+#[test]
+fn shared_sidebar_width_survives_terminal_clamping_and_multiple_clients() {
+    let size = Size { cols: 200, rows: 30 };
+    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, false);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    screen.set_client_size(2, size);
+    screen.add_client(2, false).unwrap();
+    screen.go_to_tab(1, 1).unwrap();
+    screen.go_to_tab(2, 2).unwrap();
+    let focus = (screen.get_active_pane_id(&1), screen.get_active_pane_id(&2));
+    for cols in [80, 40, 80, 200, 300] {
+        for client_id in [1, 2] {
+            screen.set_client_size(client_id, Size { cols, rows: 30 });
+        }
+        screen.recompute_tab_size(0).unwrap();
+        screen.recompute_tab_size(1).unwrap();
+        screen.log_and_report_session_state().unwrap();
+        let actual = shared_width_columns(&screen, 0);
+        assert_eq!(shared_width_columns(&screen, 1), actual);
+        if cols >= 80 {
+            assert_eq!(actual, 47);
+        } else {
+            assert!(actual < 47);
+            assert!(actual >= 5);
+        }
+        assert_eq!((screen.get_active_pane_id(&1), screen.get_active_pane_id(&2)), focus);
+    }
+    // Different active clients may legitimately clamp differently; the small
+    // client's geometry must not become the large client's intended width.
+    screen.set_client_size(2, Size { cols: 40, rows: 30 });
+    screen.recompute_tab_size(1).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    assert!(shared_width_columns(&screen, 1) < 47);
+    screen.set_client_size(2, size);
+    screen.recompute_tab_size(1).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+}
+
+#[test]
+fn shared_sidebar_native_mouse_gutter_keeps_focus_cursor_and_updates_every_tab() {
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    shared_width_tab(&mut screen, 0, 38);
+    shared_width_tab(&mut screen, 1, 38);
+    screen.go_to_tab(1, 1).unwrap();
+    screen.tabs.get_mut(&0).unwrap().handle_pty_bytes(
+        1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
+    ).unwrap();
+    let cursor = |screen: &Screen| {
+        screen.tabs[&0].get_tiled_panes()
+            .find(|(id, _)| **id == PaneId::Terminal(1))
+            .unwrap().1.cursor_coordinates(Some(1))
+    };
+    let before_cursor = cursor(&screen);
+    let edge = shared_width_columns(&screen, 0) - 1;
+    screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
+    let resized = shared_width_columns(&screen, 0);
+    assert!(resized > 38);
+    assert_eq!(shared_width_columns(&screen, 1), resized);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+    assert_eq!(cursor(&screen), before_cursor);
+    for tab in screen.tabs.values() {
+        let sidebar = tab.get_tiled_panes().find(|(id, _)| matches!(id, PaneId::Plugin(_)))
+            .unwrap().1;
+        assert_eq!(sidebar.get_content_columns() + 1, sidebar.cols());
+    }
+}
+
+#[test]
+fn shared_sidebar_width_new_tabs_while_clamped_do_not_replace_user_intent() {
+    use zellij_utils::data::ResizeStrategy;
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    for tab in screen.tabs.values_mut() {
+        tab.resize_whole_tab(Size { cols: 40, rows: 30 }).unwrap();
+    }
+    screen.log_and_report_session_state().unwrap();
+    // Native creation uses the current smallest client geometry.
+    screen.set_client_size(1, Size { cols: 40, rows: 30 });
+    shared_width_tab(&mut screen, 2, 38);
+    let clamped = shared_width_columns(&screen, 0);
+    assert_eq!(shared_width_columns(&screen, 2), clamped);
+    for tab in screen.tabs.values_mut() {
+        tab.resize_whole_tab(Size { cols: 200, rows: 30 }).unwrap();
+    }
+    screen.set_client_size(1, Size { cols: 200, rows: 30 });
+    screen.log_and_report_session_state().unwrap();
+    for tab_id in 0..3 {
+        assert_eq!(shared_width_columns(&screen, tab_id), 47);
+    }
+    screen.go_to_tab(2, 1).unwrap();
+    screen.tabs.get_mut(&1).unwrap().resize_pane_with_id(
+        ResizeStrategy::new(Resize::Decrease, Some(Direction::Right)),
+        PaneId::Plugin(11),
+    ).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    let resized = shared_width_columns(&screen, 1);
+    assert!(resized < 47);
+    for tab_id in 0..3 {
+        assert_eq!(shared_width_columns(&screen, tab_id), resized);
+    }
+}
+
+#[test]
+fn shared_sidebar_width_fullscreen_and_unrelated_tabs_do_not_rewrite_intent() {
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    new_tab(&mut screen, 3, 2);
+    screen.go_to_tab(1, 1).unwrap();
+    screen.tabs.get_mut(&0).unwrap().toggle_pane_fullscreen(PaneId::Terminal(1));
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+    screen.tabs.get_mut(&0).unwrap().toggle_pane_fullscreen(PaneId::Terminal(1));
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+    let unrelated = screen.tabs[&2].get_tiled_panes().next().unwrap().1;
+    assert_eq!(unrelated.cols(), 200);
+}
+
+#[test]
+fn shared_sidebar_incompatible_layout_is_neither_width_source_nor_destination() {
+    use zellij_utils::pane_size::{Constraint, Dimension};
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    // A native layout override may retain plugin configuration while imposing
+    // fixed geometry. It must not become a shared resize observation.
+    for columns in [70, 80] {
+        let tab = screen.tabs.get_mut(&1).unwrap();
+        let sidebar = tab.get_pane_with_id_mut(PaneId::Plugin(11)).unwrap();
+        let mut geometry = sidebar.position_and_size();
+        geometry.cols = Dimension::fixed(columns);
+        sidebar.set_geom(geometry);
+        let application = tab.get_pane_with_id_mut(PaneId::Terminal(2)).unwrap();
+        let mut geometry = application.position_and_size();
+        geometry.x = columns;
+        geometry.cols.set_inner(200 - columns);
+        application.set_geom(geometry);
+        screen.log_and_report_session_state().unwrap();
+        assert_eq!(shared_width_columns(&screen, 0), 47);
+        assert_eq!(shared_width_columns(&screen, 1), columns);
+    }
+    // Becoming eligible again is a registration, not a manual resize of the
+    // formerly observed rail. Inherit remembered intent rather than fixed width.
+    let sidebar = screen.tabs.get_mut(&1).unwrap()
+        .get_pane_with_id_mut(PaneId::Plugin(11)).unwrap();
+    let mut geometry = sidebar.position_and_size();
+    geometry.cols.constraint = Constraint::Percent(40.0);
+    sidebar.set_geom(geometry);
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+}
+
+#[test]
+fn shared_sidebar_fit_reference_departure_publishes_restored_width_immediately() {
+    let size = Size { cols: 200, rows: 30 };
+    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, false);
+    shared_width_tab(&mut screen, 0, 47);
+    shared_width_tab(&mut screen, 1, 38);
+    screen.go_to_tab(1, 1).unwrap();
+    screen.set_client_size(2, Size { cols: 80, rows: 30 });
+    screen.add_client(2, true).unwrap();
+    screen.go_to_tab(1, 2).unwrap();
+    screen.set_mobile_render_preferences(2, false, false).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    assert_eq!(screen.tabs[&0].get_display_area().cols, 200);
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    // The native reference client leaves. Tab sizing first has no reference for
+    // fit-disabled client 2; publication then restores its own 80-column fit.
+    screen.go_to_tab(2, 1).unwrap();
+    assert_eq!(screen.tabs[&0].get_display_area().cols, 80);
+    assert_eq!(shared_width_columns(&screen, 0), 47);
+    assert_eq!(shared_width_columns(&screen, 1), 47);
+    let panes = screen.generate_and_report_pane_state().unwrap();
+    let sidebar = panes.panes[&0].iter().find(|pane| pane.is_plugin).unwrap();
+    assert_eq!(sidebar.pane_columns, 47);
+    assert_eq!(sidebar.pane_content_columns, 46);
+}
+
 fn tab_switch_mouse_fixture(
     mirrored: bool,
 ) -> (
