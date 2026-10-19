@@ -1378,6 +1378,12 @@ fn pipe_to_specific_plugins(
     ) {
         Ok(run_plugin_or_alias) => {
             let initial_cwd = run_plugin_or_alias.get_initial_cwd();
+            let tab_index = match &pipe_source {
+                PipeSource::Plugin(source_plugin_id) => {
+                    wasm_bridge.tab_index_of_plugin_id(*source_plugin_id)
+                },
+                _ => None,
+            };
             let all_plugin_ids = wasm_bridge.get_or_load_plugins(
                 run_plugin_or_alias,
                 size,
@@ -1390,6 +1396,7 @@ fn pipe_to_specific_plugins(
                 cli_client_id,
                 floating_pane_coordinates,
                 should_focus.unwrap_or(false),
+                tab_index,
             );
             for (plugin_id, client_id) in all_plugin_ids {
                 pipe_messages.push((

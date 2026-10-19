@@ -1100,6 +1100,48 @@ fn screen_tab_switch_hover_replay_does_not_focus_or_forward_terminal_tracking() 
 }
 
 #[test]
+fn screen_plugin_render_messages_follow_applied_nonempty_frame() {
+    use crate::plugins::PluginRenderAsset;
+    use zellij_utils::data::MessageToPlugin;
+    let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
+    let message = || MessageToPlugin::new("frame-applied");
+    let mut frame = PluginRenderAsset::new(11, 1, b"\x1b[HREADY".to_vec());
+    frame.render_messages.push(message());
+    let mut missing = PluginRenderAsset::new(99, 1, b"missing".to_vec());
+    missing.render_messages.push(message());
+    let mut empty = PluginRenderAsset::new(11, 1, vec![]);
+    empty.render_messages.push(message());
+    screen.apply_plugin_render_assets(vec![frame, missing]).unwrap();
+    let mut delivered = Vec::new();
+    while let Ok((instruction, _)) = plugin_receiver.try_recv() {
+        if let PluginInstruction::MessageFromPlugin { source_plugin_id, message } = instruction {
+            delivered.push((source_plugin_id, message.message_name));
+            let mut output = crate::output::Output::default();
+            let tab = screen.tabs.get_mut(&1).unwrap();
+            tab.add_client(1, None).unwrap();
+            tab.render(&mut output, None).unwrap();
+            let bytes = output.serialize().unwrap().remove(&1).unwrap();
+            assert!(bytes.contains("READY"), "message released before its matching pane frame");
+        }
+    }
+    assert_eq!(delivered, vec![(11, "frame-applied".to_owned())]);
+    screen.apply_plugin_render_assets(vec![empty]).unwrap();
+    assert!(plugin_receiver.try_iter().all(|(instruction, _)| {
+        !matches!(instruction, PluginInstruction::MessageFromPlugin { .. })
+    }));
+    // A later frame in the same batch supersedes earlier readiness, even when empty.
+    let mut superseded = PluginRenderAsset::new(11, 1, b"\x1b[HOLD".to_vec());
+    superseded.render_messages.push(message());
+    screen.apply_plugin_render_assets(vec![
+        superseded,
+        PluginRenderAsset::new(11, 1, vec![]),
+    ]).unwrap();
+    assert!(plugin_receiver.try_iter().all(|(instruction, _)| {
+        !matches!(instruction, PluginInstruction::MessageFromPlugin { .. })
+    }));
+}
+
+#[test]
 fn screen_tab_switch_synchronizes_staged_passive_misses_from_known_pointer() {
     use zellij_utils::data::Mouse;
     let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
@@ -1128,6 +1170,41 @@ fn screen_tab_switch_mirrored_clients_replay_their_own_known_positions() {
     assert!(hovers.contains(&(11, 1, Mouse::Hover(2, 4))));
     assert!(hovers.contains(&(11, 2, Mouse::Hover(3, 6))));
     assert_eq!(hovers.len(), 4);
+}
+
+#[test]
+fn screen_plugin_origin_tab_is_authoritative_before_focus_and_first_frame() {
+    use crate::plugins::PluginRenderAsset;
+    let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
+    let plugin = RunPluginOrAlias::from_url("file:/fixture.wasm", &None, None, None).unwrap();
+    let coordinates = FloatingPaneCoordinates {
+        pinned: Some(true),
+        borderless: Some(true),
+        ..FloatingPaneCoordinates::default()
+            .with_x_fixed(40)
+            .with_y_fixed(3)
+            .with_width_fixed(30)
+            .with_height_fixed(8)
+    };
+    screen.add_plugin_pane(
+        12, "prepared".to_owned(), Run::Plugin(plugin), false, false,
+        NewPanePlacement::with_floating_pane_coordinates(Some(coordinates)),
+        Some(1), Some(1),
+    ).unwrap();
+    assert!(screen.tabs.get(&1).unwrap().has_plugin(12));
+    assert!(!screen.tabs.get(&0).unwrap().has_plugin(12));
+    screen.tabs.get_mut(&1).unwrap().set_pane_selectable(PaneId::Plugin(12), false);
+    screen.apply_plugin_render_assets(vec![
+        PluginRenderAsset::new(12, 1, b"\x1b[HSTAGED".to_vec()),
+    ]).unwrap();
+    assert_eq!(screen.get_active_tab(1).unwrap().id, 0);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+    screen.go_to_tab(2, 1).unwrap();
+    let mut output = crate::output::Output::default();
+    screen.get_active_tab_mut(1).unwrap().render(&mut output, None).unwrap();
+    assert!(output.serialize().unwrap().remove(&1).unwrap().contains("STAGED"));
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(2)));
+    mouse_fixture_updates(&plugin_receiver);
 }
 
 #[test]

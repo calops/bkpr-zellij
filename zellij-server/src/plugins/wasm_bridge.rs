@@ -8,7 +8,7 @@ use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugi
 
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
-use crate::plugins::zellij_exports::{wasi_read_string, wasi_write_object};
+use crate::plugins::zellij_exports::wasi_write_object;
 use highway::{HighwayHash, PortableHash};
 use log::info;
 use notify_debouncer_full::{notify::RecommendedWatcher, Debouncer, RecommendedCache};
@@ -76,6 +76,7 @@ pub struct PluginRenderAsset {
     pub plugin_id: PluginId,
     pub bytes: Vec<u8>,
     pub cli_pipes: HashMap<String, PipeStateChange>,
+    pub render_messages: Vec<zellij_utils::data::MessageToPlugin>,
 }
 
 impl PluginRenderAsset {
@@ -808,7 +809,7 @@ impl WasmBridge {
                     .contains_key(&plugin_id)
             })
             .collect();
-        for (plugin_id, client_id, running_plugin) in plugins_to_resize {
+        for (plugin_id, _client_id, running_plugin) in plugins_to_resize {
             if plugin_id == pid {
                 let event_id = running_plugin
                     .lock()
@@ -831,32 +832,9 @@ impl WasmBridge {
                             // in the below conditional, we check if event_id == 0 so that we'll
                             // make sure to always render on the first resize event
                             if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
-                                let rendered_bytes = running_plugin
-                                    .instance
-                                    .clone()
-                                    .get_typed_func::<(i32, i32), ()>(
-                                        &mut running_plugin.store,
-                                        "render",
-                                    )
-                                    .and_then(|render| {
-                                        render.call(
-                                            &mut running_plugin.store,
-                                            (new_rows as i32, new_columns as i32),
-                                        )
-                                    })
-                                    .map_err(|e| anyhow!(e))
-                                    .and_then(|_| {
-                                        wasi_read_string(running_plugin.store.data())
-                                            .map_err(|e| anyhow!(e))
-                                    })
-                                    .with_context(err_context);
-                                match rendered_bytes {
-                                    Ok(rendered_bytes) => {
-                                        let plugin_render_asset = PluginRenderAsset::new(
-                                            plugin_id,
-                                            client_id,
-                                            rendered_bytes.as_bytes().to_vec(),
-                                        );
+                                let rendered_asset = running_plugin.render().with_context(err_context);
+                                match rendered_asset {
+                                    Ok(plugin_render_asset) => {
                                         senders
                                             .send_to_screen(ScreenInstruction::PluginBytes(vec![
                                                 plugin_render_asset,
@@ -1721,7 +1699,7 @@ impl WasmBridge {
                 r.store.data().plugin.clone()
             })
     }
-    fn tab_index_of_plugin_id(&self, plugin_id: PluginId) -> Option<usize> {
+    pub(super) fn tab_index_of_plugin_id(&self, plugin_id: PluginId) -> Option<usize> {
         self.plugin_map
             .lock()
             .unwrap()
@@ -1852,6 +1830,7 @@ impl WasmBridge {
         cli_client_id: Option<ClientId>,
         floating_pane_coordinates: Option<FloatingPaneCoordinates>,
         should_focus: bool,
+        tab_index: Option<usize>,
     ) -> Vec<(PluginId, Option<ClientId>)> {
         let run_plugin = run_plugin_or_alias.get_run_plugin();
         match run_plugin {
@@ -1869,7 +1848,7 @@ impl WasmBridge {
                     }
                     match self.load_plugin(
                         &Some(run_plugin),
-                        None,
+                        tab_index,
                         size,
                         cwd.clone(),
                         skip_cache,
@@ -1883,7 +1862,7 @@ impl WasmBridge {
                                 false, // close_replaced_pane
                                 run_plugin_or_alias,
                                 pane_title,
-                                None,
+                                tab_index,
                                 plugin_id,
                                 pane_id_to_replace,
                                 cwd,
@@ -2105,8 +2084,10 @@ fn check_event_permission(
         | Event::SoftKeyboardVisibilityChanged(..)
         | Event::HintText(..)
         | Event::ActivePaneScroll(..)
-        | Event::InputReceived => PermissionType::ReadApplicationState,
-        Event::CustomMessage(name, _) if name == "program_status" => {
+        | Event::InputReceived
+        | Event::InitialKeybinds(..) => PermissionType::ReadApplicationState,
+        Event::CustomMessage(name, _)
+            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info") => {
             PermissionType::ReadApplicationState
         },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
@@ -2141,6 +2122,18 @@ pub fn apply_event_to_plugin(
     match check_event_permission(running_plugin.store.data(), event) {
         (PermissionStatus::Granted, _) => {
             let mut event = event.clone();
+            let json_mode_info = matches!(
+                event,
+                Event::ModeUpdate(..) | Event::InitialKeybinds(..)
+            ) && running_plugin
+                .store
+                .data()
+                .plugin
+                .initial_userspace_configuration
+                .inner()
+                .get("mode_info_format")
+                .map(String::as_str)
+                == Some("json");
             if let Event::ModeUpdate(mode_info) = &mut event {
                 if mode_info.base_mode.is_none() {
                     mode_info.base_mode = Some(running_plugin.store.data().default_mode);
@@ -2151,6 +2144,19 @@ pub fn apply_event_to_plugin(
                 } else {
                     // Legacy plugin — send full keybindings as before
                     mode_info.keybinds = running_plugin.store.data().keybinds.to_keybinds_vec();
+                }
+                if json_mode_info {
+                    event = Event::CustomMessage(
+                        "mode_info".to_owned(),
+                        serde_json::to_string(mode_info).context("failed to serialize mode info")?,
+                    );
+                }
+            } else if let Event::InitialKeybinds(keybinds) = &event {
+                if json_mode_info {
+                    event = Event::CustomMessage(
+                        "keybinds_info".to_owned(),
+                        serde_json::to_string(keybinds).context("failed to serialize keybinds")?,
+                    );
                 }
             }
             let protobuf_event: Result<ProtobufEvent, _> = event.clone().try_into();
@@ -2171,27 +2177,10 @@ pub fn apply_event_to_plugin(
                         should_render = true;
                     }
                     if rows > 0 && columns > 0 && should_render {
-                        let rendered_bytes = instance
-                            .get_typed_func::<(i32, i32), ()>(&mut running_plugin.store, "render")
-                            .and_then(|render| {
-                                render
-                                    .call(&mut running_plugin.store, (rows as i32, columns as i32))
-                            })
-                            .map_err(|e| anyhow!(e))
-                            .and_then(|_| {
-                                wasi_read_string(running_plugin.store.data())
-                                    .map_err(|e| anyhow!(e))
-                            })
-                            .with_context(err_context)?;
+                        let plugin_render_asset = running_plugin.render().with_context(err_context)?;
                         let pipes_to_block_or_unblock =
                             pipes_to_block_or_unblock(running_plugin, None);
-                        let plugin_render_asset = PluginRenderAsset::new(
-                            plugin_id,
-                            client_id,
-                            rendered_bytes.as_bytes().to_vec(),
-                        )
-                        .with_pipes(pipes_to_block_or_unblock);
-                        plugin_render_assets.push(plugin_render_asset);
+                        plugin_render_assets.push(plugin_render_asset.with_pipes(pipes_to_block_or_unblock));
                     } else {
                         // This is a bit of a hack to get around the fact that plugins are allowed not to
                         // render and still unblock CLI pipes
@@ -2267,3 +2256,7 @@ pub fn apply_before_close_event_to_plugin(
         .context("failed to unblock input pipe");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "unit/render_messages_tests.rs"]
+mod render_messages_tests;
