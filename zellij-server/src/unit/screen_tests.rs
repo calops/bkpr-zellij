@@ -9333,23 +9333,6 @@ fn a_real_clipboard_reply_is_written_to_the_pane_verbatim() {
     assert!(screen.pending_clipboard_forwards.is_empty());
 }
 
-#[test]
-fn an_unanswered_clipboard_read_resolves_as_an_empty_clipboard() {
-    let size = Size { cols: 80, rows: 20 };
-    let (mut screen, capture) = create_new_screen_with_forward_capture(size);
-    screen.paste_buffer_read_enabled = true;
-    let token = screen.forward_host_query(PaneId::Terminal(9), clipboard_query());
-    let _ = capture.drain_forward_queries();
-
-    screen
-        .handle_forwarded_reply_from_host(token, Vec::new())
-        .expect("handler must not fail");
-
-    assert_eq!(
-        capture.drain_pty_writes(),
-        vec![(b"\x1b]52;c;\x1b\\".to_vec(), 9)]
-    );
-}
 
 #[test]
 fn a_late_clipboard_reply_is_discarded() {
@@ -14300,4 +14283,25 @@ fn clipboard_decrqm_ignores_other_host_reports_and_never_exposes_the_hosts_enabl
         screen.handle_forwarded_reply_from_host(token, reply.to_vec()).unwrap();
         assert_eq!(capture.drain_pty_writes(), vec![(expected.to_vec(), 2)]);
     }
+}
+
+#[test]
+fn clipboard_cancellation_retires_only_its_owner_without_inventing_contents() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 80, rows: 20 });
+    screen.paste_buffer_read_enabled = true;
+    let cancelled = screen.forward_host_query(PaneId::Terminal(9), clipboard_query());
+    screen.handle_forwarded_reply_from_host(cancelled, Vec::new()).unwrap();
+    let writes = capture.drain_pty_writes();
+    assert!(writes.iter().all(|(bytes, _)| bytes.is_empty()), "unknown clipboard contents must not produce an OSC52 data response");
+    assert!(screen.clipboard_forward_in_flight_token.is_none());
+    assert!(screen.pending_clipboard_forwards.is_empty());
+
+    let replacement = screen.forward_host_query(PaneId::Terminal(10), clipboard_query());
+    screen.handle_forwarded_reply_from_host(cancelled, b"\x1b]52;c;c3RhbGU=\x1b\\".to_vec()).unwrap();
+    assert!(capture.drain_pty_writes().is_empty());
+    assert_eq!(screen.clipboard_forward_in_flight_token, Some(replacement));
+    let authentic_empty = b"\x1b]52;c;\x1b\\".to_vec();
+    screen.handle_forwarded_reply_from_host(replacement, authentic_empty.clone()).unwrap();
+    assert_eq!(capture.drain_pty_writes(), vec![(authentic_empty, 10)]);
+    assert!(screen.clipboard_forward_in_flight_token.is_none());
 }

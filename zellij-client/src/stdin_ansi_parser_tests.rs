@@ -343,24 +343,6 @@ fn fragmented_osc_does_not_finalize_partial() {
     );
 }
 
-#[test]
-fn partial_osc_overflow_falls_back_to_residue() {
-    // An unterminated OSC larger than the cap must not grow memory
-    // unbounded. After the cap is hit the buffered bytes flush to
-    // residue and parsing resumes from a clean state.
-    let mut p = StdinAnsiParser::new();
-    let _ = p.feed(b"\x1b]52;c;");
-    let chunk = vec![b'A'; 1024 * 1024]; // 1 MB
-    let mut total_residue = 0usize;
-    for _ in 0..110 {
-        let out = p.feed(&chunk);
-        total_residue += out.residue.len();
-    }
-    assert!(
-        total_residue > 0,
-        "overflowed partial buffer should flush to residue, not silently grow"
-    );
-}
 
 #[test]
 fn osc_99_routes_into_desktop_notifications() {
@@ -2451,5 +2433,133 @@ fn kitty_clipboard_replacing_a_query_does_not_let_old_buffered_rejection_abort_t
                 assert_eq!(parser.active_clipboard_forward_token(), Some(107));
             }
         }
+    }
+}
+
+#[test]
+fn osc52_overflow_retires_only_its_owner_and_never_turns_clipboard_data_into_keys() {
+    let mut parser = StdinAnsiParser::new();
+    parser.open_clipboard_forward(201);
+    let mut oversized = b"\x1b]52;c;".to_vec();
+    oversized.resize(super::PARTIAL_BUFFER_CAP_BYTES + 32, b'A');
+    let out = parser.feed(&oversized);
+    assert!(out.residue.is_empty());
+    assert_eq!(out.completed_clipboard_forward, Some((201, Vec::new())));
+    assert_eq!(parser.active_clipboard_forward_token(), None);
+    drop(oversized);
+    assert!(parser.finalize_force().is_empty());
+
+    parser.open_clipboard_forward(202);
+    assert!(parser.feed(b"QUFBQkJC").residue.is_empty());
+    assert!(parser.feed(b"\x1b").residue.is_empty());
+    assert!(parser.finalize_force().is_empty());
+    assert!(parser.finalize_force().is_empty());
+    let out = parser.feed(b"\\");
+    assert!(out.residue.is_empty());
+    assert!(out.completed_clipboard_forward.is_none());
+    assert_eq!(parser.active_clipboard_forward_token(), Some(202));
+
+    let out = parser.feed(b"\x1b]52;c;\x07");
+    assert_eq!(out.completed_clipboard_forward, Some((202, b"\x1b]52;c;\x1b\\".to_vec())));
+    assert!(out.residue.is_empty());
+    assert_eq!(parser.feed(b"typing \x1ba").residue, b"typing \x1ba");
+}
+
+#[test]
+fn osc52_idle_abandonment_finishes_without_contents_at_the_real_wire_boundary() {
+    for terminator in [b"\x1b\\".as_slice(), b"\x07", b"\x18", b"\x1a"] {
+        let mut parser = StdinAnsiParser::new();
+        parser.open_clipboard_forward(203);
+        assert!(parser.feed(b"\x1b]52;c;QUFB").residue.is_empty());
+        assert!(parser.finalize_force().is_empty());
+        assert!(parser.finalize_force().is_empty());
+        let out = parser.feed(&[b"QkJC".as_slice(), terminator, b"typing"].concat());
+        assert_eq!(out.completed_clipboard_forward, Some((203, Vec::new())));
+        assert_eq!(out.residue, b"typing");
+        assert_eq!(parser.active_clipboard_forward_token(), None);
+    }
+}
+
+#[test]
+fn osc52_late_fragments_after_timeout_cannot_complete_a_replacement_read() {
+    for cutoff in 3..b"\x1b]52;c;QUFB".len() {
+        for force in [false, true] {
+            let mut parser = StdinAnsiParser::new();
+            parser.open_clipboard_forward(204);
+            let old_reply = b"\x1b]52;c;QUFBQkJC\x1b\\";
+            assert!(parser.feed(&old_reply[..cutoff]).residue.is_empty());
+            assert_eq!(parser.close_clipboard_forward_on_timeout(204), Some((204, Vec::new())));
+            parser.open_clipboard_forward(205);
+            if force { assert!(parser.finalize_force().is_empty()); }
+            let out = parser.feed(&old_reply[cutoff..]);
+            assert!(out.residue.is_empty());
+            assert!(out.completed_clipboard_forward.is_none());
+            assert_eq!(parser.active_clipboard_forward_token(), Some(205));
+            let authentic = b"\x1b]52;c;bmV3\x1b\\";
+            let out = parser.feed(authentic);
+            assert_eq!(out.completed_clipboard_forward, Some((205, authentic.to_vec())));
+            assert_eq!(parser.feed(b"typing").residue, b"typing");
+        }
+    }
+}
+
+#[test]
+fn osc52_reply_arriving_after_timeout_without_any_owner_stays_out_of_keyboard() {
+    for cutoff in 3..b"\x1b]52;c;QUFB".len() {
+        for terminator in [b"\x1b\\".as_slice(), b"\x07", b"\x18", b"\x1a"] {
+            let mut parser = StdinAnsiParser::new();
+            parser.open_clipboard_forward(206);
+            parser.close_clipboard_forward_on_timeout(206);
+            let reply = [b"\x1b]52;c;QUFBQkJC".as_slice(), terminator].concat();
+            assert!(parser.feed(&reply[..cutoff]).residue.is_empty());
+            assert!(parser.finalize_force().is_empty());
+            let out = parser.feed(&[&reply[cutoff..], b"typing"].concat());
+            assert!(out.completed_clipboard_forward.is_none());
+            assert!(out.clipboard_pastes.is_empty());
+            assert_eq!(out.residue, b"typing");
+        }
+    }
+}
+
+#[test]
+fn osc52_keyboard_cancellation_and_authentic_empty_replies_keep_wire_order() {
+    let mut parser = StdinAnsiParser::new();
+    parser.open_clipboard_forward(207);
+    let out = parser.feed(b"x\x1b]52;c;c2VjcmV0\x1b\\");
+    assert_eq!(out.completed_clipboard_forward, Some((207, Vec::new())));
+    assert_eq!(out.residue, b"x");
+    parser.open_clipboard_forward(208);
+    let out = parser.feed(b"\x1b]52;c;\x07x");
+    assert_eq!(out.completed_clipboard_forward, Some((208, b"\x1b]52;c;\x1b\\".to_vec())));
+    assert_eq!(out.residue, b"x");
+}
+
+#[test]
+fn osc52_idle_or_malformed_replies_never_cancel_an_independent_kitty_request() {
+    for malformed in [false, true] {
+        let mut parser = StdinAnsiParser::new();
+        let query = parser.prepare_clipboard_forward(209, b"\x1b]5522;type=read:id=kitty;Lg==\x1b\\".to_vec());
+        let id = kitty_clipboard_host_id(&query);
+        parser.feed(b"\x1b]52;c;QUFB");
+        if malformed {
+            let out = parser.feed(b"\x1ba");
+            assert_eq!(out.residue, b"\x1ba");
+            assert!(out.completed_clipboard_forward.is_none());
+        } else {
+            assert!(parser.finalize_force().is_empty());
+            assert!(parser.feed(b"QkJC\x1b\\").residue.is_empty());
+        }
+        assert_eq!(parser.active_clipboard_forward_token(), Some(209));
+        let opening = kitty_clipboard_reply(b"5522;type=read:status=OK", &id, b"\x1b\\");
+        let data = kitty_clipboard_reply(b"5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbgo=", &id, b"\x1b\\");
+        let done = kitty_clipboard_reply(b"5522;type=read:status=DONE", &id, b"\x1b\\");
+        let out = parser.feed(&[opening, data, done].concat());
+        let expected = [
+            kitty_clipboard_reply(b"5522;type=read:status=OK", b"kitty", b"\x1b\\"),
+            kitty_clipboard_reply(b"5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbgo=", b"kitty", b"\x1b\\"),
+            kitty_clipboard_reply(b"5522;type=read:status=DONE", b"kitty", b"\x1b\\"),
+        ].concat();
+        assert_eq!(out.completed_clipboard_forward, Some((209, expected)));
+        assert!(out.residue.is_empty());
     }
 }
