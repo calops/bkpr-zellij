@@ -2080,7 +2080,9 @@ fn kitty_clipboard_oversized_and_unfinished_host_packets_never_become_keystrokes
     let mut parser = StdinAnsiParser::new();
     let query = parser.prepare_clipboard_forward(10, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
     let id = kitty_clipboard_host_id(&query);
-    let mut hostile = b"\x1b]5522;type=read:status=DATA;".to_vec();
+    parser.set_clipboard_paste_context(Some(1));
+    parser.feed(b"\x1b]5522;type=read:status=OK\x1b\\");
+    let mut hostile = b"\x1b]5522;type=read:status=DATA:mime=Lg==;".to_vec();
     hostile.extend(std::iter::repeat_n(b'A', 32 * 1024));
     for part in hostile.chunks(1024) {
         let out = parser.feed(part);
@@ -2096,4 +2098,169 @@ fn kitty_clipboard_oversized_and_unfinished_host_packets_never_become_keystrokes
     let out = parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=EBUSY", &id, b"\x1b\\"));
     assert!(out.residue.is_empty());
     assert!(out.completed_clipboard_forward.is_some());
+}
+
+#[test]
+fn kitty_clipboard_discard_survives_idle_timeout_and_split_terminators() {
+    for oversized in [false, true] {
+        for terminator in [b"\x1b\\".as_slice(), b"\x07", b"\x18", b"\x1a"] {
+            let mut parser = StdinAnsiParser::new();
+            let query = parser.prepare_clipboard_forward(90, b"\x1b]5522;type=read:id=app;Lg==\x1b\\".to_vec());
+            let id = kitty_clipboard_host_id(&query);
+            let mut partial = [b"\x1b]5522;type=read:status=DATA:id=".as_slice(), &id, b":mime=Lg==;"].concat();
+            if oversized { partial.extend(std::iter::repeat_n(b'A', 32768)); }
+            let out = parser.feed(&partial);
+            assert!(out.residue.is_empty());
+            if oversized {
+                assert_eq!(out.completed_clipboard_forward,
+                    Some((90, kitty_clipboard_reply(b"5522;type=read:status=EBUSY", b"app", b"\x1b\\"))));
+            } else {
+                assert!(out.completed_clipboard_forward.is_none());
+                assert_eq!(parser.close_clipboard_forward_on_timeout(90), Some((90, Vec::new())));
+            }
+            assert!(parser.finalize_force().is_empty());
+            assert!(parser.finalize_force().is_empty(), "repeated one-second idle ticks cannot reset wire framing");
+            assert!(parser.feed(b"QUFBQkJC").residue.is_empty());
+            assert!(parser.feed(&terminator[..1]).residue.is_empty());
+            assert!(parser.finalize_force().is_empty());
+            let out = parser.feed(&[&terminator[1..], b"typing"].concat());
+            assert_eq!(out.residue, b"typing");
+            assert!(out.completed_clipboard_forward.is_none());
+            assert!(parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=DONE", &id, b"\x1b\\")).completed_clipboard_forward.is_none());
+        }
+    }
+}
+
+#[test]
+fn kitty_clipboard_rejected_data_aborts_instead_of_completing_a_truncated_read() {
+    for bad_kind in 0..3 {
+        let mut parser = StdinAnsiParser::new();
+        let query = parser.prepare_clipboard_forward(91, b"\x1b]5522;type=read:id=app;dGV4dC9wbGFpbg==\x1b\\".to_vec());
+        let id = kitty_clipboard_host_id(&query);
+        parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=OK", &id, b"\x1b\\"));
+        parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;QUFB", &id, b"\x1b\\"));
+        let mut bad = b"\x1b]5522;type=read:status=DATA".to_vec();
+        if bad_kind != 2 {
+            bad.extend_from_slice(b":id=");
+            bad.extend_from_slice(&id);
+        }
+        if bad_kind == 1 { bad.extend_from_slice(b":id=duplicate"); }
+        bad.extend_from_slice(b":mime=dGV4dC9wbGFpbg==;");
+        if bad_kind == 0 { bad.extend(std::iter::repeat_n(b'A', 16384)); }
+        else { bad.extend_from_slice(b"Q0ND"); }
+        bad.extend_from_slice(b"\x1b\\");
+        let out = parser.feed(&bad);
+        assert!(out.residue.is_empty());
+        assert_eq!(out.completed_clipboard_forward,
+            Some((91, kitty_clipboard_reply(b"5522;type=read:status=EBUSY", b"app", b"\x1b\\"))));
+        let tail = [
+            kitty_clipboard_reply(b"5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;QkJC", &id, b"\x1b\\"),
+            kitty_clipboard_reply(b"5522;type=read:status=DONE", &id, b"\x1b\\"),
+        ].concat();
+        let out = parser.feed(&tail);
+        assert!(out.residue.is_empty());
+        assert!(out.completed_clipboard_forward.is_none(), "DONE must not deliver the surviving AAABBB bytes");
+    }
+}
+
+#[test]
+fn kitty_clipboard_oversized_stale_generation_does_not_abort_the_current_read() {
+    let mut parser = StdinAnsiParser::new();
+    parser.prepare_clipboard_forward(1, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+    let old = parser.active_clipboard_forward.as_ref().unwrap().kitty.as_ref().unwrap().host_id.clone();
+    parser.close_clipboard_forward_on_timeout(1);
+    let query = parser.prepare_clipboard_forward(2, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+    let current = kitty_clipboard_host_id(&query);
+    let mut stale = [b"\x1b]5522;type=read:status=DATA:id=".as_slice(), &old, b":mime=Lg==;"].concat();
+    stale.extend(std::iter::repeat_n(b'A', 16384));
+    stale.extend_from_slice(b"\x1b\\");
+    assert!(parser.feed(&stale).completed_clipboard_forward.is_none());
+    assert_eq!(parser.active_clipboard_forward_token(), Some(2));
+    assert!(parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=EPERM", &current, b"\x1b\\")).completed_clipboard_forward.is_some());
+}
+
+const KITTY_PRIMARY_PASTE: &[u8] = b"\x1b]5522;type=read:status=OK:loc=primary:pw=c2VjcmV0\x1b\\\
+    \x1b]5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbiBpbWFnZS9wbmc=\x07\
+    \x1b]5522;type=read:status=DONE:pw=c2VjcmV0\x1b\\";
+
+#[test]
+fn kitty_clipboard_paste_stream_retains_original_context_across_focus_handoffs() {
+    let mut parser = StdinAnsiParser::new();
+    assert_eq!(parser.set_clipboard_paste_context(Some(100)), b"\x1b[?5522h");
+    let opening = b"\x1b]5522;type=read:status=OK:loc=primary:pw=c2VjcmV0\x1b\\";
+    assert!(parser.feed(opening).clipboard_pastes.is_empty());
+    parser.set_clipboard_paste_context(Some(200));
+    let mut events = Vec::new();
+    for byte in &KITTY_PRIMARY_PASTE[opening.len()..] {
+        let out = parser.feed(&[*byte]);
+        assert!(out.residue.is_empty());
+        assert!(out.completed_clipboard_forward.is_none());
+        events.extend(out.clipboard_pastes);
+    }
+    assert_eq!(events, vec![(100, KITTY_PRIMARY_PASTE.to_vec())]);
+    assert_eq!(parser.feed(KITTY_PRIMARY_PASTE).clipboard_pastes, vec![(200, KITTY_PRIMARY_PASTE.to_vec())]);
+    assert_eq!(parser.set_clipboard_paste_context(None), b"\x1b[?5522l");
+    let out = parser.feed(KITTY_PRIMARY_PASTE);
+    assert!(out.clipboard_pastes.is_empty());
+    assert!(out.residue.is_empty());
+}
+
+#[test]
+fn kitty_clipboard_paste_tokens_remain_separate_from_solicited_image_contents() {
+    let mut parser = StdinAnsiParser::new();
+    parser.set_clipboard_paste_context(Some(11));
+    let query = parser.prepare_clipboard_forward(92, b"\x1b]5522;type=read:id=editor;Lg==\x1b\\".to_vec());
+    let id = kitty_clipboard_host_id(&query);
+    let out = parser.feed(KITTY_PRIMARY_PASTE);
+    assert_eq!(out.clipboard_pastes, vec![(11, KITTY_PRIMARY_PASTE.to_vec())]);
+    assert!(out.completed_clipboard_forward.is_none());
+    assert_eq!(parser.active_clipboard_forward_token(), Some(92));
+    let out = parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=EPERM", &id, b"\x1b\\"));
+    assert!(out.clipboard_pastes.is_empty());
+    assert!(out.completed_clipboard_forward.is_some());
+    let followup = parser.prepare_clipboard_forward(93,
+        b"\x1b]5522;type=read:loc=primary:pw=c2VjcmV0:name=UGFzdGUgZXZlbnQ=:id=editor;aW1hZ2UvcG5n\x1b\\".to_vec());
+    assert!(followup.windows(b"loc=primary:pw=c2VjcmV0:name=UGFzdGUgZXZlbnQ=".len())
+        .any(|window| window == b"loc=primary:pw=c2VjcmV0:name=UGFzdGUgZXZlbnQ="));
+    assert!(followup.ends_with(b";aW1hZ2UvcG5n\x1b\\"));
+}
+
+#[test]
+fn kitty_clipboard_host_mode_cache_changes_context_without_repeating_decset() {
+    let mut parser = StdinAnsiParser::new();
+    assert_eq!(parser.set_clipboard_paste_context(None), b"\x1b[?5522l");
+    assert!(parser.set_clipboard_paste_context(None).is_empty());
+    assert_eq!(parser.set_clipboard_paste_context(Some(1)), b"\x1b[?5522h");
+    assert!(parser.set_clipboard_paste_context(Some(2)).is_empty());
+    assert_eq!(parser.feed(KITTY_PRIMARY_PASTE).clipboard_pastes, vec![(2, KITTY_PRIMARY_PASTE.to_vec())]);
+    assert_eq!(parser.set_clipboard_paste_context(None), b"\x1b[?5522l");
+}
+
+#[test]
+fn kitty_clipboard_unsolicited_fragments_use_a_bounded_reply_deadline_not_keyboard_idle() {
+    let mut parser = StdinAnsiParser::new();
+    parser.set_clipboard_paste_context(Some(3));
+    parser.feed(b"\x1b]5522;type=read:status=OK:pw=c2VjcmV0\x1b\\");
+    parser.feed(b"\x1b]5522;type=read:status=DATA:mime=Lg==;");
+    assert_eq!(parser.pending_partial(), PendingPartial::ExpectedReply);
+    assert!(parser.finalize_fast_partial().is_empty());
+    parser.partial_kitty_deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
+    assert_eq!(parser.pending_partial(), PendingPartial::ReplyInProgress);
+    assert!(parser.finalize_force().is_empty());
+    assert!(parser.feed(b"dGV4dC9wbGFpbgo=").residue.is_empty());
+    let out = parser.feed(b"\x1b\\\x1b]5522;type=read:status=DONE\x1b\\typing");
+    assert!(out.clipboard_pastes.is_empty(), "a timed-out MIME list must not create a partial authorization");
+    assert_eq!(out.residue, b"typing");
+}
+
+#[test]
+fn kitty_clipboard_and_late_osc52_bytes_cannot_leak_into_another_panes_color_query() {
+    let mut parser = StdinAnsiParser::new();
+    parser.prepare_clipboard_forward(1, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+    parser.open_forward(2);
+    let out = parser.feed(b"\x1b]52;c;c2VjcmV0\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?62;4c");
+    assert_eq!(out.completed_forward, Some((2, b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec())));
+    assert!(out.completed_clipboard_forward.is_none());
+    assert_eq!(parser.active_clipboard_forward_token(), Some(1));
+    assert!(out.residue.is_empty());
 }

@@ -9403,3 +9403,74 @@ fn a_character_wider_than_two_columns_advances_the_cursor_by_its_full_width() {
     assert_eq!(row.width(), 4);
     assert_eq!(cursor_position(&grid), Some((4, 0)));
 }
+
+#[test]
+fn clipboard_paste_mode_is_per_grid_and_tracks_decset_decrst() {
+    let mut first = new_grid_for_forwarding_test();
+    let mut second = new_grid_for_forwarding_test();
+    let mut first_parser = vte::Parser::new();
+    let mut second_parser = vte::Parser::new();
+    assert!(!first.clipboard_paste_mode);
+    assert!(!second.clipboard_paste_mode);
+    first_parser.advance(&mut first, b"\x1b[?2004;5522h");
+    assert!(first.clipboard_paste_mode);
+    assert!(first.bracketed_paste_mode);
+    assert!(!second.clipboard_paste_mode);
+    second_parser.advance(&mut second, b"\x1b[?5522h");
+    first_parser.advance(&mut first, b"\x1b[?5522l");
+    assert!(!first.clipboard_paste_mode);
+    assert!(first.bracketed_paste_mode);
+    assert!(second.clipboard_paste_mode);
+    second_parser.advance(&mut second, b"\x1bc");
+    assert!(!second.clipboard_paste_mode);
+}
+
+#[test]
+fn clipboard_paste_mode_does_not_hide_host_support_negotiation() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut grid, b"\x1b[?5522h\x1b[?5522$p\x1b[?5522l\x1b[?5522$p");
+    assert!(!grid.clipboard_paste_mode);
+    assert!(grid.pending_messages_to_pty.is_empty());
+    assert_eq!(grid.pending_forwarded_queries, vec![
+        crate::host_query::HostQuery::KittyClipboardSupport,
+        crate::host_query::HostQuery::KittyClipboardSupport,
+    ]);
+}
+
+#[test]
+fn malformed_clipboard_packet_aborts_write_retaining_original_id_and_ignores_followups() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    parser.advance(&mut grid,
+        b"\x1b]5522;type=write:id=original\x1b\\\
+          \x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;YQ==\x1b\\\
+          \x1b]5522;type=wdata:type=write:id=foreign\x1b\\\
+          \x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Yg==\x1b\\\
+          \x1b]5522;type=wdata\x1b\\");
+    assert_eq!(grid.pending_messages_to_pty, vec![
+        b"\x1b]5522;type=write:status=EINVAL:id=original\x1b\\".to_vec(),
+    ]);
+    assert!(grid.pending_forwarded_queries.is_empty());
+    let fresh = b"\x1b]5522;type=write:id=fresh\x1b\\\x1b]5522;type=wdata\x1b\\";
+    parser.advance(&mut grid, fresh);
+    assert_eq!(grid.pending_forwarded_queries, vec![
+        crate::host_query::HostQuery::KittyClipboard { bytes: fresh.to_vec(), write: true },
+    ]);
+}
+
+#[test]
+fn rejected_raw_clipboard_packet_aborts_active_assembly_only_once() {
+    let mut grid = new_grid_for_forwarding_test();
+    let mut parser = vte::Parser::new();
+    grid.reject_kitty_clipboard_packet("EINVAL");
+    assert!(grid.pending_messages_to_pty.is_empty());
+    parser.advance(&mut grid, b"\x1b]5522;type=write:id=app\x1b\\");
+    grid.reject_kitty_clipboard_packet("EFBIG");
+    grid.reject_kitty_clipboard_packet("EINVAL");
+    parser.advance(&mut grid, b"\x1b]5522;type=wdata\x1b\\");
+    assert_eq!(grid.pending_messages_to_pty, vec![
+        b"\x1b]5522;type=write:status=EFBIG:id=app\x1b\\".to_vec(),
+    ]);
+    assert!(grid.pending_forwarded_queries.is_empty());
+}

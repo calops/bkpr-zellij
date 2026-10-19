@@ -221,6 +221,10 @@ pub enum ClientToServerMsg {
         token: u32,
         reply_bytes: Vec<u8>,
     },
+    ClipboardPaste {
+        context: u64,
+        bytes: Vec<u8>,
+    },
     HostTerminalThemeChanged {
         mode: HostTerminalThemeMode,
     },
@@ -295,6 +299,9 @@ pub enum ServerToClientMsg {
         token: u32,
         query_bytes: Vec<u8>,
         resolve_async: bool,
+    },
+    SetClipboardPasteMode {
+        context: Option<u64>,
     },
     EmitNestedSessionFrame {
         payload_bytes: Vec<u8>,

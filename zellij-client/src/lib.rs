@@ -51,6 +51,7 @@ use std::sync::OnceLock;
 const ENTER_ALTERNATE_SCREEN: &str = "\u{1b}[?1049h";
 const EXIT_ALTERNATE_SCREEN: &str = "\u{1b}[?1049l";
 const ENABLE_BRACKETED_PASTE: &str = "\u{1b}[?2004h";
+const DISABLE_CLIPBOARD_PASTE: &str = "\u{1b}[?5522l";
 const ENABLE_FOCUS_REPORTING: &str = "\u{1b}[?1004h";
 const DISABLE_FOCUS_REPORTING: &str = "\u{1b}[?1004l";
 const RESET_STYLE: &str = "\u{1b}[m";
@@ -199,6 +200,9 @@ pub(crate) enum ClientInstruction {
         query_bytes: Vec<u8>,
         resolve_async: bool,
     },
+    SetClipboardPasteMode {
+        context: Option<u64>,
+    },
     EmitNestedSessionFrame(Vec<u8>),
 }
 
@@ -231,6 +235,9 @@ impl From<ServerToClientMsg> for ClientInstruction {
                 query_bytes,
                 resolve_async,
             },
+            ServerToClientMsg::SetClipboardPasteMode { context } => {
+                ClientInstruction::SetClipboardPasteMode { context }
+            },
             ServerToClientMsg::EmitNestedSessionFrame { payload_bytes } => {
                 ClientInstruction::EmitNestedSessionFrame(payload_bytes)
             },
@@ -262,6 +269,7 @@ impl From<&ClientInstruction> for ClientContext {
             ClientInstruction::RenamedSession(..) => ClientContext::RenamedSession,
             ClientInstruction::ConfigFileUpdated => ClientContext::ConfigFileUpdated,
             ClientInstruction::ForwardQueryToHost { .. } => ClientContext::ForwardQueryToHost,
+            ClientInstruction::SetClipboardPasteMode { .. } => ClientContext::SetClipboardPasteMode,
             ClientInstruction::EmitNestedSessionFrame(..) => ClientContext::EmitNestedSessionFrame,
         }
     }
@@ -386,10 +394,11 @@ fn exit_after_startup_error(teardown: Option<TerminalTeardown>, message: String)
                 ""
             };
             let rendered = format!(
-                "{}{}{}{}{}{}\r\n{}\n",
+                "{}{}{}{}{}{}{}\r\n{}\n",
                 kitty_exit,
                 DISABLE_HOST_THEME_NOTIFY,
                 DISABLE_FOCUS_REPORTING,
+                DISABLE_CLIPBOARD_PASTE,
                 EXIT_ALTERNATE_SCREEN,
                 RESET_STYLE,
                 SHOW_CURSOR,
@@ -559,6 +568,10 @@ pub(crate) enum InputInstruction {
     ForwardedReplyFromHostComplete {
         token: u32,
         reply_bytes: Vec<u8>,
+    },
+    ClipboardPaste {
+        context: u64,
+        bytes: Vec<u8>,
     },
     NestedSessionFrameFromHost(Vec<u8>),
     HostTerminalFocusChanged(bool),
@@ -1486,6 +1499,13 @@ pub fn start_client(
                     },
                 }
             },
+            ClientInstruction::SetClipboardPasteMode { context } => {
+                let mut parser = stdin_ansi_parser.lock().unwrap();
+                let mode_bytes = parser.set_clipboard_paste_context(context);
+                let mut out = os_input.get_stdout_writer();
+                let _ = out.write_all(mode_bytes);
+                let _ = out.flush();
+            },
             ClientInstruction::ForwardQueryToHost {
                 token,
                 query_bytes,
@@ -1598,6 +1618,14 @@ pub fn start_client(
             },
             _ => {},
         }
+    }
+
+    {
+        let mut parser = stdin_ansi_parser.lock().unwrap();
+        let mode_bytes = parser.set_clipboard_paste_context(None);
+        let mut out = os_input.get_stdout_writer();
+        let _ = out.write_all(mode_bytes);
+        let _ = out.flush();
     }
 
     nested_reannounce.stop();
@@ -1772,10 +1800,11 @@ fn terminal_teardown_message(message: &str, rows: usize, include_kitty_exit: boo
         ""
     };
     format!(
-        "{}{}{}{}{}{}{}{}\n",
+        "{}{}{}{}{}{}{}{}{}\n",
         kitty_exit,
         DISABLE_HOST_THEME_NOTIFY,
         DISABLE_FOCUS_REPORTING,
+        DISABLE_CLIPBOARD_PASTE,
         EXIT_ALTERNATE_SCREEN,
         RESET_STYLE,
         SHOW_CURSOR,

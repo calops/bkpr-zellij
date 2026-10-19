@@ -138,9 +138,10 @@ pub enum ServerInstruction {
     FailedToStartWebServer(String),
     ClearMouseHelpText(ClientId),
     ClearCommandOutputFlash(PaneId),
-    /// Relay a forwarded-query dispatch from Screen to the server main
-    /// loop. The main loop writes `ServerToClientMsg::ForwardQueryToHost`
-    ForwardQueryToHost(u32, Vec<u8>, bool),
+    /// Relay a forwarded-query dispatch from Screen to the server main loop.
+    /// A forced target must still be a connected regular client; never fall back.
+    ForwardQueryToHost(u32, Vec<u8>, bool, Option<ClientId>),
+    SetClipboardPasteMode(ClientId, Option<u64>),
     KeyPassthroughChanged(ClientId, PaneId, PaneId, bool, Option<Direction>, bool),
     EmitNestedSessionFrameToClient(ClientId, Vec<u8>),
 }
@@ -195,6 +196,7 @@ impl From<&ServerInstruction> for ServerContext {
                 ServerContext::ClearCommandOutputFlash
             },
             ServerInstruction::ForwardQueryToHost(..) => ServerContext::ForwardQueryToHost,
+            ServerInstruction::SetClipboardPasteMode(..) => ServerContext::SetClipboardPasteMode,
             ServerInstruction::KeyPassthroughChanged(..) => ServerContext::KeyPassthroughChanged,
             ServerInstruction::EmitNestedSessionFrameToClient(..) => {
                 ServerContext::EmitNestedSessionFrameToClient
@@ -874,7 +876,8 @@ mod session_state_tests {
     fn clear_forward_in_flight_removes_entry() {
         let mut s = with_client(1);
         s.mark_forward_in_flight(42, 1);
-        s.clear_forward_in_flight(42);
+        assert!(!s.clear_forward_in_flight(42, 2));
+        assert!(s.clear_forward_in_flight(42, 1));
         // After clear, removing the client yields no stuck tokens.
         assert!(s.remove_client(1).is_empty());
     }
@@ -1959,17 +1962,34 @@ pub fn start_server_impl(
                     .send_to_screen(ScreenInstruction::ClearCommandOutputFlash(pane_id))
                     .unwrap();
             },
-            ServerInstruction::ForwardQueryToHost(token, query_bytes, resolve_async) => {
-                // Pick a regular (non-watcher) client to carry the
-                // forward. Preference is the most recently active
-                // client (whichever last sent input); falls back to
-                // any connected client. When the host terminals of
-                // attached clients differ, the recently-active one
-                // is the best proxy for "what the user is currently
-                // looking at".
+            ServerInstruction::SetClipboardPasteMode(client_id, context) => {
+                if session_state.read().unwrap().clients.contains_key(&client_id) {
+                    send_to_client!(
+                        client_id,
+                        os_input,
+                        ServerToClientMsg::SetClipboardPasteMode { context },
+                        session_state,
+                        session_data
+                    );
+                }
+            },
+            ServerInstruction::ForwardQueryToHost(
+                token,
+                query_bytes,
+                resolve_async,
+                forced_target,
+            ) => {
+                // Token-authorized reads must stay on their original host client.
+                // Ordinary forwards retain the most-recently-active preference.
                 let target_client_id = {
                     let mut session = session_state.write().unwrap();
-                    let picked = session.pick_forward_target();
+                    let picked = match forced_target {
+                        Some(client_id) => session
+                            .clients
+                            .contains_key(&client_id)
+                            .then_some(client_id),
+                        None => session.pick_forward_target(),
+                    };
                     if let Some(cid) = picked {
                         session.mark_forward_in_flight(token, cid);
                     }

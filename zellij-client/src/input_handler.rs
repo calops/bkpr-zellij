@@ -284,6 +284,10 @@ impl InputHandler {
                             reply_bytes,
                         });
                 },
+                Ok((InputInstruction::ClipboardPaste { context, bytes }, _error_context)) => {
+                    self.os_input
+                        .send_to_server(ClientToServerMsg::ClipboardPaste { context, bytes });
+                },
                 Ok((
                     InputInstruction::NestedSessionFrameFromHost(payload_bytes),
                     _error_context,

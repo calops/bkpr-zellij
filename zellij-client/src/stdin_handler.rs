@@ -155,6 +155,10 @@ pub(crate) fn stdin_loop(
                                 },
                             );
                         }
+                        for (context, bytes) in parse_output.clipboard_pastes {
+                            let _ = send_input_instructions
+                                .send(InputInstruction::ClipboardPaste { context, bytes });
+                        }
                         for payload in parse_output.desktop_notifications {
                             let _ = send_input_instructions
                                 .send(InputInstruction::DesktopNotificationResponse(payload));

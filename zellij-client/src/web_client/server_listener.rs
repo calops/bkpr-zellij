@@ -255,6 +255,8 @@ pub fn zellij_server_listener(
                             Some(ServerToClientMsg::PaneRenderUpdate { .. }) => {},
                             Some(ServerToClientMsg::SubscribedPaneClosed { .. }) => {},
                             Some(ServerToClientMsg::EmitNestedSessionFrame { .. }) => {},
+                            // OSC 5522 paste notifications are native-host-only.
+                            Some(ServerToClientMsg::SetClipboardPasteMode { .. }) => {},
                             Some(ServerToClientMsg::ForwardQueryToHost { token, .. }) => {
                                 // Reply immediately with empty reply_bytes.
                                 // This is the existing convention that signals

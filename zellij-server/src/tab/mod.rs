@@ -496,6 +496,9 @@ pub trait Pane {
         // plugin panes have no such concept.
         vec![]
     }
+    fn clipboard_paste_mode(&self) -> bool {
+        false
+    }
     fn drain_nested_session_messages(&mut self) -> Vec<NestedSessionMessage> {
         vec![]
     }
@@ -4083,6 +4086,19 @@ impl Tab {
         } else {
             false
         }
+    }
+    pub fn pane_clipboard_paste_mode(&self, pane_id: PaneId) -> bool {
+        self.tiled_panes
+            .get_pane(pane_id)
+            .or_else(|| self.floating_panes.get_pane(pane_id))
+            .or_else(|| {
+                self.suppressed_panes
+                    .values()
+                    .find(|s_p| s_p.1.pid() == pane_id)
+                    .map(|s_p| &s_p.1)
+            })
+            .map(|pane| pane.clipboard_paste_mode() && !pane.is_held())
+            .unwrap_or(false)
     }
     pub fn clear_guest_modal_for_client_on_all_panes(&mut self, client_id: ClientId) {
         for pane_id in self.get_all_pane_ids() {

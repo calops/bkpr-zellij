@@ -3751,6 +3751,14 @@ fn test_client_messages() {
         client_id: Some(100),
         is_cli_client: true,
     });
+    test_client_roundtrip!(ClientToServerMsg::ClipboardPaste {
+        context: 0,
+        bytes: vec![],
+    });
+    test_client_roundtrip!(ClientToServerMsg::ClipboardPaste {
+        context: u64::MAX,
+        bytes: (0u8..=255u8).collect(),
+    });
     test_client_roundtrip!(ClientToServerMsg::ForwardedReplyFromHost {
         token: 0,
         reply_bytes: vec![],
@@ -3920,6 +3928,11 @@ fn test_server_messages() {
     });
     test_server_roundtrip!(ServerToClientMsg::SubscribedPaneClosed {
         pane_id: PaneId::Plugin(3),
+    });
+    test_server_roundtrip!(ServerToClientMsg::SetClipboardPasteMode { context: None });
+    test_server_roundtrip!(ServerToClientMsg::SetClipboardPasteMode { context: Some(0) });
+    test_server_roundtrip!(ServerToClientMsg::SetClipboardPasteMode {
+        context: Some(u64::MAX),
     });
     test_server_roundtrip!(ServerToClientMsg::ForwardQueryToHost {
         token: 0,

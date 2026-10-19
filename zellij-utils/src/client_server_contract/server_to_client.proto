@@ -24,6 +24,7 @@ message ServerToClientMsg {
     SetSoftKeyboardMsg set_soft_keyboard = 17;
     EmitNestedSessionFrameMsg emit_nested_session_frame = 18;
     MobileStateMsg mobile_state = 19;
+    SetClipboardPasteModeMsg set_clipboard_paste_mode = 20;
   }
 }
 
@@ -97,6 +98,10 @@ message ForwardQueryToHostMsg {
   uint32 token = 1;
   bytes query_bytes = 2;
   bool resolve_async = 3;
+}
+
+message SetClipboardPasteModeMsg {
+  optional uint64 context = 1;
 }
 
 message SetSoftKeyboardMsg {

@@ -200,7 +200,15 @@ struct KittyClipboardForward {
     original_id: Option<Vec<u8>>,
     write: bool,
     started: bool,
+    failed: bool,
     reply_bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct ClipboardPasteSlot {
+    context: u64,
+    bytes: Vec<u8>,
+    started: Instant,
 }
 
 pub const CLIENT_CLIPBOARD_FORWARD_TIMEOUT_MS: u64 = 30_000;
@@ -220,6 +228,7 @@ pub struct ParseOutput {
     /// case only the first is honored.
     pub completed_forward: Option<(u32, Vec<u8>)>,
     pub completed_clipboard_forward: Option<(u32, Vec<u8>)>,
+    pub clipboard_pastes: Vec<(u64, Vec<u8>)>,
     /// OSC 99 notification-response payloads (one per OSC 99 found in
     /// the chunk). Routed by the caller as
     /// `InputInstruction::DesktopNotificationResponse`. Lives here, not
@@ -329,10 +338,14 @@ pub struct StdinAnsiParser {
     /// flight, `None` otherwise.
     active_forward: Option<ForwardSlot>,
     active_clipboard_forward: Option<ClipboardForwardSlot>,
+    clipboard_paste_context: Option<u64>,
+    clipboard_paste_mode_initialized: bool,
+    active_clipboard_paste: Option<ClipboardPasteSlot>,
     /// Bytes of an OSC sequence whose terminator hasn't arrived yet.
     /// Carried across feed() calls so the next chunk can complete it.
     partial_osc: Vec<u8>,
     discard_kitty_osc: bool,
+    partial_kitty_deadline: Option<Instant>,
     /// Same for CSI device-control reports.
     partial_csi: Vec<u8>,
     partial_paste: Vec<u8>,
@@ -360,8 +373,12 @@ impl StdinAnsiParser {
             inner: InputParser::new(),
             active_forward: None,
             active_clipboard_forward: None,
+            clipboard_paste_context: None,
+            clipboard_paste_mode_initialized: false,
+            active_clipboard_paste: None,
             partial_osc: Vec::new(),
             discard_kitty_osc: false,
+            partial_kitty_deadline: None,
             partial_csi: Vec::new(),
             partial_paste: Vec::new(),
             nested_frame_extractor: nested_session::NestedFrameExtractor::new(),
@@ -509,9 +526,56 @@ impl StdinAnsiParser {
             remaining = &remaining[end..];
         }
         self.active_clipboard_forward.as_mut().unwrap().kitty = Some(KittyClipboardForward {
-            host_id, original_id, write, started: false, reply_bytes: Vec::new(),
+            host_id, original_id, write, started: false, failed: false, reply_bytes: Vec::new(),
         });
         outgoing
+    }
+
+    /// This context selects only future paste events. An already-started stream
+    /// retains its original recipient even when the user changes pane/client.
+    pub fn set_clipboard_paste_context(&mut self, context: Option<u64>) -> &'static [u8] {
+        let changed = self.clipboard_paste_context.is_some() != context.is_some();
+        self.clipboard_paste_context = context;
+        if !changed && self.clipboard_paste_mode_initialized { return b""; }
+        self.clipboard_paste_mode_initialized = true;
+        if context.is_some() { b"\x1b[?5522h" } else { b"\x1b[?5522l" }
+    }
+
+    fn capture_clipboard_paste(
+        &mut self,
+        packet: &zellij_utils::kitty_clipboard::Packet<'_>,
+        raw: &[u8],
+        out: &mut ParseOutput,
+    ) {
+        use zellij_utils::kitty_clipboard::{paste_authorization, MAX_PASTE_BYTES};
+        if packet.field(b"type") != Some(b"read") { return; }
+        match packet.field(b"status") {
+            Some(b"OK") => {
+                self.active_clipboard_paste = self.clipboard_paste_context.map(|context| ClipboardPasteSlot {
+                    context, bytes: Vec::new(), started: Instant::now(),
+                });
+            },
+            Some(b"DATA") if packet.field(b"mime") == Some(b"Lg==") => {},
+            Some(b"DONE") => {},
+            _ => { self.active_clipboard_paste = None; return; },
+        }
+        let slot = match self.active_clipboard_paste.as_mut() {
+            Some(slot) => slot,
+            None => return,
+        };
+        if slot.started.elapsed() >= Duration::from_secs(30)
+            || slot.bytes.len().saturating_add(raw.len()) > MAX_PASTE_BYTES
+        {
+            self.active_clipboard_paste = None;
+            return;
+        }
+        slot.bytes.extend_from_slice(raw);
+        if packet.field(b"status") == Some(b"DONE") {
+            let slot = self.active_clipboard_paste.take().unwrap();
+            if paste_authorization(&slot.bytes).is_some() {
+                out.clipboard_pastes.push((slot.context, slot.bytes));
+            }
+        }
     }
 
     fn capture_kitty_clipboard(&mut self, raw: &[u8], out: &mut ParseOutput) {
@@ -519,8 +583,25 @@ impl StdinAnsiParser {
         let term_len = if raw.last() == Some(&7) { 1 } else { 2 };
         let packet = match Packet::parse(&raw[2..raw.len() - term_len]) {
             Some(packet) => packet,
-            None => return,
+            None => {
+                self.reject_kitty_clipboard_packet(&raw[2..], out,
+                    raw.len() - 2 - term_len > zellij_utils::kitty_clipboard::MAX_PACKET_BYTES);
+                return;
+            },
         };
+        if packet.field(b"id").is_none() {
+            if packet.field(b"type") == Some(b"read") && packet.field(b"status") == Some(b"DATA")
+                && (self.active_clipboard_paste.is_none() || packet.field(b"mime") != Some(b"Lg=="))
+            {
+                // Actual clipboard contents without the request id cannot be a
+                // paste listing. Dropping just this DATA could truncate a read.
+                self.active_clipboard_paste = None;
+                self.abort_kitty_clipboard_forward(out, false);
+                return;
+            }
+            self.capture_clipboard_paste(&packet, raw, out);
+            return;
+        }
         let slot = match self.active_clipboard_forward.as_mut() {
             Some(slot) => slot,
             None => return,
@@ -533,9 +614,16 @@ impl StdinAnsiParser {
         if packet.field(b"id") != Some(kitty.host_id.as_slice()) || packet.field(b"type") != Some(kind) {
             return;
         }
+        if kitty.failed {
+            self.reject_kitty_clipboard_packet(&raw[2..], out, false);
+            return;
+        }
         let status = match packet.field(b"status") {
             Some(status) => status,
-            None => return,
+            None => {
+                self.reject_kitty_clipboard_packet(&raw[2..], out, false);
+                return;
+            },
         };
         let complete = match status {
             b"OK" if !kitty.write && !kitty.started => { kitty.started = true; false },
@@ -543,7 +631,10 @@ impl StdinAnsiParser {
             b"DONE" if kitty.write || kitty.started => true,
             b"ENOSYS" | b"EPERM" | b"EBUSY" => true,
             b"EIO" | b"EINVAL" | b"EFBIG" if kitty.write => true,
-            _ => return,
+            _ => {
+                self.reject_kitty_clipboard_packet(&raw[2..], out, false);
+                return;
+            },
         };
         let restored = packet.with_id(kitty.original_id.as_deref(), &raw[raw.len() - term_len..]);
         if kitty.reply_bytes.len().saturating_add(restored.len()) > MAX_TRANSFER_BYTES {
@@ -559,6 +650,52 @@ impl StdinAnsiParser {
         if complete {
             let slot = self.active_clipboard_forward.take().unwrap();
             out.completed_clipboard_forward = Some((slot.token, slot.kitty.unwrap().reply_bytes));
+        }
+    }
+
+    fn reject_kitty_clipboard_packet(&mut self, payload: &[u8], out: &mut ParseOutput, oversized: bool) {
+        use zellij_utils::kitty_clipboard::Packet;
+        // The metadata fits before the first payload separator in normal DATA
+        // packets, so an oversized stale generation need not cancel a new one.
+        let metadata_end = payload.iter().enumerate().skip(5)
+            .find_map(|(index, byte)| (*byte == b';' || *byte < 0x20 || *byte == 0x7f).then_some(index))
+            .unwrap_or(payload.len());
+        let metadata = Packet::parse(&payload[..metadata_end]);
+        if let Some(packet) = metadata.as_ref().filter(|packet| packet.field(b"id").is_none()) {
+            let unsolicited = packet.field(b"type") == Some(b"read")
+                && (matches!(packet.field(b"status"), Some(b"OK") | Some(b"DONE"))
+                    || (packet.field(b"status") == Some(b"DATA")
+                        && packet.field(b"mime") == Some(b"Lg==")
+                        && self.active_clipboard_paste.is_some()));
+            self.active_clipboard_paste = None;
+            if unsolicited { return; }
+        }
+        if metadata.is_none() { self.active_clipboard_paste = None; }
+        if let Some(slot) = self.active_clipboard_forward.as_ref() {
+            if let Some(kitty) = slot.kitty.as_ref() {
+                if metadata.as_ref().and_then(|packet| packet.field(b"id"))
+                    .map(|id| id != kitty.host_id.as_slice()).unwrap_or(false)
+                {
+                    return;
+                }
+            }
+        }
+        self.abort_kitty_clipboard_forward(out, oversized);
+    }
+
+    fn abort_kitty_clipboard_forward(&mut self, out: &mut ParseOutput, oversized: bool) {
+        use zellij_utils::kitty_clipboard::Packet;
+        if let Some(slot) = self.active_clipboard_forward.take() {
+            if let Some(kitty) = slot.kitty {
+                let payload = if !kitty.write { b"5522;type=read:status=EBUSY".as_slice() }
+                    else if oversized { b"5522;type=write:status=EFBIG".as_slice() }
+                    else { b"5522;type=write:status=EINVAL".as_slice() };
+                let reply = Packet::parse(payload).unwrap()
+                    .with_id(kitty.original_id.as_deref(), b"\x1b\\");
+                out.completed_clipboard_forward = Some((slot.token, reply));
+            } else {
+                self.active_clipboard_forward = Some(slot);
+            }
         }
     }
 
@@ -635,8 +772,10 @@ impl StdinAnsiParser {
                             bytes.extend_from_slice(&payload);
                             bytes.extend_from_slice(b"\x1b\\");
                             out.completed_clipboard_forward = Some((slot.token, bytes));
-                            continue;
                         }
+                        // Clipboard replies never belong to a color/size query,
+                        // including late OSC52 replies during a Kitty transaction.
+                        continue;
                     }
                     if let Some(slot) = self
                         .active_forward
@@ -728,8 +867,10 @@ impl StdinAnsiParser {
     }
 
     pub fn pending_partial(&self) -> PendingPartial {
-        if (self.active_clipboard_forward.as_ref().map(|slot| slot.kitty.is_some()).unwrap_or(false)
-            && self.partial_osc.starts_with(b"\x1b]5522;"))
+        if self.partial_osc.starts_with(b"\x1b]5522;")
+            && (self.active_clipboard_forward.as_ref().map(|slot| slot.kitty.is_some()).unwrap_or(false)
+                || ((self.clipboard_paste_context.is_some() || self.active_clipboard_paste.is_some())
+                    && self.partial_kitty_deadline.map(|deadline| Instant::now() < deadline).unwrap_or(false)))
             || self.host_replies_expected()
             && (!self.partial_osc.is_empty()
                 || !self.partial_csi.is_empty()
@@ -778,10 +919,20 @@ impl StdinAnsiParser {
 
     pub fn finalize_force(&mut self) -> Vec<u8> {
         self.in_bracketed_paste = false;
-        if self.discard_kitty_osc || self.partial_osc.starts_with(b"\x1b]5522;") {
+        if self.partial_osc.starts_with(b"\x1b]5522;") {
+            // A transaction deadline does not terminate its OSC on the wire.
+            // Keep consuming the frame after idle ticks, but retain no payload.
+            let trailing_escape = self.partial_osc.last() == Some(&0x1b);
             self.partial_osc.clear();
+            if trailing_escape { self.partial_osc.push(0x1b); }
+            self.discard_kitty_osc = true;
+            self.partial_kitty_deadline = None;
+            self.active_clipboard_paste = None;
+            if let Some(kitty) = self.active_clipboard_forward.as_mut().and_then(|slot| slot.kitty.as_mut()) {
+                kitty.failed = true;
+                kitty.reply_bytes.clear();
+            }
         }
-        self.discard_kitty_osc = false;
         let mut partial_nested_frame = self.nested_frame_extractor.take_partial();
         let mut out = Vec::with_capacity(
             self.partial_osc.len()
@@ -790,7 +941,7 @@ impl StdinAnsiParser {
                 + partial_nested_frame.len()
                 + self.partial_apc.len(),
         );
-        out.append(&mut self.partial_osc);
+        if !self.discard_kitty_osc { out.append(&mut self.partial_osc); }
         out.append(&mut self.partial_csi);
         out.append(&mut self.partial_paste);
         out.append(&mut partial_nested_frame);
@@ -890,7 +1041,7 @@ impl StdinAnsiParser {
         while i < working.len() {
             let rest = &working[i..];
             if self.discard_kitty_osc {
-                if rest[0] == 7 {
+                if matches!(rest[0], 7 | 0x18 | 0x1a) {
                     self.discard_kitty_osc = false;
                     i += 1;
                 } else if rest[0] == 0x1b {
@@ -948,7 +1099,12 @@ impl StdinAnsiParser {
                 match osc_status(rest) {
                     SeqStatus::Complete(len) => {
                         if rest.starts_with(b"\x1b]5522;") {
-                            self.capture_kitty_clipboard(&rest[..len], parsed);
+                            self.partial_kitty_deadline = None;
+                            if matches!(rest[len - 1], 0x18 | 0x1a) {
+                                self.reject_kitty_clipboard_packet(&rest[2..len - 1], parsed, false);
+                            } else {
+                                self.capture_kitty_clipboard(&rest[..len], parsed);
+                            }
                         } else {
                             events.extend_from_slice(&rest[..len]);
                         }
@@ -956,6 +1112,9 @@ impl StdinAnsiParser {
                         continue;
                     },
                     SeqStatus::NeedMore => {
+                        if rest.starts_with(b"\x1b]5522;") && self.partial_kitty_deadline.is_none() {
+                            self.partial_kitty_deadline = Some(Instant::now() + Duration::from_secs(30));
+                        }
                         let tail = rest.to_vec();
                         let cap = if rest.starts_with(b"\x1b]5522;") {
                             zellij_utils::kitty_clipboard::MAX_PACKET_BYTES + 4
@@ -964,7 +1123,9 @@ impl StdinAnsiParser {
                         };
                         if tail.len() > cap && rest.starts_with(b"\x1b]5522;") {
                             // Host data must never become keyboard input after overflow.
+                            self.reject_kitty_clipboard_packet(&rest[2..], parsed, true);
                             self.discard_kitty_osc = true;
+                            self.partial_kitty_deadline = None;
                             if tail.last() == Some(&0x1b) { self.partial_osc.push(0x1b); }
                         } else if tail.len() > cap {
                             out.extend_from_slice(&tail);
@@ -975,6 +1136,8 @@ impl StdinAnsiParser {
                     },
                     SeqStatus::Malformed => {
                         if rest.starts_with(b"\x1b]5522;") {
+                            self.partial_kitty_deadline = None;
+                            self.reject_kitty_clipboard_packet(&rest[2..], parsed, false);
                             // An unexpected ESC ends the malformed clipboard packet,
                             // but the new escape sequence still belongs to input.
                             if let Some(next) = rest[2..].iter().position(|b| *b == 0x1b) {
@@ -1039,7 +1202,7 @@ fn osc_status(buf: &[u8]) -> SeqStatus {
     let mut i = 2;
     while i < buf.len() {
         match buf[i] {
-            0x07 => return SeqStatus::Complete(i + 1),
+            0x07 | 0x18 | 0x1a => return SeqStatus::Complete(i + 1),
             0x1b => match buf.get(i + 1) {
                 Some(&b'\\') => return SeqStatus::Complete(i + 2),
                 // Bare ESC followed by something other than `\` —
