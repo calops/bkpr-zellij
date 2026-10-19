@@ -2601,3 +2601,19 @@ fn forwarded_capability_replies_retain_the_original_wire_bytes() {
     assert_eq!(out.completed_forward, Some((91, b"\x1bP1+r5463\x1b\\".to_vec())));
     assert!(out.residue.is_empty());
 }
+
+#[test]
+fn pasted_capability_responses_are_literal_for_every_fragment_boundary() {
+    let paste = b"\x1b[200~A\x1bP1+r5463\x1b\\B\x1b[201~";
+    for split in 0..=paste.len() {
+        let mut parser = StdinAnsiParser::new();
+        parser.expect_host_replies();
+        let first = parser.feed(&paste[..split]);
+        let second = parser.feed(&paste[split..]);
+        let residue = [first.residue, second.residue].concat();
+        assert_eq!(residue, paste, "split {}", split);
+        assert!(!first.replies.iter().chain(second.replies.iter()).any(|reply| {
+            matches!(reply, HostReply::TruecolorSupport(_))
+        }), "split {}", split);
+    }
+}
