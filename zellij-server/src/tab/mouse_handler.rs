@@ -1,5 +1,5 @@
 use std::time::Instant;
-use zellij_utils::data::{Direction, Resize, ResizeStrategy};
+use zellij_utils::data::{Direction, Event, Mouse, Resize, ResizeStrategy};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::pane_size::PaneGeom;
@@ -12,6 +12,26 @@ use crate::screen::{GuestModalOutcome, ScreenInstruction};
 use crate::ClientId;
 
 use super::{Pane, Tab};
+
+// Outside presses are ordinary subscribed plugin mouse updates, not an input grab.
+// The impossible row distinguishes them from real relative popup coordinates.
+fn passive_outside_press(event: &MouseEvent) -> Option<Mouse> {
+    if event.event_type != MouseEventType::Press
+        || event.wheel_up
+        || event.wheel_down
+        || event.wheel_left
+        || event.wheel_right
+    {
+        return None;
+    }
+    if event.right {
+        Some(Mouse::RightClick(-1, u16::MAX as usize))
+    } else if event.left || event.middle {
+        Some(Mouse::LeftClick(-1, u16::MAX as usize))
+    } else {
+        None
+    }
+}
 
 fn clear_hover_for_client(tab: &mut Tab, client_id: ClientId) -> bool {
     let mut cleared = false;
@@ -183,6 +203,10 @@ enum MouseAction {
         pane_id: PaneId,
         position: Position,
     },
+    RightClickPlugin {
+        pane_id: PaneId,
+        position: Position,
+    },
     SendToTerminal {
         pane_id: PaneId,
         event: MouseEvent,
@@ -222,6 +246,7 @@ struct ClickedPaneDetails {
     edge: Option<PaneEdge>,
     is_floating: bool,
     terminal_wants_mouse: bool,
+    selectable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,12 +384,44 @@ impl MouseHandler {
         client_id: ClientId,
         passthrough_pane_id: Option<PaneId>,
     ) -> Result<MouseEffect> {
+        Self::notify_passive_plugins_of_outside_press(tab, event, client_id);
         if let Some(effect) = Self::intercept_guest_modal_mouse_event(tab, event, client_id)? {
             return Ok(effect);
         }
         let context = Self::gather_mouse_event_context(tab, event, client_id, passthrough_pane_id)?;
         let action = Self::determine_mouse_action(event, &context)?;
         Self::execute_mouse_action(tab, action, event, client_id)
+    }
+
+    fn notify_passive_plugins_of_outside_press(
+        tab: &Tab,
+        event: &MouseEvent,
+        client_id: ClientId,
+    ) {
+        let outside_press = match passive_outside_press(event) {
+            Some(outside_press) => outside_press,
+            None => return,
+        };
+        for id in tab.floating_panes.pane_ids() {
+            let plugin_id = match id {
+                PaneId::Plugin(plugin_id) => *plugin_id,
+                PaneId::Terminal(_) => continue,
+            };
+            if let Some(pane) = tab.floating_panes.get_pane(*id) {
+                if !pane.selectable()
+                    && pane.borderless()
+                    && (tab.floating_panes.panes_are_visible()
+                        || pane.position_and_size().is_pinned)
+                    && !pane.contains(&event.position)
+                {
+                    let _ = tab.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                        Some(plugin_id),
+                        Some(client_id),
+                        Event::Mouse(outside_press.clone()),
+                    )]));
+                }
+            }
+        }
     }
 
     fn intercept_guest_modal_mouse_event(
@@ -517,6 +574,7 @@ impl MouseHandler {
             edge,
             is_floating,
             terminal_wants_mouse,
+            selectable: pane.selectable(),
         })
     }
 
@@ -778,6 +836,13 @@ impl MouseHandler {
                 pane_id: _,
                 position,
             } => Self::execute_focus_pane(tab, position, client_id),
+            MouseAction::RightClickPlugin { pane_id, position } => {
+                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                    let relative_position = pane.relative_position(&position);
+                    pane.handle_right_click(&relative_position, client_id);
+                }
+                Ok(MouseEffect::default())
+            },
             MouseAction::FocusPaneAndClickThrough {
                 pane_id: _,
                 position,
@@ -1515,6 +1580,14 @@ impl MouseHandler {
                     return Ok(MouseAction::ShowFloatingPanesAndFocus { pane_id: pinned_id });
                 }
                 if ctx.pinned_unselectable.is_some() {
+                    if ctx.pinned_unselectable == Some(details.pane_id)
+                        && matches!(details.pane_id, PaneId::Plugin(_))
+                    {
+                        return Ok(MouseAction::StartSelection {
+                            pane_id: details.pane_id,
+                            position: event.position,
+                        });
+                    }
                     return Ok(MouseAction::NoAction);
                 }
             }
@@ -1537,6 +1610,15 @@ impl MouseHandler {
             let Some(pane_id) = ctx.pane_id_at_position else {
                 return Ok(MouseAction::NoAction);
             };
+            if event.event_type == MouseEventType::Press
+                && matches!(pane_id, PaneId::Plugin(_))
+                && ctx.clicked_pane.map(|pane| !pane.selectable).unwrap_or(false)
+            {
+                return Ok(MouseAction::RightClickPlugin {
+                    pane_id,
+                    position: event.position,
+                });
+            }
             let is_active_pane = Some(pane_id) == ctx.active_pane_id;
             if is_active_pane {
                 return Ok(MouseAction::SendToTerminal {
@@ -1954,6 +2036,35 @@ mod tests {
             assert_eq!(
                 MouseHandler::determine_mouse_action(&event, &context).unwrap(),
                 MouseAction::NoAction
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_nonselectable_plugin_clicks_dispatch_without_focusing() {
+        let position = Position::new(4, 8);
+        let event = MouseEvent::new_left_press_event(position);
+        for pane_id in [PaneId::Plugin(2), PaneId::Terminal(2)] {
+            let mut context = mouse_event_context(false);
+            context.pane_id_at_position = Some(pane_id);
+            context.pinned_unselectable = Some(pane_id);
+            context.clicked_pane = Some(ClickedPaneDetails {
+                pane_id,
+                on_frame: false,
+                frame_intercepted: false,
+                edge: None,
+                is_floating: true,
+                terminal_wants_mouse: false,
+                selectable: false,
+            });
+            let expected = if matches!(pane_id, PaneId::Plugin(_)) {
+                MouseAction::StartSelection { pane_id, position }
+            } else {
+                MouseAction::NoAction
+            };
+            assert_eq!(
+                MouseHandler::determine_mouse_action(&event, &context).unwrap(),
+                expected
             );
         }
     }
