@@ -850,6 +850,7 @@ pub struct Grid {
     pub search_results: SearchResult,
     pub pending_clipboard_update: Option<String>,
     pub pending_osc7_cwd: Option<std::path::PathBuf>,
+    pub program_status: super::program_status::ProgramStatuses,
     pub pending_desktop_notifications: Vec<PendingNotification>,
     notification_tracker: NotificationTracker,
     /// Whitelisted host-terminal queries intercepted from the app running
@@ -1236,6 +1237,7 @@ impl Grid {
             sixel_host_support: true,
             pending_clipboard_update: None,
             pending_osc7_cwd: None,
+            program_status: Default::default(),
             pending_desktop_notifications: Vec::new(),
             notification_tracker: NotificationTracker::default(),
             pending_forwarded_queries: Vec::new(),
@@ -2781,6 +2783,7 @@ impl Grid {
         self.should_render = true;
     }
     pub fn reset_terminal_state(&mut self) {
+        self.program_status.clear();
         if let Some(alternate_screen_state) = self.alternate_screen_state.as_mut() {
             alternate_screen_state.kitty_grid.clear_all_placements();
         }
@@ -4718,7 +4721,23 @@ impl Perform for Grid {
                 // get/set cursor color currently unimplemented
             },
 
+            b"7501" => {
+                // Additional semicolon-separated OSC parameters are not part of this protocol.
+                if params.len() == 2 {
+                    if params[1] == b"?" {
+                        self.pending_messages_to_pty.push(
+                            format!("\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth{}", terminator).into_bytes(),
+                        );
+                    } else {
+                        self.program_status.report(params[1]);
+                    }
+                }
+            },
+
             b"133" => {
+                if params.get(1) == Some(&b"A".as_slice()) {
+                    self.program_status.expire_running();
+                }
                 let marker = params.get(1).and_then(|subcommand| match *subcommand {
                     b"A" | b"P" => Some(Osc133MarkerKind::Prompt),
                     b"B" | b"I" => Some(Osc133MarkerKind::Input),
