@@ -1028,32 +1028,57 @@ fn shared_sidebar_width_survives_terminal_clamping_and_multiple_clients() {
 
 #[test]
 fn shared_sidebar_native_mouse_gutter_keeps_focus_cursor_and_updates_every_tab() {
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
-    shared_width_tab(&mut screen, 0, 38);
-    shared_width_tab(&mut screen, 1, 38);
-    screen.go_to_tab(1, 1).unwrap();
-    screen.tabs.get_mut(&0).unwrap().handle_pty_bytes(
-        1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
-    ).unwrap();
-    let cursor = |screen: &Screen| {
-        screen.tabs[&0].get_tiled_panes()
-            .find(|(id, _)| **id == PaneId::Terminal(1))
-            .unwrap().1.cursor_coordinates(Some(1))
-    };
-    let before_cursor = cursor(&screen);
-    let edge = u16::try_from(shared_width_columns(&screen, 0) - 1).unwrap();
-    screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
-    screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
-    screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
-    let resized = shared_width_columns(&screen, 0);
-    assert!(resized > 38);
-    assert_eq!(shared_width_columns(&screen, 1), resized);
-    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
-    assert_eq!(cursor(&screen), before_cursor);
-    for tab in screen.tabs.values() {
-        let sidebar = tab.get_tiled_panes().find(|(id, _)| matches!(id, PaneId::Plugin(_)))
-            .unwrap().1;
-        assert_eq!(sidebar.get_content_columns() + 1, sidebar.cols());
+    for create_second_after_resize in [false, true] {
+        let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+        shared_width_tab(&mut screen, 0, 38);
+        if !create_second_after_resize {
+            shared_width_tab(&mut screen, 1, 38);
+        }
+        screen.go_to_tab(1, 1).unwrap();
+        screen.tabs.get_mut(&0).unwrap().handle_pty_bytes(
+            1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
+        ).unwrap();
+        let cursor = |screen: &Screen, tab_id: usize, terminal_id| {
+            screen.tabs[&tab_id].get_pane_with_id(PaneId::Terminal(terminal_id))
+                .unwrap().cursor_coordinates(Some(1))
+        };
+        let before_a_cursor = cursor(&screen, 0, 1);
+        let edge = u16::try_from(shared_width_columns(&screen, 0) - 1).unwrap();
+        screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
+        let resized_a = shared_width_columns(&screen, 0);
+        assert!(resized_a > 38);
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+        assert_eq!(cursor(&screen, 0, 1), before_a_cursor);
+        if create_second_after_resize {
+            shared_width_tab(&mut screen, 1, 38);
+        }
+        assert_eq!(shared_width_columns(&screen, 1), resized_a);
+        screen.tabs.get_mut(&1).unwrap().handle_pty_bytes(
+            2, b"\x1b[?25l\x1b[4;6HBPP".to_vec(),
+        ).unwrap();
+        let before_b_cursor = cursor(&screen, 1, 2);
+        screen.go_to_tab(1, 1).unwrap();
+        screen.go_to_tab(2, 1).unwrap();
+        let edge = u16::try_from(shared_width_columns(&screen, 1) - 1).unwrap();
+        screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
+        let resized_b = shared_width_columns(&screen, 1);
+        assert!(resized_b > resized_a, "the second tab must retain native gutter resizing");
+        assert_eq!(shared_width_columns(&screen, 0), resized_b);
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(2)));
+        assert_eq!(cursor(&screen, 0, 1), before_a_cursor);
+        assert_eq!(cursor(&screen, 1, 2), before_b_cursor);
+        screen.go_to_tab(1, 1).unwrap();
+        assert_eq!(shared_width_columns(&screen, 0), resized_b);
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+        for tab in screen.tabs.values() {
+            let sidebar = tab.get_tiled_panes().find(|(id, _)| matches!(id, PaneId::Plugin(_)))
+                .unwrap().1;
+            assert_eq!(sidebar.get_content_columns() + 1, sidebar.cols());
+        }
     }
 }
 
