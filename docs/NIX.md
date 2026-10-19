@@ -65,16 +65,12 @@ upstream dependencies.
 
 The fork owns its `flake.lock`. Consumers should use
 `github:calops/bkpr-zellij/bkpr` and keep the fork's inputs intact, without
-`follows` overrides. A locked consumer then builds the same derivation as the
-fork CI and can reuse `https://bkpr.cachix.org`.
+`follows` overrides. Bkpr's release CI builds and caches this pinned package
+as part of its dependency closure at `https://bkpr.cachix.org`.
 
 To update a dependency, change its revision in `flake.nix`, then run
 `nix flake lock`. Keep the nixpkgs recipe compatible with this fork's release
 base when updating it.
 
-`.github/workflows/bkpr-nix.yml` builds all three native packages on pushes to
-`bkpr` or a manual dispatch. It reads the public Bkpr cache without a token.
-If this fork already has `CACHIX_AUTH_TOKEN`, it also uploads build results;
-that secret is optional. Bkpr's release job can populate the cache through its
-normal dependency-closure upload, without copying a secret into this fork.
-The inherited upstream workflows aren't enabled or changed by this setup.
+The fork has no Bkpr build or cache workflow. Release builds and cache uploads
+belong to the Bkpr repository; no cache credentials are required in this fork.
