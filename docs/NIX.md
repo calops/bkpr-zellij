@@ -14,7 +14,7 @@ nix build --accept-flake-config .#zellij
 The flake supports `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
 `packages.<system>.default` and `.zellij` expose the packaged runtime.
 `.zellij-unwrapped` exposes the executable derivation, including embedded assets
-and generated shell completions. The Nix package version is `0.45.1-bkpr.1`;
+and generated shell completions. The Nix package version is `0.45.1-bkpr.2`;
 the integrated version feature supplies the binary's version string.
 
 Packaging reuses the pinned nixpkgs recipe's native libraries, installation,
