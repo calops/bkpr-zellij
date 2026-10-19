@@ -65,8 +65,17 @@ fn make_plugin_url_path_safe(url: String) -> String {
 
 #[derive(Debug, Clone)]
 pub enum EventOrPipeMessage {
-    Event(Event),
+    Event { event: Event, client_id: Option<ClientId> },
     PipeMessage(PipeMessage),
+}
+
+impl EventOrPipeMessage {
+    fn targets_client(&self, recipient: ClientId) -> bool {
+        match self {
+            Self::Event { client_id: Some(owner), .. } => *owner == recipient,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -953,10 +962,13 @@ impl WasmBridge {
 
         // loop once more to update the cached events for the pending plugins (probably currently
         // being loaded, we'll send them these events when they load)
-        for (pid, _cid, event) in updates.drain(..) {
+        for (pid, cid, event) in updates.drain(..) {
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
-                    cached_events.push(EventOrPipeMessage::Event(event.clone()));
+                    cached_events.push(EventOrPipeMessage::Event {
+                        event: event.clone(),
+                        client_id: cid,
+                    });
                 }
             }
         }
@@ -1511,8 +1523,11 @@ impl WasmBridge {
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             for event_or_pipe_message in events_or_pipe_messages {
+                                if !event_or_pipe_message.targets_client(client_id) {
+                                    continue;
+                                }
                                 match event_or_pipe_message {
-                                    EventOrPipeMessage::Event(event) => {
+                                    EventOrPipeMessage::Event { event, .. } => {
                                         match EventType::from_str(&event.to_string())
                                             .with_context(err_context)
                                         {
@@ -2087,7 +2102,7 @@ fn check_event_permission(
         | Event::InputReceived
         | Event::InitialKeybinds(..) => PermissionType::ReadApplicationState,
         Event::CustomMessage(name, _)
-            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info") => {
+            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors") => {
             PermissionType::ReadApplicationState
         },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
@@ -2175,6 +2190,13 @@ pub fn apply_event_to_plugin(
                         // we always render in this case, otherwise the request permission screen stays on
                         // screen
                         should_render = true;
+                        if matches!(event, Event::PermissionRequestResult(PermissionStatus::Granted))
+                            && plugin_subscriptions.contains(&EventType::CustomMessage)
+                        {
+                            senders.send_to_screen(ScreenInstruction::BootstrapProgramStatuses(
+                                plugin_id, client_id, plugin_subscriptions.clone(),
+                            ))?;
+                        }
                     }
                     if rows > 0 && columns > 0 && should_render {
                         let plugin_render_asset = running_plugin.render().with_context(err_context)?;
@@ -2260,3 +2282,32 @@ pub fn apply_before_close_event_to_plugin(
 #[cfg(test)]
 #[path = "unit/render_messages_tests.rs"]
 mod render_messages_tests;
+
+#[cfg(test)]
+mod cached_event_tests {
+    use super::*;
+
+    #[test]
+    fn pending_palette_snapshots_keep_the_original_client_destination() {
+        let event = EventOrPipeMessage::Event {
+            event: Event::CustomMessage("bkpr_terminal_colors".into(), "{}".into()),
+            client_id: Some(1),
+        };
+        assert!(event.targets_client(1));
+        assert!(!event.targets_client(2));
+        // Pending-cache replay clones the envelope for every connected client.
+        let replay = vec![event.clone()];
+        assert_eq!(replay.iter().filter(|entry| entry.targets_client(2)).count(), 0);
+        assert_eq!(replay.iter().filter(|entry| entry.targets_client(1)).count(), 1);
+    }
+
+    #[test]
+    fn pending_broadcast_events_still_reach_all_clients() {
+        let event = EventOrPipeMessage::Event {
+            event: Event::CustomMessage("broadcast".into(), "{}".into()),
+            client_id: None,
+        };
+        assert!(event.targets_client(1));
+        assert!(event.targets_client(2));
+    }
+}

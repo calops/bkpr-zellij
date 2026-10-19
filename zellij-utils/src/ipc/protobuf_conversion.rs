@@ -22,6 +22,7 @@ use crate::{
         SoftKeyboardVisibilityChangedMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
         SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
+        TerminalColorsUpdate as ProtoTerminalColorsUpdate,
         UnblockInputThreadMsg, WebServerStartedMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
@@ -55,9 +56,15 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
             ClientToServerMsg::ForegroundColor { color } => {
                 client_to_server_msg::Message::ForegroundColor(ForegroundColorMsg { color })
             },
-            ClientToServerMsg::ColorRegisters { color_registers } => {
+            ClientToServerMsg::ColorRegisters { color_registers, terminal_colors } => {
                 client_to_server_msg::Message::ColorRegisters(ColorRegistersMsg {
                     color_registers: color_registers.into_iter().map(|cr| cr.into()).collect(),
+                    terminal_colors: terminal_colors.map(|colors| ProtoTerminalColorsUpdate {
+                        foreground: colors.foreground,
+                        background: colors.background,
+                        truecolor: colors.truecolor,
+                        reset: colors.reset,
+                    }),
                 })
             },
             ClientToServerMsg::TerminalResize { new_size } => {
@@ -233,6 +240,12 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                         .into_iter()
                         .map(|cr| cr.try_into())
                         .collect::<Result<Vec<_>>>()?,
+                    terminal_colors: color_regs.terminal_colors.map(|colors| crate::ipc::TerminalColorsUpdate {
+                        foreground: colors.foreground,
+                        background: colors.background,
+                        truecolor: colors.truecolor,
+                        reset: colors.reset,
+                    }),
                 })
             },
             Some(client_to_server_msg::Message::TerminalResize(resize)) => {

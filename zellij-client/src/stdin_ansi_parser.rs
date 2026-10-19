@@ -65,6 +65,7 @@ pub enum HostReply {
     HostTerminalThemeChanged(HostTerminalThemeMode),
     KittyGraphicsSupport(bool),
     SixelSupport(bool),
+    TruecolorSupport(bool),
 }
 
 /// Retained alias for the pre-refactor type name used by other modules in
@@ -1207,6 +1208,51 @@ impl StdinAnsiParser {
                     continue;
                 }
             }
+            // Classify terminal DCS replies only outside bracketed paste.
+            // OSC RGB answers and Zellij themes never imply direct color.
+            if rest.starts_with(b"\x1bP") {
+                match apc_status(rest) {
+                    SeqStatus::Complete(len) => {
+                        let payload = &rest[2..len - 2];
+                        let capability_reply = payload.strip_prefix(b"1+r")
+                            .or_else(|| payload.strip_prefix(b"0+r"));
+                        let recognized = capability_reply.is_some_and(|capabilities| {
+                            capabilities.split(|byte| *byte == b';').all(|capability| {
+                                matches!(capability.split(|byte| *byte == b'=').next(),
+                                    Some(b"524742") | Some(b"5463"))
+                            })
+                        });
+                        if !recognized {
+                            // DCS is also application/input data. Only our
+                            // RGB/Tc capability replies belong to this parser.
+                            out.extend_from_slice(&rest[..len]);
+                            i += len;
+                            continue;
+                        }
+                        if let Some(capabilities) = payload.strip_prefix(b"1+r") {
+                            if capabilities.split(|byte| *byte == b';').any(|capability| {
+                                matches!(capability,
+                                    b"524742" | b"524742=31" | b"524742=38" | b"524742=3234"
+                                    | b"5463" | b"5463=31")
+                            }) {
+                                parsed.replies.push(HostReply::TruecolorSupport(true));
+                            }
+                        }
+                        if let Some(slot) = self.active_forward.as_mut()
+                            .filter(|slot| slot.barriers_ahead == 0)
+                        {
+                            slot.reply_bytes.extend_from_slice(&rest[..len]);
+                        }
+                        i += len;
+                        continue;
+                    },
+                    SeqStatus::NeedMore if rest.len() <= PARTIAL_BUFFER_CAP_BYTES => {
+                        self.partial_csi = rest.to_vec();
+                        return (out, events);
+                    },
+                    _ => {},
+                }
+            }
             // OSC: ESC ] ... (BEL | ESC \)
             if rest.len() >= 2 && rest[0] == 0x1b && rest[1] == b']' {
                 match osc_status(rest) {
@@ -1382,7 +1428,7 @@ fn osc_status(buf: &[u8]) -> SeqStatus {
 }
 
 fn apc_status(buf: &[u8]) -> SeqStatus {
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b'_') {
+    if buf.first() != Some(&0x1b) || !matches!(buf.get(1), Some(b'_') | Some(b'P')) {
         return SeqStatus::Malformed;
     }
     let mut i = 2;

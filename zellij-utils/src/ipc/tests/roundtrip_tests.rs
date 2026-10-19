@@ -371,8 +371,15 @@ fn test_client_messages() {
     });
     test_client_roundtrip!(ClientToServerMsg::ColorRegisters {
         color_registers: vec![],
+        terminal_colors: Some(crate::ipc::TerminalColorsUpdate {
+            foreground: Some("rgb:1111/2222/3333".into()),
+            background: None,
+            truecolor: Some(true),
+            reset: true,
+        }),
     });
     test_client_roundtrip!(ClientToServerMsg::ColorRegisters {
+        terminal_colors: None,
         color_registers: vec![
             ColorRegister {
                 index: 0,
@@ -4112,4 +4119,31 @@ fn rename_active_pane_wire_roundtrip() {
         .expect("Failed to convert decoded protobuf back to Rust");
 
     assert_eq!(original, roundtrip);
+}
+
+#[test]
+fn terminal_palette_extension_remains_a_legacy_color_register_message() {
+    use prost::Message;
+    use crate::client_server_contract::client_server_contract::ClientToServerMsg as ProtoClient;
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyRegisters {}
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyClient {
+        #[prost(message, optional, tag = "5")]
+        color_registers: Option<LegacyRegisters>,
+    }
+    let message = ClientToServerMsg::ColorRegisters {
+        color_registers: Vec::new(),
+        terminal_colors: Some(crate::ipc::TerminalColorsUpdate {
+            truecolor: Some(true),
+            ..Default::default()
+        }),
+    };
+    let wire = ProtoClient::from(message).encode_to_vec();
+    let legacy = LegacyClient::decode(wire.as_slice()).unwrap();
+    assert!(legacy.color_registers.is_some());
+    let decoded = ProtoClient::decode(legacy.encode_to_vec().as_slice()).unwrap();
+    let ClientToServerMsg::ColorRegisters { terminal_colors, .. } = decoded.try_into().unwrap()
+        else { panic!("legacy message changed kind") };
+    assert!(terminal_colors.is_none());
 }

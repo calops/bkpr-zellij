@@ -104,6 +104,11 @@
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib render_messages_tests -- --test-threads=1
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib screen_tab_switch_
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib screen_plugin_
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib terminal_colors
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib terminal_palette_
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib terminal_reply_batch
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib cached_event_tests
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib terminal_palette_extension_remains_a_legacy_color_register_message
                 '';
                 passthru = { };
                 meta = old.meta // {

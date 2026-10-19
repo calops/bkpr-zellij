@@ -424,6 +424,7 @@ fn mode_info_json_requires_read_application_state_permission() {
         Event::InitialKeybinds(vec![]),
         Event::CustomMessage("mode_info".into(), "{}".into()),
         Event::CustomMessage("keybinds_info".into(), "[]".into()),
+        Event::CustomMessage("bkpr_terminal_colors".into(), "{}".into()),
     ] {
         assert_eq!(check_event_permission(guest.store.data(), &event),
             (PermissionStatus::Denied, Some(PermissionType::ReadApplicationState)));
@@ -434,5 +435,61 @@ fn mode_info_json_requires_read_application_state_permission() {
         assert!(assets.is_empty());
         assert!(guest.store.data().stdin_pipe.lock().unwrap().is_empty());
         assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[test]
+fn pending_palette_replay_delivers_only_each_real_guests_own_client_snapshot() {
+    for waiting_for_permission in [false, true] {
+        let pending = [
+            EventOrPipeMessage::Event {
+                event: Event::CustomMessage("bkpr_terminal_colors".into(),
+                    r#"{"truecolor":true,"foreground":[255,255,255],"background":[0,0,0],"ansi":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}"#.into()),
+                client_id: Some(1),
+            },
+            EventOrPipeMessage::Event {
+                event: Event::CustomMessage("bkpr_terminal_colors".into(),
+                    r#"{"truecolor":false,"foreground":null,"background":null,"ansi":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}"#.into()),
+                client_id: Some(2),
+            },
+        ];
+        for client_id in [1, 2] {
+            let (mut guest, _receiver) = running_guest(17, client_id, 5, b"palette frame", false);
+            if waiting_for_permission {
+                guest.store.data_mut().set_permissions(HashSet::new());
+                for entry in &pending {
+                    if entry.targets_client(client_id) {
+                        let EventOrPipeMessage::Event { event, .. } = entry else { panic!() };
+                        let senders = guest.store.data().senders.clone();
+                        apply_event_to_plugin(17, client_id, &mut guest, event,
+                            &mut Vec::new(), senders, &HashSet::new()).unwrap();
+                    }
+                }
+                assert!(guest.store.data().stdin_pipe.lock().unwrap().is_empty());
+                guest.store.data_mut().set_permissions(HashSet::from([
+                    PermissionType::ReadApplicationState,
+                    PermissionType::MessageAndLaunchOtherPlugins,
+                ]));
+            }
+            let mut delivered = 0;
+            for entry in pending.iter().cloned() {
+                if !entry.targets_client(client_id) {
+                    continue;
+                }
+                let EventOrPipeMessage::Event { event, .. } = entry else { panic!() };
+                let senders = guest.store.data().senders.clone();
+                apply_event_to_plugin(17, client_id, &mut guest, &event,
+                    &mut Vec::new(), senders, &HashSet::from([EventType::CustomMessage])).unwrap();
+                let Event::CustomMessage(name, payload) = delivered_event(&guest) else { panic!() };
+                assert_eq!(name, "bkpr_terminal_colors");
+                let palette: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(palette["truecolor"], client_id == 1);
+                if client_id == 2 {
+                    assert!(palette["background"].is_null());
+                }
+                delivered += 1;
+            }
+            assert_eq!(delivered, 1);
+        }
     }
 }

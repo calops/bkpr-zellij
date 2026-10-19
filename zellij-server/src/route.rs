@@ -2576,7 +2576,20 @@ pub(crate) fn route_thread_main(
                         },
                         ClientToServerMsg::ColorRegisters {
                             ref color_registers,
+                            ref terminal_colors,
                         } => {
+                            if let Some(senders) = senders.as_ref() {
+                                senders.send_to_screen(ScreenInstruction::UpdateTerminalColors(
+                                    client_id,
+                                    crate::terminal_colors::TerminalColorUpdate::Batch {
+                                        metadata: terminal_colors.clone().unwrap_or_default(),
+                                        ansi: color_registers.iter()
+                                            .filter(|color| color.index < 16)
+                                            .map(|color| (color.index, color.color.clone()))
+                                            .collect(),
+                                    },
+                                ))?;
+                            }
                             send_to_screen_or_retry_queue!(
                                 senders,
                                 ScreenInstruction::TerminalColorRegisters(

@@ -63,6 +63,15 @@ pub struct ClientAttributes {
     pub style: Style,
 }
 
+/// Optional extension of ColorRegisters; older peers ignore its protobuf field.
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TerminalColorsUpdate {
+    pub foreground: Option<String>,
+    pub background: Option<String>,
+    pub truecolor: Option<bool>,
+    pub reset: bool,
+}
+
 #[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelDimensions {
     pub text_area_size: Option<SizeInPixels>,
@@ -171,6 +180,7 @@ pub enum ClientToServerMsg {
     },
     ColorRegisters {
         color_registers: Vec<ColorRegister>,
+        terminal_colors: Option<TerminalColorsUpdate>,
     },
     TerminalResize {
         new_size: Size,

@@ -36,6 +36,13 @@ message ClientToServerMsg {
   }
 }
 
+message TerminalColorsUpdate {
+  optional string foreground = 1;
+  optional string background = 2;
+  optional bool truecolor = 3;
+  bool reset = 4;
+}
+
 message DetachSessionMsg {
   repeated uint32 client_ids = 1;
 }
@@ -54,6 +61,7 @@ message ForegroundColorMsg {
 
 message ColorRegistersMsg {
   repeated ColorRegister color_registers = 1;
+  TerminalColorsUpdate terminal_colors = 2;
 }
 
 message TerminalResizeMsg {

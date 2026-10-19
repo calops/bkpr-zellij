@@ -3136,6 +3136,18 @@ pub mod client_to_server_msg {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TerminalColorsUpdate {
+    #[prost(string, optional, tag="1")]
+    pub foreground: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="2")]
+    pub background: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag="3")]
+    pub truecolor: ::core::option::Option<bool>,
+    #[prost(bool, tag="4")]
+    pub reset: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DetachSessionMsg {
     #[prost(uint32, repeated, tag="1")]
     pub client_ids: ::prost::alloc::vec::Vec<u32>,
@@ -3163,6 +3175,8 @@ pub struct ForegroundColorMsg {
 pub struct ColorRegistersMsg {
     #[prost(message, repeated, tag="1")]
     pub color_registers: ::prost::alloc::vec::Vec<ColorRegister>,
+    #[prost(message, optional, tag="2")]
+    pub terminal_colors: ::core::option::Option<TerminalColorsUpdate>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

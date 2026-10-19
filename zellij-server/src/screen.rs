@@ -547,6 +547,7 @@ pub enum ScreenInstruction {
     TerminalBackgroundColor(String),
     TerminalForegroundColor(String),
     TerminalColorRegisters(Vec<(usize, String)>),
+    UpdateTerminalColors(ClientId, crate::terminal_colors::TerminalColorUpdate),
     SetKittyGraphicsSupport {
         client_id: ClientId,
         supported: bool,
@@ -1110,6 +1111,7 @@ impl From<&ScreenInstruction> for ScreenContext {
                 ScreenContext::TerminalForegroundColor
             },
             ScreenInstruction::TerminalColorRegisters(..) => ScreenContext::TerminalColorRegisters,
+            ScreenInstruction::UpdateTerminalColors(..) => ScreenContext::TerminalColorRegisters,
             ScreenInstruction::SetKittyGraphicsSupport { .. } => {
                 ScreenContext::SetKittyGraphicsSupport
             },
@@ -1562,6 +1564,7 @@ pub(crate) struct Screen {
     tab_history: BTreeMap<ClientId, Vec<usize>>,
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
     mode_info: BTreeMap<ClientId, ModeInfo>,
+    terminal_colors: BTreeMap<ClientId, crate::terminal_colors::TerminalColors>,
     default_mode_info: ModeInfo, // TODO: restructure ModeInfo to prevent this duplication
     style: Style,
     pane_frame_style: PaneFrameStyle,
@@ -1826,6 +1829,7 @@ impl Screen {
             tab_history: BTreeMap::new(),
             pane_history: BTreeMap::new(),
             mode_info: BTreeMap::new(),
+            terminal_colors: BTreeMap::new(),
             default_mode_info: mode_info,
             pane_frame_style,
             auto_layout,
@@ -2880,6 +2884,20 @@ impl Screen {
         for (color_register, color_sequence) in color_registers {
             terminal_emulator_color_codes.insert(color_register, color_sequence);
         }
+    }
+
+    fn update_client_terminal_colors(
+        &mut self,
+        client_id: ClientId,
+        update: crate::terminal_colors::TerminalColorUpdate,
+    ) -> Result<()> {
+        let colors = self.terminal_colors.entry(client_id).or_default();
+        if colors.update(update) {
+            self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                None, Some(client_id), colors.event(),
+            )]))?;
+        }
+        Ok(())
     }
     fn pane_clipboard_paste_mode(&self, pane_id: PaneId) -> bool {
         self.tabs
@@ -5468,6 +5486,7 @@ impl Screen {
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
+        self.terminal_colors.remove(&client_id);
         let _ = self.bus.senders.send_to_server(
             ServerInstruction::SetClipboardPasteMode(client_id, None),
         );
@@ -8182,6 +8201,12 @@ impl Screen {
         client_id: ClientId,
         subscriptions: &HashSet<EventType>,
     ) -> Result<()> {
+        if subscriptions.contains(&EventType::CustomMessage) {
+            let colors = self.terminal_colors.get(&client_id).cloned().unwrap_or_default();
+            self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                Some(plugin_id), Some(client_id), colors.event(),
+            )]))?;
+        }
         let topology_event_count = usize::from(subscriptions.contains(&EventType::PaneUpdate))
             + usize::from(subscriptions.contains(&EventType::TabUpdate));
         let mut topology = Vec::with_capacity(topology_event_count);
@@ -10550,6 +10575,9 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::TerminalColorRegisters(color_registers) => {
                 screen.update_terminal_color_registers(color_registers);
+            },
+            ScreenInstruction::UpdateTerminalColors(client_id, update) => {
+                screen.update_client_terminal_colors(client_id, update)?;
             },
             ScreenInstruction::SetKittyGraphicsSupport {
                 client_id,

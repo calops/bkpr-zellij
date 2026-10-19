@@ -96,6 +96,7 @@ pub(crate) fn stdin_loop(
     let mut kitty_parser = KittyKeyboardParser::new();
     let mut current_buffer = vec![];
     let (stdin_tx, stdin_rx) = mpsc::sync_channel(32);
+    let mut palette_stdout = os_input.get_stdout_writer();
     let _stdin_pump = std::thread::Builder::new()
         .name("stdin_pump".to_string())
         .spawn({
@@ -133,6 +134,13 @@ pub(crate) fn stdin_loop(
                             let mut p = stdin_ansi_parser.lock().unwrap();
                             p.feed(&buf)
                         };
+                        if parse_output.replies.iter().any(|reply| {
+                            matches!(reply, HostReply::HostTerminalThemeChanged(_))
+                        }) {
+                            stdin_ansi_parser.lock().unwrap().expect_host_replies();
+                            let _ = palette_stdout.write_all(build_palette_query_string().as_bytes());
+                            let _ = palette_stdout.flush();
+                        }
                         if !parse_output.replies.is_empty() {
                             let _ = send_input_instructions.send(
                                 InputInstruction::AnsiStdinInstructions(parse_output.replies),
@@ -405,9 +413,19 @@ fn build_startup_query_string(support_kitty_graphics_protocol: bool) -> String {
         ""
     };
     format!(
-        "{}\u{1b}]11;?\u{1b}\u{5c}\u{1b}]10;?\u{1b}\u{5c}\u{1b}[?2026$p{}\u{1b}[c",
-        PIXEL_SIZE_QUERY, kitty_graphics_probe
+        "{}\u{1b}[?2026$p{}\u{1b}P+q524742;5463\u{1b}\\{}",
+        PIXEL_SIZE_QUERY, kitty_graphics_probe, build_palette_query_string()
     )
+}
+
+fn build_palette_query_string() -> String {
+    use std::fmt::Write;
+    let mut query = String::from("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+    for index in 0..16 {
+        let _ = write!(query, "\x1b]4;{};?\x1b\\", index);
+    }
+    query.push_str("\x1b[c");
+    query
 }
 
 pub(crate) const PIXEL_SIZE_QUERY: &str = "\u{1b}[14t\u{1b}[16t";
@@ -471,17 +489,13 @@ mod tests {
     }
 
     #[test]
-    fn startup_query_has_no_palette_register_loop() {
+    fn startup_query_probes_actual_palette_and_truecolor() {
         let query = build_startup_query_string(true);
-        assert_eq!(
-            query,
-            "\u{1b}[14t\u{1b}[16t\u{1b}]11;?\u{1b}\u{5c}\u{1b}]10;?\u{1b}\u{5c}\u{1b}[?2026$p\u{1b}_Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA\u{1b}\u{5c}\u{1b}[c"
-        );
-        assert!(
-            !query.contains("\u{1b}]4;"),
-            "startup query must not contain OSC 4 palette-register probes: {:?}",
-            query
-        );
+        assert!(query.contains("\x1bP+q524742;5463\x1b\\"));
+        for index in 0..16 {
+            assert!(query.contains(&format!("\x1b]4;{};?\x1b\\", index)));
+        }
+        assert!(query.ends_with("\x1b[c"));
     }
 
     #[test]
