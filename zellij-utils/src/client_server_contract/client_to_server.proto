@@ -33,12 +33,14 @@ message ClientToServerMsg {
     SetMobileRenderPreferencesMsg set_mobile_render_preferences = 26;
     HostTerminalFocusChangedMsg host_terminal_focus_changed = 27;
     ClipboardPasteMsg clipboard_paste = 28;
-    TruecolorSupportMsg truecolor_support = 29;
   }
 }
 
-message TruecolorSupportMsg {
-  bool supported = 1;
+message TerminalColorsUpdate {
+  optional string foreground = 1;
+  optional string background = 2;
+  optional bool truecolor = 3;
+  bool reset = 4;
 }
 
 message DetachSessionMsg {
@@ -59,6 +61,7 @@ message ForegroundColorMsg {
 
 message ColorRegistersMsg {
   repeated ColorRegister color_registers = 1;
+  TerminalColorsUpdate terminal_colors = 2;
 }
 
 message TerminalResizeMsg {

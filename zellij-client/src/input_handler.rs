@@ -264,8 +264,16 @@ impl InputHandler {
                     InputInstruction::AnsiStdinInstructions(ansi_stdin_instructions),
                     _error_context,
                 )) => {
+                    let mut colors = zellij_utils::ipc::TerminalColorsUpdate::default();
+                    let mut registers = Vec::new();
                     for ansi_instruction in ansi_stdin_instructions {
-                        self.handle_stdin_ansi_instruction(ansi_instruction);
+                        self.handle_stdin_ansi_instruction(ansi_instruction, &mut colors, &mut registers);
+                    }
+                    if !registers.is_empty() || colors != Default::default() {
+                        self.os_input.send_to_server(ClientToServerMsg::ColorRegisters {
+                            color_registers: registers,
+                            terminal_colors: Some(colors),
+                        });
                     }
                 },
                 Ok((InputInstruction::DesktopNotificationResponse(raw_bytes), _error_context)) => {
@@ -319,7 +327,12 @@ impl InputHandler {
             is_kitty_keyboard_protocol,
         });
     }
-    fn handle_stdin_ansi_instruction(&mut self, ansi_stdin_instructions: AnsiStdinInstruction) {
+    fn handle_stdin_ansi_instruction(
+        &mut self,
+        ansi_stdin_instructions: AnsiStdinInstruction,
+        colors: &mut zellij_utils::ipc::TerminalColorsUpdate,
+        registers: &mut Vec<zellij_utils::ipc::ColorRegister>,
+    ) {
         match ansi_stdin_instructions {
             AnsiStdinInstruction::PixelDimensions(pixel_dimensions) => {
                 self.os_input
@@ -328,28 +341,26 @@ impl InputHandler {
                     });
             },
             AnsiStdinInstruction::BackgroundColor(background_color_instruction) => {
+                colors.background = Some(background_color_instruction.clone());
                 self.os_input
                     .send_to_server(ClientToServerMsg::BackgroundColor {
                         color: background_color_instruction,
                     });
             },
             AnsiStdinInstruction::ForegroundColor(foreground_color_instruction) => {
+                colors.foreground = Some(foreground_color_instruction.clone());
                 self.os_input
                     .send_to_server(ClientToServerMsg::ForegroundColor {
                         color: foreground_color_instruction,
                     });
             },
             AnsiStdinInstruction::ColorRegisters(color_registers) => {
-                let color_registers: Vec<_> = color_registers
-                    .into_iter()
-                    .map(|(index, color)| zellij_utils::ipc::ColorRegister { index, color })
-                    .collect();
-                self.os_input
-                    .send_to_server(ClientToServerMsg::ColorRegisters { color_registers });
+                registers.extend(color_registers.into_iter().map(|(index, color)| {
+                    zellij_utils::ipc::ColorRegister { index, color }
+                }));
             },
             AnsiStdinInstruction::TruecolorSupport(supported) => {
-                self.os_input
-                    .send_to_server(ClientToServerMsg::TruecolorSupport { supported });
+                colors.truecolor = Some(supported);
             },
             AnsiStdinInstruction::SynchronizedOutput(enabled) => {
                 self.send_client_instructions
@@ -357,6 +368,7 @@ impl InputHandler {
                     .unwrap();
             },
             AnsiStdinInstruction::HostTerminalThemeChanged(mode) => {
+                colors.reset = true;
                 self.os_input
                     .send_to_server(ClientToServerMsg::HostTerminalThemeChanged { mode });
             },

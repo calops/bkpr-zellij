@@ -14924,3 +14924,22 @@ fn terminal_palette_updates_and_bootstrap_are_client_scoped() {
     assert_eq!(value["truecolor"], true);
     assert!(value["background"].is_null());
 }
+
+#[test]
+fn a_terminal_reply_batch_emits_one_palette_event_and_duplicates_emit_none() {
+    use crate::terminal_colors::TerminalColorUpdate;
+    let (mut screen, capture) = create_new_screen_with_theme_capture(Size { cols: 80, rows: 24 });
+    let batch = || TerminalColorUpdate::Batch {
+        metadata: zellij_utils::ipc::TerminalColorsUpdate {
+            foreground: Some("rgb:ffff/ffff/ffff".into()),
+            background: Some("rgb:1111/2222/3333".into()),
+            truecolor: Some(true),
+            ..Default::default()
+        },
+        ansi: (0..16).map(|index| (index, "rgb:aaaa/bbbb/cccc".into())).collect(),
+    };
+    screen.update_client_terminal_colors(1, batch()).unwrap();
+    assert_eq!(capture.drain_plugin_events().len(), 1);
+    screen.update_client_terminal_colors(1, batch()).unwrap();
+    assert!(capture.drain_plugin_events().is_empty());
+}

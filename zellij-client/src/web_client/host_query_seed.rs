@@ -54,6 +54,13 @@ pub fn build_host_query_seed_msgs(
     if !registers.is_empty() {
         msgs.push(ClientToServerMsg::ColorRegisters {
             color_registers: registers,
+            terminal_colors: Some(zellij_utils::ipc::TerminalColorsUpdate {
+                foreground: resolved.foreground.as_ref().and_then(|color| css_rgb_to_xparse(color)),
+                background: resolved.background.as_ref().and_then(|color| css_rgb_to_xparse(color)),
+                // This is the actual xterm.js renderer, not a TERM/theme inference.
+                truecolor: Some(true),
+                reset: true,
+            }),
         });
     }
 
@@ -198,7 +205,7 @@ mod tests {
     /// `ColorRegisters` message produced by the seed builder.
     fn find_register(msgs: &[ClientToServerMsg], index: usize) -> Option<String> {
         for msg in msgs {
-            if let ClientToServerMsg::ColorRegisters { color_registers } = msg {
+            if let ClientToServerMsg::ColorRegisters { color_registers, .. } = msg {
                 if let Some(reg) = color_registers.iter().find(|r| r.index == index) {
                     return Some(reg.color.clone());
                 }
@@ -223,7 +230,7 @@ mod tests {
 
     fn registers_msg(msgs: &[ClientToServerMsg]) -> Option<usize> {
         msgs.iter().find_map(|m| match m {
-            ClientToServerMsg::ColorRegisters { color_registers } => Some(color_registers.len()),
+            ClientToServerMsg::ColorRegisters { color_registers, .. } => Some(color_registers.len()),
             _ => None,
         })
     }
@@ -436,7 +443,7 @@ mod tests {
         let registers = msgs
             .iter()
             .find_map(|m| match m {
-                ClientToServerMsg::ColorRegisters { color_registers } => Some(color_registers),
+                ClientToServerMsg::ColorRegisters { color_registers, .. } => Some(color_registers),
                 _ => None,
             })
             .expect("ColorRegisters message missing");
