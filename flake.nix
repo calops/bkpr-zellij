@@ -15,7 +15,11 @@
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -23,65 +27,87 @@
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      pkgsFor = system: import nixpkgs {
-        inherit system;
-        overlays = [ rust-overlay.overlays.default ];
-      };
+      pkgsFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
+        };
       toolchainFor = pkgs: pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-      rustPlatformFor = pkgs: pkgs.makeRustPlatform {
-        cargo = toolchainFor pkgs;
-        rustc = toolchainFor pkgs;
-      };
-      vendorFor = pkgs: (rustPlatformFor pkgs).importCargoLock {
-        lockFile = ./Cargo.lock;
-      };
+      rustPlatformFor =
+        pkgs:
+        pkgs.makeRustPlatform {
+          cargo = toolchainFor pkgs;
+          rustc = toolchainFor pkgs;
+        };
+      vendorFor =
+        pkgs:
+        (rustPlatformFor pkgs).importCargoLock {
+          lockFile = ./Cargo.lock;
+        };
     in
     {
-      packages = forAllSystems (system:
+      packages = forAllSystems (
+        system:
         let
           pkgs = pkgsFor system;
           cargoVendor = vendorFor pkgs;
-          unwrapped = (pkgs.zellij-unwrapped.override {
-            rustPlatform = rustPlatformFor pkgs;
-            withWebServer = false;
-          }).overrideAttrs (old: {
-            version = "0.45.1-bkpr.1";
-            src = pkgs.lib.cleanSourceWith {
-              name = "zellij-source";
-              src = ./.;
-              filter = path: type:
-                !(builtins.elem (baseNameOf path) [
-                  ".git" ".direnv" ".github" "target" "result"
-                  "flake.nix" "flake.lock" ".envrc"
-                ]) && pkgs.lib.cleanSourceFilter path type;
-            };
-            # Never inherit nixpkgs' upstream dependency snapshot or source patches.
-            cargoDeps = cargoVendor;
-            cargoHash = null;
-            patches = [ ];
-            postPatch = "";
-            cargoBuildNoDefaultFeatures = true;
-            cargoCheckNoDefaultFeatures = true;
-            nativeBuildInputs = old.nativeBuildInputs ++ [ (rustPlatformFor pkgs).bindgenHook ];
-            doCheck = true;
-            cargoTestFlags = [ "--package" "zellij-server" "--lib" "program_status" ];
-            postCheck = ''
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib stdin_ansi_parser
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib stdin_handler
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib pinned_
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib passive_popup
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib viewport_geometry_regressions
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib test_ctrl_drag_resizes
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib render_messages_tests -- --test-threads=1
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib screen_tab_switch_
-              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib screen_plugin_
-            '';
-            passthru = { };
-            meta = old.meta // {
-              homepage = "https://github.com/calops/bkpr-zellij";
-              changelog = "https://github.com/calops/bkpr-zellij/blob/bkpr/CHANGELOG.md";
-            };
-          });
+          unwrapped =
+            (pkgs.zellij-unwrapped.override {
+              rustPlatform = rustPlatformFor pkgs;
+              withWebServer = false;
+            }).overrideAttrs
+              (old: {
+                version = "0.45.1-bkpr.1";
+                src = pkgs.lib.cleanSourceWith {
+                  name = "zellij-source";
+                  src = ./.;
+                  filter =
+                    path: type:
+                    !(builtins.elem (baseNameOf path) [
+                      ".git"
+                      ".direnv"
+                      ".github"
+                      "target"
+                      "result"
+                      "flake.nix"
+                      "flake.lock"
+                      ".envrc"
+                    ])
+                    && pkgs.lib.cleanSourceFilter path type;
+                };
+                # Never inherit nixpkgs' upstream dependency snapshot or source patches.
+                cargoDeps = cargoVendor;
+                cargoHash = null;
+                patches = [ ];
+                postPatch = "";
+                cargoBuildNoDefaultFeatures = true;
+                cargoCheckNoDefaultFeatures = true;
+                nativeBuildInputs = old.nativeBuildInputs ++ [ (rustPlatformFor pkgs).bindgenHook ];
+                doCheck = true;
+                cargoTestFlags = [
+                  "--package"
+                  "zellij-server"
+                  "--lib"
+                  "program_status"
+                ];
+                postCheck = ''
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib stdin_ansi_parser
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib stdin_handler
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib pinned_
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib passive_popup
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib viewport_geometry_regressions
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib test_ctrl_drag_resizes
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib render_messages_tests -- --test-threads=1
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib screen_tab_switch_
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib screen_plugin_
+                '';
+                passthru = { };
+                meta = old.meta // {
+                  homepage = "https://github.com/calops/bkpr-zellij";
+                  changelog = "https://github.com/calops/bkpr-zellij/blob/bkpr/CHANGELOG.md";
+                };
+              });
           zellij = pkgs.zellij.override { zellij-unwrapped = unwrapped; };
         in
         {
@@ -89,9 +115,11 @@
           inherit zellij;
           zellij-unwrapped = unwrapped;
           cargo-vendor = cargoVendor;
-        });
+        }
+      );
 
-      devShells = forAllSystems (system:
+      devShells = forAllSystems (
+        system:
         let
           pkgs = pkgsFor system;
           cargoVendor = vendorFor pkgs;
@@ -107,7 +135,10 @@
               (pkgs.lib.getDev pkgs.curl)
               (rustPlatformFor pkgs).bindgenHook
             ];
-            buildInputs = [ pkgs.curl pkgs.openssl ];
+            buildInputs = [
+              pkgs.curl
+              pkgs.openssl
+            ];
             OPENSSL_NO_VENDOR = 1;
             ZELLIJ_CARGO_VENDOR = cargoVendor;
             shellHook = ''
@@ -117,6 +148,7 @@
                 --replace-fail '"cargo-vendor-dir"' '"${cargoVendor}"'
             '';
           };
-        });
+        }
+      );
     };
 }
