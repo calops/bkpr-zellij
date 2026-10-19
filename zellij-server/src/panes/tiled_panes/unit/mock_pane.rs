@@ -204,7 +204,7 @@ impl Pane for MockPane {
     fn set_geom_override(&mut self, pane_geom: PaneGeom) {
         self.geom_override = Some(pane_geom);
     }
-    fn handle_pty_bytes(&mut self, _bytes: VteBytes) {
+    fn handle_pty_bytes(&mut self, _bytes: VteBytes, _read_foreground: &dyn Fn() -> Option<i32>) {
         unimplemented!()
     }
     fn handle_plugin_bytes(&mut self, _client_id: ClientId, _bytes: VteBytes) {

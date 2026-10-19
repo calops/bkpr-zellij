@@ -811,6 +811,19 @@ fn subscribe(env: &PluginEnv, event_list: HashSet<EventType>) -> Result<()> {
         .lock()
         .to_anyhow()?
         .extend(event_list.clone());
+    if event_list.contains(&EventType::CustomMessage)
+        && (env.plugin.is_builtin()
+            || env.permissions.lock().to_anyhow()?.as_ref().is_some_and(|permissions| {
+                permissions.contains(&PermissionType::ReadApplicationState)
+            }))
+    {
+        env.senders
+            .send_to_screen(ScreenInstruction::BootstrapProgramStatuses(
+                env.plugin_id,
+                env.client_id,
+                env.subscriptions.lock().to_anyhow()?.clone(),
+            ))?;
+    }
     env.senders
         .send_to_plugin(PluginInstruction::PluginSubscribedToEvents(
             env.plugin_id,

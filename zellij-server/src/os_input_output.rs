@@ -365,6 +365,10 @@ pub trait ServerOsApi: Send + Sync {
     ) -> HashMap<u32, Vec<String>> {
         HashMap::new()
     }
+    /// Current foreground process group of the pane's PTY, without process discovery.
+    fn foreground_process_group(&self, _terminal_id: u32) -> Option<i32> {
+        None
+    }
     /// Writes the given buffer to a string
     fn write_to_file(&mut self, buf: String, file: Option<String>) -> Result<()>;
 
@@ -583,6 +587,11 @@ impl ServerOsApi for ServerOsInputOutput {
             }
         }
         cmds
+    }
+
+    #[cfg(unix)]
+    fn foreground_process_group(&self, terminal_id: u32) -> Option<i32> {
+        self.pty_backend.tcgetpgrp(terminal_id).filter(|group| *group > 0)
     }
 
     #[cfg(unix)]

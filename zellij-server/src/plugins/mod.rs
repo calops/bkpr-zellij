@@ -754,11 +754,9 @@ pub(crate) fn plugin_thread_main(
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
             PluginInstruction::PluginSubscribedToEvents(plugin_id, client_id, events) => {
-                wasm_bridge.notify_screen_of_background_plugin_subscriptions(
-                    plugin_id,
-                    client_id,
-                    events.clone(),
-                );
+                wasm_bridge
+                    .notify_screen_of_background_plugin_subscriptions(plugin_id, client_id)
+                    .non_fatal();
                 if events.contains(&EventType::InitialKeybinds) {
                     wasm_bridge.send_initial_keybinds_to_plugin(plugin_id, client_id);
                 }

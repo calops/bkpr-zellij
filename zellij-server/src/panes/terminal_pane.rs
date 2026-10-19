@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::time::{self, Instant};
-use vte;
 use zellij_utils::data::PaneContents;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
@@ -137,7 +136,7 @@ pub struct TerminalPane {
     pub geom_override: Option<PaneGeom>,
     pub active_at: Instant,
     pub style: Style,
-    vte_parser: vte::Parser,
+    vte_parser: super::program_status_vte::ProgramStatusVteParser,
     selection_scrolled_at: time::Instant,
     content_offset: Offset,
     pane_title: String,
@@ -225,7 +224,7 @@ impl Pane for TerminalPane {
         self.geom_override = Some(pane_geom);
         self.reflow_lines();
     }
-    fn handle_pty_bytes(&mut self, bytes: VteBytes) {
+    fn handle_pty_bytes(&mut self, bytes: VteBytes, read_foreground: &dyn Fn() -> Option<i32>) {
         self.set_should_render(true);
         if self.forward_paused {
             // A host-forward initiated by this pane is outstanding.
@@ -251,9 +250,7 @@ impl Pane for TerminalPane {
                         // in the middle of this flush can never strand a
                         // capture that has already left the input buffer.
                         if !forwarded.is_empty() {
-                            let consumed = self
-                                .vte_parser
-                                .advance_until_terminated(&mut self.grid, &forwarded);
+                            let consumed = self.vte_parser.advance_until_terminated(&mut self.grid, &forwarded, read_foreground);
                             if consumed < forwarded.len() {
                                 self.pending_pty_input.extend(&forwarded[consumed..]);
                                 self.pending_pty_input.extend(&bytes[index - 1..]);
@@ -267,9 +264,7 @@ impl Pane for TerminalPane {
                 InterceptorResult::Captured(cmd) => {
                     capture_started = false;
                     if !forwarded.is_empty() {
-                        let consumed = self
-                            .vte_parser
-                            .advance_until_terminated(&mut self.grid, &forwarded);
+                        let consumed = self.vte_parser.advance_until_terminated(&mut self.grid, &forwarded, read_foreground);
                         if consumed < forwarded.len() {
                             self.pending_pty_input.extend(&forwarded[consumed..]);
                             self.pending_pty_input.extend(b"\x1b_G");
@@ -291,9 +286,7 @@ impl Pane for TerminalPane {
                 },
             }
         }
-        let consumed = self
-            .vte_parser
-            .advance_until_terminated(&mut self.grid, &forwarded);
+        let consumed = self.vte_parser.advance_until_terminated(&mut self.grid, &forwarded, read_foreground);
         if consumed < forwarded.len() {
             self.pending_pty_input.extend(&forwarded[consumed..]);
         }
@@ -1088,7 +1081,19 @@ impl Pane for TerminalPane {
     fn is_alternate_mode_active(&self) -> bool {
         self.grid.is_alternate_mode_active()
     }
+    fn program_status(&self) -> Vec<zellij_utils::data::ProgramStatus> {
+        self.grid.program_status.snapshot()
+    }
+    fn drain_program_status(&mut self) -> Option<Vec<zellij_utils::data::ProgramStatus>> {
+        self.grid.program_status.take_change()
+    }
+    fn drain_title_changed(&mut self) -> bool {
+        std::mem::take(&mut self.grid.pending_title_changed)
+    }
     fn hold(&mut self, exit_status: Option<i32>, is_first_run: bool, run_command: RunCommand) {
+        if !is_first_run {
+            self.grid.program_status.expire_running();
+        }
         self.invoked_with = Some(Run::Command(run_command.clone()));
         self.is_held = Some((exit_status, is_first_run, run_command));
         if let Some(notification_end) = self.notification_end.as_mut() {
@@ -1407,7 +1412,7 @@ impl TerminalPane {
             selectable: true,
             geom: position_and_size,
             geom_override: None,
-            vte_parser: vte::Parser::new(),
+            vte_parser: super::program_status_vte::ProgramStatusVteParser::new(),
             active_at: Instant::now(),
             style,
             selection_scrolled_at: time::Instant::now(),
@@ -1490,7 +1495,7 @@ impl TerminalPane {
             None => render_first_run_banner(columns, rows, &self.style, None),
         };
         self.banner = Some(banner.clone());
-        self.handle_pty_bytes(banner.as_bytes().to_vec());
+        self.handle_pty_bytes(banner.as_bytes().to_vec(), &|| None);
     }
     fn remove_banner(&mut self) {
         if self.banner.is_some() {

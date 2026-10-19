@@ -353,6 +353,7 @@ pub struct TabOverrideResult {
 #[derive(Debug, Clone)]
 pub enum ScreenInstruction {
     PtyBytes(u32, VteBytes),
+    PaneTitleChanged,
     PluginBytes(Vec<PluginRenderAsset>),
     Render,
     RenderToClients,
@@ -919,6 +920,7 @@ pub enum ScreenInstruction {
         plugin_id: u32,
     },
     ClearAllPluginHighlights(u32), // plugin_id — clears across all panes
+    BootstrapProgramStatuses(PluginId, ClientId, HashSet<EventType>),
     SubscribeToPaneRenders {
         client_id: ClientId,
         pane_ids: Vec<zellij_utils::data::PaneId>,
@@ -973,6 +975,7 @@ impl From<&ScreenInstruction> for ScreenContext {
     fn from(screen_instruction: &ScreenInstruction) -> Self {
         match *screen_instruction {
             ScreenInstruction::PtyBytes(..) => ScreenContext::HandlePtyBytes,
+            ScreenInstruction::PaneTitleChanged => ScreenContext::HandlePtyBytes,
             ScreenInstruction::PluginBytes(..) => ScreenContext::PluginBytes,
             ScreenInstruction::Render => ScreenContext::Render,
             ScreenInstruction::RenderToClients => ScreenContext::RenderToClients,
@@ -1292,6 +1295,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ClearAllPluginHighlights(..) => ScreenContext::ClearPluginHighlights,
             ScreenInstruction::DesktopNotificationResponse(..) => {
                 ScreenContext::DesktopNotificationResponse
+            },
+            ScreenInstruction::BootstrapProgramStatuses(..) => {
+                ScreenContext::BootstrapProgramStatuses
             },
             ScreenInstruction::SubscribeToPaneRenders { .. } => {
                 ScreenContext::SubscribeToPaneRenders
@@ -5376,6 +5382,13 @@ impl Screen {
         }
 
         fn create_pane_list_entry(pane_info: PaneInfo, tab: &crate::tab::Tab) -> PaneListEntry {
+            let program_status = if pane_info.is_plugin {
+                Vec::new()
+            } else {
+                tab.get_pane_with_id(PaneId::Terminal(pane_info.id))
+                    .map(|pane| pane.program_status())
+                    .unwrap_or_default()
+            };
             PaneListEntry {
                 pane_info,
                 tab_id: tab.id,
@@ -5383,6 +5396,7 @@ impl Screen {
                 tab_name: tab.name.clone(),
                 pane_command: None,
                 pane_cwd: None,
+                program_status,
             }
         }
 
@@ -7734,6 +7748,63 @@ impl Screen {
             }
         }
     }
+    fn bootstrap_program_statuses(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        subscriptions: &HashSet<EventType>,
+    ) -> Result<()> {
+        let topology_event_count = usize::from(subscriptions.contains(&EventType::PaneUpdate))
+            + usize::from(subscriptions.contains(&EventType::TabUpdate));
+        let mut topology = Vec::with_capacity(topology_event_count);
+        if subscriptions.contains(&EventType::PaneUpdate) {
+            let mut pane_manifest = PaneManifest::default();
+            for tab in self.tabs.values() {
+                pane_manifest.panes.insert(tab.position, tab.pane_infos());
+            }
+            topology.push((Some(plugin_id), Some(client_id), Event::PaneUpdate(pane_manifest)));
+        }
+        if subscriptions.contains(&EventType::TabUpdate) {
+            let mut tab_infos = Vec::with_capacity(self.tabs.len());
+            for tab in self.tabs.values() {
+                if let Some(mut info) = self.get_tab_info(tab.id) {
+                    info.name = tab.single_pane_tab_name().unwrap_or(info.name);
+                    info.active = self.active_tab_ids.get(&client_id) == Some(&tab.id);
+                    if self.session_is_mirrored {
+                        info.other_focused_clients.clear();
+                    } else {
+                        info.other_focused_clients.retain(|id| *id != client_id);
+                    }
+                    info.has_bell_notification = tab.tab_has_pending_bell && !info.active;
+                    info.is_flashing_bell = tab.tab_bell_flash && !info.active;
+                    tab_infos.push(info);
+                }
+            }
+            tab_infos.sort_by_key(|info| info.position);
+            topology.push((Some(plugin_id), Some(client_id), Event::TabUpdate(tab_infos)));
+        }
+        if !topology.is_empty() {
+            self.bus.senders.send_to_plugin(PluginInstruction::Update(topology))?;
+        }
+        for tab in self.tabs.values() {
+            let panes = tab
+                .get_tiled_panes()
+                .map(|(_, pane)| pane)
+                .chain(tab.get_floating_panes().map(|(_, pane)| pane))
+                .chain(tab.get_suppressed_panes().map(|(_, (_, pane))| pane));
+            for pane in panes {
+                if let PaneId::Terminal(pid) = pane.pid() {
+                    let records = pane.program_status();
+                    self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                        Some(plugin_id),
+                        Some(client_id),
+                        crate::panes::program_status::status_event(pid, &records)?,
+                    )]))?;
+                }
+            }
+        }
+        Ok(())
+    }
     fn subscribe_to_pane_renders(
         &mut self,
         subscriber_client_id: ClientId,
@@ -8247,6 +8318,9 @@ pub(crate) fn screen_thread_main(
                     .bus
                     .senders
                     .send_to_background_jobs(BackgroundJob::RenderToClients);
+            },
+            ScreenInstruction::PaneTitleChanged => {
+                screen.log_and_report_session_state()?;
             },
             ScreenInstruction::PluginBytes(mut plugin_render_assets) => {
                 for plugin_render_asset in plugin_render_assets.iter_mut() {
@@ -12266,6 +12340,9 @@ pub(crate) fn screen_thread_main(
                     screen.render(None)?;
                     screen.log_and_report_session_state()?;
                 }
+            },
+            ScreenInstruction::BootstrapProgramStatuses(plugin_id, client_id, subscriptions) => {
+                screen.bootstrap_program_statuses(plugin_id, client_id, &subscriptions)?;
             },
             ScreenInstruction::SubscribeToPaneRenders {
                 client_id,

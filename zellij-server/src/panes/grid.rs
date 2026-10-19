@@ -834,6 +834,7 @@ pub struct Grid {
     pub pending_messages_to_pty: Vec<Vec<u8>>,
     pub selection: Selection,
     pub title: Option<String>,
+    pub pending_title_changed: bool,
     pub is_scrolled: bool,
     pub link_handler: Rc<RefCell<LinkHandler>>,
     pub ring_bell: bool,
@@ -850,6 +851,7 @@ pub struct Grid {
     pub search_results: SearchResult,
     pub pending_clipboard_update: Option<String>,
     pub pending_osc7_cwd: Option<std::path::PathBuf>,
+    pub program_status: super::program_status::ProgramStatuses,
     pub pending_desktop_notifications: Vec<PendingNotification>,
     notification_tracker: NotificationTracker,
     /// Whitelisted host-terminal queries intercepted from the app running
@@ -1218,6 +1220,7 @@ impl Grid {
             selection: Default::default(),
             title_stack: vec![],
             title: None,
+            pending_title_changed: false,
             changed_colors: None,
             is_scrolled: false,
             link_handler,
@@ -1236,6 +1239,7 @@ impl Grid {
             sixel_host_support: true,
             pending_clipboard_update: None,
             pending_osc7_cwd: None,
+            program_status: Default::default(),
             pending_desktop_notifications: Vec::new(),
             notification_tracker: NotificationTracker::default(),
             pending_forwarded_queries: Vec::new(),
@@ -2781,6 +2785,7 @@ impl Grid {
         self.should_render = true;
     }
     pub fn reset_terminal_state(&mut self) {
+        self.program_status.clear();
         if let Some(alternate_screen_state) = self.alternate_screen_state.as_mut() {
             alternate_screen_state.kitty_grid.clear_all_placements();
         }
@@ -3688,7 +3693,10 @@ impl Grid {
         }
     }
     fn set_title(&mut self, title: String) {
-        self.title = Some(title);
+        if self.title.as_ref() != Some(&title) {
+            self.title = Some(title);
+            self.pending_title_changed = true;
+        }
     }
     fn push_current_title_to_stack(&mut self) {
         if self.title_stack.len() > MAX_TITLE_STACK_SIZE {
@@ -3700,7 +3708,7 @@ impl Grid {
     }
     fn pop_title_from_stack(&mut self) {
         if let Some(popped_title) = self.title_stack.pop() {
-            self.title = Some(popped_title);
+            self.set_title(popped_title);
         }
     }
     fn transfer_rows_to_lines_above(&mut self, count: usize) {
@@ -4716,6 +4724,17 @@ impl Perform for Grid {
 
             b"12" => {
                 // get/set cursor color currently unimplemented
+            },
+
+            b"7501" => {
+                // Additional semicolon-separated OSC parameters are not part of this protocol.
+                if params.len() == 2 {
+                    if params[1] == b"?" {
+                        self.pending_messages_to_pty.push(
+                            format!("\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth{}", terminator).into_bytes(),
+                        );
+                    }
+                }
             },
 
             b"133" => {

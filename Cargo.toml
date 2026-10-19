@@ -123,6 +123,25 @@ zellij-utils = { path = "zellij-utils/", version = "0.45.1" }
 [profile.dev]
 debug = "line-tables-only"
 
+# Keep the interpreter usable while guest plugins and Zellij retain debug builds.
+[profile.dev.package.wasmi]
+opt-level = 3
+
+[profile.dev.package.wasmi_core]
+opt-level = 3
+
+[profile.dev.package.wasmi_ir]
+opt-level = 3
+
+[profile.dev.package.wasmi_collections]
+opt-level = 3
+
+[profile.dev.package.wasmi_wasi]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
 [profile.dev-opt]
 inherits = "dev"
 
