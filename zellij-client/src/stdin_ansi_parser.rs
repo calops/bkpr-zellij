@@ -344,6 +344,8 @@ pub struct StdinAnsiParser {
     /// Bytes of an OSC sequence whose terminator hasn't arrived yet.
     /// Carried across feed() calls so the next chunk can complete it.
     partial_osc: Vec<u8>,
+    partial_osc_clipboard_context: Option<Option<u64>>,
+    partial_nested_clipboard_context: Option<Option<u64>>,
     discard_kitty_osc: bool,
     partial_kitty_deadline: Option<Instant>,
     /// Same for CSI device-control reports.
@@ -377,6 +379,8 @@ impl StdinAnsiParser {
             clipboard_paste_mode_initialized: false,
             active_clipboard_paste: None,
             partial_osc: Vec::new(),
+            partial_osc_clipboard_context: None,
+            partial_nested_clipboard_context: None,
             discard_kitty_osc: false,
             partial_kitty_deadline: None,
             partial_csi: Vec::new(),
@@ -545,13 +549,14 @@ impl StdinAnsiParser {
         &mut self,
         packet: &zellij_utils::kitty_clipboard::Packet<'_>,
         raw: &[u8],
+        frame_context: Option<u64>,
         out: &mut ParseOutput,
     ) {
         use zellij_utils::kitty_clipboard::{paste_authorization, MAX_PASTE_BYTES};
         if packet.field(b"type") != Some(b"read") { return; }
         match packet.field(b"status") {
             Some(b"OK") => {
-                self.active_clipboard_paste = self.clipboard_paste_context.map(|context| ClipboardPasteSlot {
+                self.active_clipboard_paste = frame_context.map(|context| ClipboardPasteSlot {
                     context, bytes: Vec::new(), started: Instant::now(),
                 });
             },
@@ -578,7 +583,7 @@ impl StdinAnsiParser {
         }
     }
 
-    fn capture_kitty_clipboard(&mut self, raw: &[u8], out: &mut ParseOutput) {
+    fn capture_kitty_clipboard(&mut self, raw: &[u8], frame_context: Option<u64>, out: &mut ParseOutput) {
         use zellij_utils::kitty_clipboard::{Packet, MAX_TRANSFER_BYTES};
         let term_len = if raw.last() == Some(&7) { 1 } else { 2 };
         let packet = match Packet::parse(&raw[2..raw.len() - term_len]) {
@@ -599,7 +604,7 @@ impl StdinAnsiParser {
                 self.abort_kitty_clipboard_forward(out, false);
                 return;
             }
-            self.capture_clipboard_paste(&packet, raw, out);
+            self.capture_clipboard_paste(&packet, raw, frame_context, out);
             return;
         }
         let slot = match self.active_clipboard_forward.as_mut() {
@@ -734,13 +739,30 @@ impl StdinAnsiParser {
     /// are the bytes the caller should feed to the keyboard parser.
     pub fn feed(&mut self, bytes: &[u8]) -> ParseOutput {
         let mut out = ParseOutput::default();
+        // The nested-frame extractor also buffers a lone ESC. Preserve its
+        // recipient before the next read can identify it as an OSC introducer.
+        let initial_context = if self.nested_frame_extractor.partial_bytes() == [0x1b]
+            && bytes.first() == Some(&b']')
+        {
+            self.partial_nested_clipboard_context.take()
+        } else {
+            None
+        };
+        let had_new_bytes = !bytes.is_empty();
         let (bytes, nested_frames) = self.nested_frame_extractor.extract(bytes);
+        if self.nested_frame_extractor.partial_bytes() == [0x1b] {
+            if had_new_bytes {
+                self.partial_nested_clipboard_context = Some(self.clipboard_paste_context);
+            }
+        } else {
+            self.partial_nested_clipboard_context = None;
+        }
         let bytes = &bytes[..];
         out.nested_frames = nested_frames;
         let sanitized = self.extract_kitty_probe_reply(bytes, &mut out.replies);
         // Frame before termwiz: OSC 5522 must retain exact payload/terminator
         // bytes without passing through its unbounded OSC buffer.
-        let (residue, input_events) = self.strip_replies(&sanitized, &mut out);
+        let (residue, input_events) = self.strip_replies(&sanitized, initial_context, &mut out);
         let mut events = Vec::new();
         self.inner.parse(
             &input_events,
@@ -867,7 +889,7 @@ impl StdinAnsiParser {
     }
 
     pub fn pending_partial(&self) -> PendingPartial {
-        if self.partial_osc.starts_with(b"\x1b]5522;")
+        if is_kitty_clipboard_prefix(&self.partial_osc)
             && (self.active_clipboard_forward.as_ref().map(|slot| slot.kitty.is_some()).unwrap_or(false)
                 || ((self.clipboard_paste_context.is_some() || self.active_clipboard_paste.is_some())
                     && self.partial_kitty_deadline.map(|deadline| Instant::now() < deadline).unwrap_or(false)))
@@ -919,7 +941,9 @@ impl StdinAnsiParser {
 
     pub fn finalize_force(&mut self) -> Vec<u8> {
         self.in_bracketed_paste = false;
-        if self.partial_osc.starts_with(b"\x1b]5522;") {
+        if self.partial_osc.starts_with(b"\x1b]5522;")
+            || (self.partial_kitty_deadline.is_some() && is_kitty_clipboard_prefix(&self.partial_osc))
+        {
             // A transaction deadline does not terminate its OSC on the wire.
             // Keep consuming the frame after idle ticks, but retain no payload.
             let trailing_escape = self.partial_osc.last() == Some(&0x1b);
@@ -1019,11 +1043,14 @@ impl StdinAnsiParser {
     /// next call's input — so the corresponding bytes never reach
     /// residue (and never appear as spurious keypresses) while waiting
     /// for the rest of the sequence.
-    fn strip_replies(&mut self, bytes: &[u8], parsed: &mut ParseOutput) -> (Vec<u8>, Vec<u8>) {
+    fn strip_replies(&mut self, bytes: &[u8], initial_context: Option<Option<u64>>, parsed: &mut ParseOutput) -> (Vec<u8>, Vec<u8>) {
         // Prepend any pending partial. At most one of (partial_osc,
         // partial_csi) is non-empty at any time — the previous walk
         // either completed all sequences or stopped at exactly one
         // unterminated tail.
+        let had_partial_osc = !self.partial_osc.is_empty();
+        let carried_context = self.partial_osc_clipboard_context.take();
+        let input_offset = self.partial_osc.len() + self.partial_csi.len() + self.partial_paste.len();
         let mut working: Vec<u8> = Vec::with_capacity(
             self.partial_osc.len()
                 + self.partial_csi.len()
@@ -1040,6 +1067,13 @@ impl StdinAnsiParser {
         let mut i = 0;
         while i < working.len() {
             let rest = &working[i..];
+            let frame_context = if i == 0 && had_partial_osc {
+                carried_context.unwrap_or(self.clipboard_paste_context)
+            } else if i == input_offset {
+                initial_context.unwrap_or(self.clipboard_paste_context)
+            } else {
+                self.clipboard_paste_context
+            };
             if self.discard_kitty_osc {
                 if matches!(rest[0], 7 | 0x18 | 0x1a) {
                     self.discard_kitty_osc = false;
@@ -1050,6 +1084,7 @@ impl StdinAnsiParser {
                         Some(_) => { self.discard_kitty_osc = false; },
                         None => {
                             self.partial_osc.push(0x1b);
+                            self.partial_osc_clipboard_context = Some(frame_context);
                             return (out, events);
                         },
                     }
@@ -1098,12 +1133,12 @@ impl StdinAnsiParser {
             if rest.len() >= 2 && rest[0] == 0x1b && rest[1] == b']' {
                 match osc_status(rest) {
                     SeqStatus::Complete(len) => {
+                        self.partial_kitty_deadline = None;
                         if rest.starts_with(b"\x1b]5522;") {
-                            self.partial_kitty_deadline = None;
                             if matches!(rest[len - 1], 0x18 | 0x1a) {
                                 self.reject_kitty_clipboard_packet(&rest[2..len - 1], parsed, false);
                             } else {
-                                self.capture_kitty_clipboard(&rest[..len], parsed);
+                                self.capture_kitty_clipboard(&rest[..len], frame_context, parsed);
                             }
                         } else {
                             events.extend_from_slice(&rest[..len]);
@@ -1112,8 +1147,17 @@ impl StdinAnsiParser {
                         continue;
                     },
                     SeqStatus::NeedMore => {
-                        if rest.starts_with(b"\x1b]5522;") && self.partial_kitty_deadline.is_none() {
-                            self.partial_kitty_deadline = Some(Instant::now() + Duration::from_secs(30));
+                        let kitty_prefix = is_kitty_clipboard_prefix(rest);
+                        let expected = self.active_clipboard_forward.as_ref()
+                            .map(|slot| slot.kitty.is_some()).unwrap_or(false)
+                            || self.clipboard_paste_context.is_some()
+                            || self.active_clipboard_paste.is_some();
+                        if kitty_prefix && (rest.starts_with(b"\x1b]5522;")
+                            || expected || self.partial_kitty_deadline.is_some())
+                        {
+                            self.partial_kitty_deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                        } else {
+                            self.partial_kitty_deadline = None;
                         }
                         let tail = rest.to_vec();
                         let cap = if rest.starts_with(b"\x1b]5522;") {
@@ -1131,17 +1175,22 @@ impl StdinAnsiParser {
                             out.extend_from_slice(&tail);
                         } else {
                             self.partial_osc = tail;
+                            self.partial_osc_clipboard_context = Some(frame_context);
                         }
                         return (out, events);
                     },
                     SeqStatus::Malformed => {
-                        if rest.starts_with(b"\x1b]5522;") {
-                            self.partial_kitty_deadline = None;
+                        let next_escape = rest[2..].iter().position(|byte| *byte == 0x1b).map(|index| index + 2);
+                        let kitty_prefix = rest.starts_with(b"\x1b]5522;")
+                            || (self.partial_kitty_deadline.is_some()
+                                && next_escape.map(|end| is_kitty_clipboard_prefix(&rest[..end])).unwrap_or(false));
+                        self.partial_kitty_deadline = None;
+                        if kitty_prefix {
                             self.reject_kitty_clipboard_packet(&rest[2..], parsed, false);
                             // An unexpected ESC ends the malformed clipboard packet,
                             // but the new escape sequence still belongs to input.
-                            if let Some(next) = rest[2..].iter().position(|b| *b == 0x1b) {
-                                i += next + 2;
+                            if let Some(next) = next_escape {
+                                i += next;
                                 continue;
                             }
                         }
@@ -1183,6 +1232,7 @@ impl StdinAnsiParser {
             // walker re-routes based on the actual second byte.
             if rest.len() == 1 && rest[0] == 0x1b {
                 self.partial_osc = vec![0x1b];
+                self.partial_osc_clipboard_context = Some(frame_context);
                 return (out, events);
             }
             out.push(working[i]);
@@ -1191,6 +1241,13 @@ impl StdinAnsiParser {
         }
         (out, events)
     }
+}
+
+/// Bare ESC / ESC ] remain keyboard ambiguities. Once the OSC number starts,
+/// retain its clipboard association even if idle or query timeout splits it.
+fn is_kitty_clipboard_prefix(bytes: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"\x1b]5522;";
+    bytes.starts_with(PREFIX) || (bytes.len() >= 3 && PREFIX.starts_with(bytes))
 }
 
 /// Walk an OSC sequence starting at the head of `buf`. Returns whether

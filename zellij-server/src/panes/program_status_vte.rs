@@ -470,4 +470,22 @@ mod tests {
             }]);
         }
     }
+
+    #[test]
+    fn kitty_clipboard_payload_controls_cannot_escape_into_the_host_terminal() {
+        for control in [0, 0x01, 0x7f, 0x80, 0x9b, 0x9c, 0xff] {
+            let mut parser = ProgramStatusVteParser::new();
+            let mut grid = grid();
+            let stream = [
+                b"\x1b]5522;type=write:id=writer\x1b\\".as_slice(),
+                b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;QUFB",
+                &[control],
+                b"QkJC\x1b\\\x1b]5522;type=wdata\x1b\\",
+            ].concat();
+            assert_eq!(parser.advance_until_terminated(&mut grid, &stream, &|| None), stream.len());
+            assert!(grid.pending_forwarded_queries.is_empty(), "control {control:#x} must not reach the host");
+            assert_eq!(grid.pending_messages_to_pty,
+                vec![b"\x1b]5522;type=write:status=EINVAL:id=writer\x1b\\".to_vec()]);
+        }
+    }
 }
