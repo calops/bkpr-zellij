@@ -1,0 +1,68 @@
+name: Upstream checks
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      checkout_ref:
+        description: 'Full update PR head SHA to verify using the main workflow'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'calops/bkpr-zellij' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.head_ref, 'update/zellij-v') &&
+        !github.event.pull_request.draft))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.checkout_ref || github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Build packaged runtime and run its regression checks
+        run: nix build --print-build-logs .#zellij
+      - name: Smoke packaged executable
+        run: ./result/bin/zellij --version
+
+  verification-status:
+    needs: verify
+    if: >-
+      always() && needs.verify.result != 'skipped' &&
+      github.repository == 'calops/bkpr-zellij'
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      # Never check out or execute PR code in this write-capable job.
+      - name: Publish result on the verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_SHA: ${{ inputs.checkout_ref || github.event.pull_request.head.sha }}
+          RESULT: ${{ needs.verify.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ ! "$CHECKOUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Expected a full update PR head SHA" >&2
+            exit 1
+          fi
+          state=failure
+          if [[ "$RESULT" == success ]]; then
+            state=success
+          fi
+          gh api --method POST "repos/calops/bkpr-zellij/statuses/$CHECKOUT_SHA" \
+            -f state="$state" \
+            -f context="Upstream verification" \
+            -f description="Nix build and packaged checks: $state; human validation required" \
+            -f target_url="$RUN_URL"

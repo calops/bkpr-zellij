@@ -8,8 +8,7 @@ remote points to `https://github.com/zellij-org/zellij.git`.
 Upstream releases arrive as `update/zellij-vX.Y.Z` PRs, prepared by the
 **Upstream release** workflow. It polls daily and can be run manually from
 GitHub Actions. Updates use published stable release tags, not upstream's
-moving `main`. Fetch upstream tags locally; do not push them into the fork,
-because the inherited release workflow publishes on `v*.*.*` tag pushes.
+moving `main`. Upstream tags are fetched but never pushed into the fork.
 
 Every update requires human validation and an explicit human merge, including
 conflict-free updates with passing CI. The updater never merges PRs. Keep
@@ -30,23 +29,29 @@ branches and PRs. GitHub Actions must be enabled, and repository Actions
 settings must allow Actions to create PRs. No personal token or App secret
 is required.
 
-Because bot-created PRs do not trigger normal PR workflows, the updater
-explicitly dispatches the trusted `Rust` workflow from `main`, checking out
-the update commit with read-only permissions. A separate job that does not
-check out code publishes `Rust release verification` on that exact commit.
-Require this status and a PR on `main`, with admin enforcement enabled.
-Auto-merge stays disabled; an explicit human merge is the validation gate.
-No approving-review count is required because the sole maintainer cannot
-approve their own feature PRs.
+Only release-update PRs run verification. Pushes to `main` and ordinary
+feature PRs do not run builds, tests, or publication workflows.
 
-These dispatched runs test the update branch commit, not GitHub's synthetic
-PR merge commit, and do not run the separate end-to-end workflow. Review
-the actual run and any additional integration evidence before merging.
-Ordinary same-repository PRs publish the same required status. For external
-fork PRs, a maintainer must dispatch `Rust` from `main` with `checkout_ref`
-set to the reviewed PR head SHA; the fork's read-only PR token cannot publish
-the required status. Re-run verification after conflict resolution or any
-other update to the PR head.
+Because bot-created PRs do not trigger normal PR workflows, the updater
+explicitly dispatches the trusted `Upstream checks` workflow from `main`.
+It checks out the exact update head with read-only permissions and builds
+`.#zellij` on Linux, including the Nix package's regression checks, then
+runs the packaged executable with `--version`. Human pushes to non-draft
+`update/zellij-v*` PRs also run these checks.
+
+A separate job that never checks out PR code publishes `Upstream verification`
+on that exact commit. Review its linked run and validate interactive behavior
+before merging. To rerun after conflict resolution:
+
+```sh
+gh workflow run upstream-check.yml --repo calops/bkpr-zellij --ref main \
+  -f checkout_ref=<FULL_PR_HEAD_SHA>
+```
+
+`main` requires a PR and an explicit manual merge, with admin enforcement.
+No global CI status is required, since ordinary feature PRs do not run CI.
+No approving-review count is required because the sole maintainer cannot
+approve their own feature PRs. Auto-merge stays disabled.
 
 The sections below are inherited upstream release instructions, not the
 procedure for syncing or publishing this fork.
