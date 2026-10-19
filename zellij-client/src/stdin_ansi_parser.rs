@@ -9,6 +9,7 @@
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use zellij_utils::{
     data::HostTerminalThemeMode,
     ipc::PixelDimensions,
@@ -176,15 +177,15 @@ impl HostReply {
 }
 
 /// The "slot" tracking state for a single forwarded query currently in
-/// flight to the host terminal. The parser accumulates raw reply bytes
-/// into `reply_bytes` until it sees a Primary-DA (`c`) reply, which acts
-/// as the serializing barrier. The timer that enforces the 500 ms
-/// deadline lives on the forward-timeout runtime and owns its own
-/// wall-clock — the parser itself is deadline-agnostic.
+/// flight to the host terminal. Replies belong to this slot only after
+/// all earlier query batches have crossed their Primary-DA boundaries.
+/// Its own Primary DA completes the captured bytes. The separate 500 ms
+/// forward-timeout runtime owns the forwarding deadline.
 #[derive(Debug, Clone)]
 pub struct ForwardSlot {
     pub token: u32,
     pub reply_bytes: Vec<u8>,
+    barriers_ahead: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +194,10 @@ pub struct ClipboardForwardSlot {
 }
 
 pub const CLIENT_CLIPBOARD_FORWARD_TIMEOUT_MS: u64 = 30_000;
+
+// A silent or unsupported host must not hold a real Escape key forever.
+// Query replies otherwise keep their prefixes across keyboard idle ticks.
+const HOST_REPLY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Return value of `feed()`.
 #[derive(Debug, Clone, Default)]
@@ -250,11 +255,15 @@ pub enum PendingPartial {
     LoneEsc,
     BareIntroducer,
     ReplyInProgress,
+    ExpectedReply,
 }
 
 impl PendingPartial {
     pub fn uses_reply_flush_guard(&self) -> bool {
-        matches!(self, PendingPartial::ReplyInProgress)
+        matches!(
+            self,
+            PendingPartial::ReplyInProgress | PendingPartial::ExpectedReply
+        )
     }
 }
 
@@ -320,6 +329,8 @@ pub struct StdinAnsiParser {
     in_bracketed_paste: bool,
     startup_kitty_probe: StartupKittyProbe,
     partial_apc: Vec<u8>,
+    outstanding_host_query_barriers: usize,
+    host_reply_deadline: Option<Instant>,
 }
 
 impl std::fmt::Debug for StdinAnsiParser {
@@ -345,6 +356,8 @@ impl StdinAnsiParser {
             in_bracketed_paste: false,
             startup_kitty_probe: StartupKittyProbe::NotSent,
             partial_apc: Vec::new(),
+            outstanding_host_query_barriers: 0,
+            host_reply_deadline: None,
         }
     }
 
@@ -352,10 +365,36 @@ impl StdinAnsiParser {
         self.startup_kitty_probe = StartupKittyProbe::AwaitingReply;
     }
 
-    /// Open a forwarding window for `token`. Subsequent reply events that
-    /// arrive before the Primary-DA barrier will be accumulated into the
-    /// slot's `reply_bytes`, in addition to being dispatched as normal
-    /// classified `HostReply` events.
+    /// Register a host-query batch before writing it to the terminal.
+    /// Each batch must end with Primary DA so its replies have a boundary
+    /// independent of stdin read sizes and keyboard Escape timeouts.
+    pub fn expect_host_replies(&mut self) {
+        if !self.host_replies_expected() {
+            self.outstanding_host_query_barriers = 0;
+        }
+        self.outstanding_host_query_barriers += 1;
+        self.host_reply_deadline = Some(Instant::now() + HOST_REPLY_QUERY_TIMEOUT);
+    }
+
+    fn host_replies_expected(&self) -> bool {
+        self.outstanding_host_query_barriers > 0
+            && self
+                .host_reply_deadline
+                .map(|deadline| Instant::now() < deadline)
+                .unwrap_or(false)
+    }
+
+    fn complete_host_query(&mut self) {
+        self.outstanding_host_query_barriers =
+            self.outstanding_host_query_barriers.saturating_sub(1);
+        if self.outstanding_host_query_barriers == 0 {
+            self.host_reply_deadline = None;
+        }
+    }
+
+    /// Open a forwarding window for `token`. After earlier query batches
+    /// cross their DA boundaries, this batch's reply bytes are captured
+    /// until its own DA, alongside normal classified `HostReply` events.
     ///
     /// The server serializes forwarded queries globally (`forward_in_flight`
     /// on `Screen`), but its own backstop timeout can release that slot and
@@ -381,9 +420,11 @@ impl StdinAnsiParser {
                 existing.reply_bytes.len(),
             );
         }
+        self.expect_host_replies();
         self.active_forward = Some(ForwardSlot {
             token,
             reply_bytes: Vec::new(),
+            barriers_ahead: self.outstanding_host_query_barriers - 1,
         });
     }
 
@@ -495,7 +536,11 @@ impl StdinAnsiParser {
                             continue;
                         }
                     }
-                    if let Some(slot) = self.active_forward.as_mut() {
+                    if let Some(slot) = self
+                        .active_forward
+                        .as_mut()
+                        .filter(|slot| slot.barriers_ahead == 0)
+                    {
                         // Re-serialize so the pane's pty sees a legal OSC.
                         // Terminators vary by host; ST (ESC \) is always safe.
                         slot.reply_bytes.extend_from_slice(b"\x1b]");
@@ -511,6 +556,7 @@ impl StdinAnsiParser {
                 } => {
                     match final_byte {
                         b'c' => {
+                            self.complete_host_query();
                             if self.startup_kitty_probe == StartupKittyProbe::AwaitingReply {
                                 self.startup_kitty_probe = StartupKittyProbe::Resolved;
                                 out.replies.push(HostReply::KittyGraphicsSupport(false));
@@ -518,10 +564,17 @@ impl StdinAnsiParser {
                             if let Some(reply) = HostReply::sixel_support_from_primary_da(&raw) {
                                 out.replies.push(reply);
                             }
-                            // Primary-DA — the barrier. Close the slot and
-                            // emit the completed forwarded reply if active.
-                            if let Some(slot) = self.active_forward.take() {
-                                out.completed_forward = Some((slot.token, slot.reply_bytes));
+                            // A local or timed-out earlier query's DA
+                            // cannot complete this forwarding window.
+                            match self.active_forward.as_mut() {
+                                Some(slot) if slot.barriers_ahead > 0 => {
+                                    slot.barriers_ahead -= 1;
+                                },
+                                Some(_) => {
+                                    let slot = self.active_forward.take().unwrap();
+                                    out.completed_forward = Some((slot.token, slot.reply_bytes));
+                                },
+                                None => {},
                             }
                             // Primary-DA is NOT double-dispatched — it has
                             // no cached-state counterpart.
@@ -530,7 +583,11 @@ impl StdinAnsiParser {
                             if let Some(reply) = HostReply::from_csi_report(&raw) {
                                 out.replies.push(reply);
                             }
-                            if let Some(slot) = self.active_forward.as_mut() {
+                            if let Some(slot) = self
+                                .active_forward
+                                .as_mut()
+                                .filter(|slot| slot.barriers_ahead == 0)
+                            {
                                 slot.reply_bytes.extend_from_slice(&raw);
                             }
                             // Suppress unused-variable warning for params.
@@ -574,7 +631,14 @@ impl StdinAnsiParser {
     }
 
     pub fn pending_partial(&self) -> PendingPartial {
-        if !self.partial_paste.is_empty() || !self.partial_apc.is_empty() {
+        if self.host_replies_expected()
+            && (!self.partial_osc.is_empty()
+                || !self.partial_csi.is_empty()
+                || !self.partial_apc.is_empty()
+                || !self.nested_frame_extractor.partial_bytes().is_empty())
+        {
+            PendingPartial::ExpectedReply
+        } else if !self.partial_paste.is_empty() || !self.partial_apc.is_empty() {
             PendingPartial::ReplyInProgress
         } else if self.partial_csi.is_empty()
             && self.partial_osc.is_empty()
@@ -607,7 +671,9 @@ impl StdinAnsiParser {
                     std::mem::take(&mut self.partial_csi)
                 }
             },
-            PendingPartial::None | PendingPartial::ReplyInProgress => Vec::new(),
+            PendingPartial::None
+            | PendingPartial::ReplyInProgress
+            | PendingPartial::ExpectedReply => Vec::new(),
         }
     }
 
