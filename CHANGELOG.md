@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+* chore: use `main` for Bkpr integration and propose stable upstream releases through human-validated PRs, with SHA-bound Rust verification and no automatic merging.
 * feat: bridge Kitty OSC 5522 MIME clipboard reads, atomic writes and paste notifications with per-pane mode negotiation, client-bound paste tokens and isolated replies.
 * fix: retain clipboard frame ownership across fragmented headers and late replies, and reject terminal-control bytes in encoded payloads.
 * fix: preserve split clipboard terminators during idle discard and keep buffered reply failures bound to their original request.

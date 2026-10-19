@@ -1,8 +1,9 @@
 # Bkpr native runtime
 
-The `bkpr` branch keeps Bkpr's native runtime on Zellij `v0.45.1`. `main`
-tracks upstream unchanged. Feature branches retain the individual changes
-merged into `bkpr`. The upstream development instructions still apply to `main`.
+The `main` branch integrates Bkpr's native changes on Zellij `v0.45.1`.
+Retained `feature/*` branches hold the individual changes and submit PRs into
+`main`. Stable upstream releases arrive through human-reviewed update PRs;
+see [fork maintenance](RELEASE.md#maintaining-the-bkpr-fork).
 
 ## Packages
 
@@ -64,7 +65,7 @@ upstream dependencies.
 ## Pins and cache
 
 The fork owns its `flake.lock`. Consumers should use
-`github:calops/bkpr-zellij/bkpr` and keep the fork's inputs intact, without
+`github:calops/bkpr-zellij/main` and keep the fork's inputs intact, without
 `follows` overrides. Bkpr's release CI builds and caches this pinned package
 as part of its dependency closure at `https://bkpr.cachix.org`.
 

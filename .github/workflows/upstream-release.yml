@@ -1,0 +1,33 @@
+name: Upstream release
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+# Only trusted main code runs in this write-capable job. Upstream code is merged
+# in an isolated temporary repository, never executed here.
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  statuses: write
+
+concurrency:
+  group: upstream-release
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.repository == 'calops/bkpr-zellij' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Propose the latest stable upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/upstream-release.mjs

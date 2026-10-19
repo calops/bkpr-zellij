@@ -108,7 +108,7 @@
                 passthru = { };
                 meta = old.meta // {
                   homepage = "https://github.com/calops/bkpr-zellij";
-                  changelog = "https://github.com/calops/bkpr-zellij/blob/bkpr/CHANGELOG.md";
+                  changelog = "https://github.com/calops/bkpr-zellij/blob/main/CHANGELOG.md";
                 };
               });
           zellij = pkgs.zellij.override { zellij-unwrapped = unwrapped; };

@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      checkout_ref:
+        description: 'Exact commit SHA to verify using this trusted workflow'
+        required: false
+        type: string
+
+# Build/test jobs may execute upstream code. Never give them write access or
+# persisted checkout credentials. Only the isolated reporter can write statuses.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +32,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -42,7 +55,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -72,7 +88,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -92,7 +111,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -124,7 +146,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -149,7 +174,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -169,7 +197,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -187,7 +218,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -196,3 +230,39 @@ jobs:
 
       - name: Check Format
         run: cargo xtask format --check
+
+  verification-status:
+    name: Publish Rust verification status
+    needs: [build, build-windows, test, test-windows, integration-test, test-no-web, assets, format]
+    # Fork PRs cannot write statuses; a maintainer must dispatch trusted main
+    # with the reviewed full head SHA instead. Never use pull_request_target.
+    if: >-
+      always() &&
+      github.repository == 'calops/bkpr-zellij' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      # No checkout, artifacts, caches, or upstream scripts in this privileged job.
+      - name: Report on the exact verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_SHA: ${{ inputs.checkout_ref || github.event.pull_request.head.sha || github.sha }}
+          JOB_RESULTS: ${{ join(needs.*.result, ',') }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ ! "$CHECKOUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "checkout_ref must be a full commit SHA" >&2
+            exit 1
+          fi
+          state=failure
+          if [[ "$JOB_RESULTS" == "success,success,success,success,success,success,success,success" ]]; then
+            state=success
+          fi
+          gh api --method POST "repos/calops/bkpr-zellij/statuses/$CHECKOUT_SHA" \
+            -f state="$state" \
+            -f context="Rust release verification" \
+            -f description="Rust jobs: $state; human validation still required" \
+            -f target_url="$RUN_URL"

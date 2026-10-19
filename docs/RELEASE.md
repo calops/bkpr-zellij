@@ -1,3 +1,56 @@
+# Maintaining the Bkpr fork
+
+`main` is the integration and default branch for `calops/bkpr-zellij`.
+Develop native changes on retained `feature/*` branches and submit PRs into
+`main`. There is no permanent pristine upstream branch: the local `upstream`
+remote points to `https://github.com/zellij-org/zellij.git`.
+
+Upstream releases arrive as `update/zellij-vX.Y.Z` PRs, prepared by the
+**Upstream release** workflow. It polls daily and can be run manually from
+GitHub Actions. Updates use published stable release tags, not upstream's
+moving `main`. Fetch upstream tags locally; do not push them into the fork,
+because the inherited release workflow publishes on `v*.*.*` tag pushes.
+
+Every update requires human validation and an explicit human merge, including
+conflict-free updates with passing CI. The updater never merges PRs. Keep
+auto-merge disabled and require PR review on `main`.
+
+Use **Create a merge commit** for upstream-update PRs. Do not squash or
+rebase them: upstream ancestry must remain reachable for future merges and
+for the updater to recognize already-integrated releases. Delete the temporary
+update branch after merging.
+
+If a release conflicts, the updater opens a draft PR from the release commit.
+Resolve it on the update branch by merging `origin/main`, preserving both
+histories, then mark the PR ready for review. Do not resolve conflicts on a
+pristine upstream branch or rewrite `main`.
+
+The updater uses the repository's `GITHUB_TOKEN`, with permission to create
+branches and PRs. GitHub Actions must be enabled, and repository Actions
+settings must allow Actions to create PRs. No personal token or App secret
+is required.
+
+Because bot-created PRs do not trigger normal PR workflows, the updater
+explicitly dispatches the trusted `Rust` workflow from `main`, checking out
+the update commit with read-only permissions. A separate job that does not
+check out code publishes `Rust release verification` on that exact commit.
+Require this status and a PR on `main`, with admin enforcement enabled.
+Auto-merge stays disabled; an explicit human merge is the validation gate.
+No approving-review count is required because the sole maintainer cannot
+approve their own feature PRs.
+
+These dispatched runs test the update branch commit, not GitHub's synthetic
+PR merge commit, and do not run the separate end-to-end workflow. Review
+the actual run and any additional integration evidence before merging.
+Ordinary same-repository PRs publish the same required status. For external
+fork PRs, a maintainer must dispatch `Rust` from `main` with `checkout_ref`
+set to the reviewed PR head SHA; the fork's read-only PR token cannot publish
+the required status. Re-run verification after conflict resolution or any
+other update to the PR head.
+
+The sections below are inherited upstream release instructions, not the
+procedure for syncing or publishing this fork.
+
 # How to release a zellij version
 
 This document is primarily target at zellij maintainers in need to (prepare to)
