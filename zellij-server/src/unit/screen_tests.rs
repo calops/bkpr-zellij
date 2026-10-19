@@ -1207,6 +1207,125 @@ fn screen_plugin_origin_tab_is_authoritative_before_focus_and_first_frame() {
     mouse_fixture_updates(&plugin_receiver);
 }
 
+fn passive_popup_over_tiled_gutter_fixture() -> (
+    Screen,
+    Receiver<(PluginInstruction, ErrorContext)>,
+) {
+    use crate::plugins::PluginRenderAsset;
+    use zellij_utils::input::layout::SplitSize;
+    let size = Size { cols: 200, rows: 30 };
+    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, false);
+    let (to_plugin, plugin_receiver) = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    for tab_id in 0..2 {
+        let plugin = RunPluginOrAlias::from_url("file:/sidebar-fixture.wasm", &None, None, None).unwrap();
+        let layout = TiledPaneLayout {
+            children_split_direction: SplitDirection::Vertical,
+            children: vec![
+                TiledPaneLayout {
+                    run: Some(Run::Plugin(plugin.clone())),
+                    split_size: Some(SplitSize::Percent(20)),
+                    borderless: Some(true),
+                    ..TiledPaneLayout::default()
+                },
+                TiledPaneLayout { focus: Some(true), ..TiledPaneLayout::default() },
+            ],
+            ..TiledPaneLayout::default()
+        };
+        screen.new_tab(tab_id, (vec![], vec![]), None, Some(1)).unwrap();
+        screen.apply_layout(
+            layout, vec![], vec![(tab_id as u32 + 1, None)], vec![],
+            HashMap::from([(plugin, vec![tab_id as u32 + 10])]),
+            tab_id, true, (1, false), None,
+        ).unwrap();
+        let tab = screen.tabs.get_mut(&tab_id).unwrap();
+        tab.new_floating_pane(
+            PaneId::Plugin(tab_id as u32 + 20), None, None, false, false,
+            Some(FloatingPaneCoordinates {
+                pinned: Some(true),
+                borderless: Some(true),
+                ..FloatingPaneCoordinates::default()
+                    .with_x_fixed(39).with_y_fixed(3)
+                    .with_width_fixed(30).with_height_fixed(12)
+            }),
+            None,
+        ).unwrap();
+        tab.set_pane_selectable(PaneId::Plugin(tab_id as u32 + 20), false);
+        tab.handle_pty_bytes(
+            tab_id as u32 + 1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
+        ).unwrap();
+        screen.apply_plugin_render_assets(vec![PluginRenderAsset::new(
+            tab_id as u32 + 20, 1,
+            "\x1b[H┌────────────────────────────┐\x1b[2;1H│ details                    │\x1b[3;1H│ \x1b]8;;https://example.invalid/details\x1b\\details link\x1b]8;;\x1b\\               │".as_bytes().to_vec(),
+        )]).unwrap();
+    }
+    screen.go_to_tab(1, 1).unwrap();
+    mouse_fixture_updates(&plugin_receiver);
+    (screen, plugin_receiver)
+}
+
+#[test]
+fn passive_popup_outline_keeps_native_gutter_resizable_after_tab_switching() {
+    let (mut screen, plugin_receiver) = passive_popup_over_tiled_gutter_fixture();
+    for tab_id in [0, 1] {
+        screen.go_to_tab(tab_id + 1, 1).unwrap();
+        let sidebar = PaneId::Plugin(tab_id as u32 + 10);
+        let terminal = PaneId::Terminal(tab_id as u32 + 1);
+        let before = screen.tabs[&tab_id].get_pane_with_id(terminal)
+            .unwrap().cursor_coordinates(Some(1));
+        screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(10, 39)), 1);
+        assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
+            .iter().any(|(id, _, _)| *id == tab_id as u32 + 20));
+        screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, 39)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, 49)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, 49)), 1);
+        let tab = &screen.tabs[&tab_id];
+        assert_eq!(tab.get_pane_with_id(sidebar).unwrap().cols(), 50);
+        assert_eq!(tab.get_pane_with_id(terminal).unwrap().cursor_coordinates(Some(1)), before);
+        assert_eq!(screen.get_active_pane_id(&1), Some(terminal));
+        assert_eq!(tab.get_pane_with_id(PaneId::Plugin(tab_id as u32 + 20)).unwrap().x(), 39);
+    }
+}
+
+#[test]
+fn passive_popup_content_clicks_and_hover_still_reach_the_popup() {
+    use zellij_utils::data::Mouse;
+    let (mut screen, plugin_receiver) = passive_popup_over_tiled_gutter_fixture();
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 41)), 1);
+    assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
+        .iter().any(|(id, _, _)| *id == 20));
+    screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(5, 41)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(5, 41)), 1);
+    let updates = mouse_fixture_updates(&plugin_receiver);
+    assert!(updates.iter().any(|(id, client, event)| {
+        *id == Some(20) && *client == Some(1)
+            && matches!(event, Event::Mouse(Mouse::LeftClick(2, 2)))
+    }));
+    assert_eq!(screen.tabs[&0].get_pane_with_id(PaneId::Plugin(10)).unwrap().cols(), 40);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+    let mut output = crate::output::Output::default();
+    screen.get_active_tab_mut(1).unwrap().render(&mut output, None).unwrap();
+    let rendered = output.serialize().unwrap().remove(&1).unwrap();
+    assert!(rendered.contains("https://example.invalid/details"));
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(20, 190)), 1);
+    assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
+        .iter().any(|(id, _, mouse)| *id == 20 && matches!(mouse, Mouse::Hover(-1, _))));
+}
+
+#[test]
+fn selectable_pinned_pane_retains_its_own_frame_drag_controls() {
+    let (mut screen, _) = passive_popup_over_tiled_gutter_fixture();
+    let popup = PaneId::Plugin(20);
+    let tab = screen.tabs.get_mut(&0).unwrap();
+    tab.set_pane_selectable(popup, true);
+    tab.set_pane_borderless(&popup, false).unwrap();
+    screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, 39)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, 49)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, 49)), 1);
+    assert_eq!(screen.tabs[&0].get_pane_with_id(popup).unwrap().x(), 49);
+    assert_eq!(screen.tabs[&0].get_pane_with_id(PaneId::Plugin(10)).unwrap().cols(), 40);
+}
+
 #[test]
 fn open_new_tab() {
     let size = Size {
