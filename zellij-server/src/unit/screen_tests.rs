@@ -1216,6 +1216,8 @@ fn shared_sidebar_fit_reference_departure_publishes_restored_width_immediately()
 fn shared_sidebar_width_resizes_inactive_stack_list_members_and_their_ptys() {
     use zellij_utils::data::ResizeStrategy;
     let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
+    let (to_writer, writer_receiver) = channels::unbounded();
+    screen.bus.senders.to_pty_writer = Some(SenderWithContext::new(to_writer));
     let terminal_sizes = TerminalSizes::default();
     screen.bus.os_input = Some(Box::new(FakeInputOutput {
         terminal_sizes: Some(terminal_sizes.clone()),
@@ -1234,6 +1236,14 @@ fn shared_sidebar_width_resizes_inactive_stack_list_members_and_their_ptys() {
     ).unwrap();
     screen.go_to_tab(1, 1).unwrap();
     let assert_hidden_size = |screen: &Screen| {
+        // Drive the real writer through a finite barrier: resize_pty! queues
+        // instructions rather than invoking the OS API on the screen thread.
+        screen.bus.senders.send_to_pty_writer(PtyWriteInstruction::Exit).unwrap();
+        crate::pty_writer::pty_writer_main(Bus::new(
+            vec![writer_receiver.clone()],
+            None, None, None, None, None, None,
+            screen.bus.os_input.clone(),
+        )).unwrap();
         let tab = &screen.tabs[&1];
         let visible = tab.get_pane_with_id(PaneId::Terminal(3)).unwrap();
         let hidden = tab.get_suppressed_panes()
