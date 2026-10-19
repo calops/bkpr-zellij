@@ -4973,21 +4973,19 @@ impl Tab {
                                 cursor_position_x + 1,
                                 desired_cursor_shape
                             ); // goto row/col
-                            output.add_post_vte_instruction_to_client(client_id, show_cursor);
                             output.add_post_vte_instruction_to_client(
                                 client_id,
                                 goto_cursor_position,
                             );
+                            output.add_post_vte_instruction_to_client(client_id, show_cursor);
                             self.cursor_positions_and_shape.insert(
                                 client_id,
                                 (cursor_position_x, cursor_position_y, desired_cursor_shape),
                             );
                         }
-                    } else if not_occluded {
-                        // Cursor is hidden by the app but not occluded by a floating
-                        // pane. Position the host terminal cursor at the correct
-                        // location (for IME) then hide it. The IME subsystem reads
-                        // the cursor position regardless of visibility.
+                    } else {
+                        // Keep hidden or occluded cursors anchored to the active pane for IME
+                        // and host cursor animations, not the last rendered plugin.
                         let hide_cursor = "\u{1b}[?25l";
                         let goto_cursor_position = &format!(
                             "\u{1b}[{};{}H",
@@ -4996,9 +4994,6 @@ impl Tab {
                         );
                         output.add_post_vte_instruction_to_client(client_id, hide_cursor);
                         output.add_post_vte_instruction_to_client(client_id, goto_cursor_position);
-                    } else {
-                        let hide_cursor = "\u{1b}[?25l";
-                        output.add_post_vte_instruction_to_client(client_id, hide_cursor);
                     }
                 },
                 None => {

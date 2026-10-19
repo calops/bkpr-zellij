@@ -1135,6 +1135,54 @@ fn take_snapshot_and_cursor_position(
 }
 
 #[test]
+fn occluded_cursor_stays_at_active_terminal() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    tab.handle_pty_bytes(1, b"\x1b[6;13H\x1b[?25h".to_vec())
+        .unwrap();
+    let coordinates = zellij_utils::data::FloatingPaneCoordinates {
+        pinned: Some(true),
+        borderless: Some(true),
+        ..zellij_utils::data::FloatingPaneCoordinates::default()
+            .with_x_fixed(8)
+            .with_y_fixed(3)
+            .with_width_fixed(30)
+            .with_height_fixed(8)
+    };
+    tab.new_floating_pane(
+        PaneId::Terminal(2),
+        None,
+        None,
+        false,
+        false,
+        Some(coordinates),
+        None,
+    )
+    .unwrap();
+    tab.handle_pty_bytes(2, b"Tooltip".to_vec()).unwrap();
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let rendered = output.serialize().unwrap().remove(&client_id).unwrap();
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(1)));
+    let (_, visible_cursor) =
+        take_snapshot_and_cursor_position(&rendered, size.rows, size.cols, Palette::default());
+    assert_eq!(visible_cursor, None);
+    // Reveal the stored hardware position, as IME and host cursor animations do.
+    let (_, stored_cursor) = take_snapshot_and_cursor_position(
+        &format!("{rendered}\x1b[?25h"),
+        size.rows,
+        size.cols,
+        Palette::default(),
+    );
+    assert_eq!(stored_cursor, Some((12, 5)));
+}
+
+#[test]
 fn increase_tiled_pane_sizes_with_stacked_resizes() {
     // this is the default resizing algorithm
     let size = Size {
