@@ -2368,3 +2368,38 @@ fn kitty_clipboard_paste_recipient_is_pinned_before_every_opening_ok_frame_bound
         }
     }
 }
+
+#[test]
+fn kitty_clipboard_late_header_first_arrival_after_timeout_never_becomes_keyboard_input() {
+    for had_request in [false, true] {
+        for cutoff in [3, 4, 5, 6, 7, 15, 32, 55] {
+            for terminator in [b"\x1b\\".as_slice(), b"\x07", b"\x18", b"\x1a"] {
+                let mut parser = StdinAnsiParser::new();
+                let id = if had_request {
+                    let query = parser.prepare_clipboard_forward(104, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+                    let id = kitty_clipboard_host_id(&query);
+                    assert_eq!(parser.close_clipboard_forward_on_timeout(104), Some((104, Vec::new())));
+                    id
+                } else {
+                    b"unowned".to_vec()
+                };
+                assert_eq!(parser.clipboard_paste_context, None);
+                let packet = kitty_clipboard_reply(
+                    b"5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;QUFBQkJC", &id, terminator);
+                let out = parser.feed(&packet[..cutoff]);
+                assert!(out.residue.is_empty());
+                assert_eq!(parser.pending_partial(), PendingPartial::ReplyInProgress);
+                assert!(parser.finalize_force().is_empty(), "late header cutoff {cutoff}");
+                assert!(parser.finalize_force().is_empty());
+                for byte in &packet[cutoff..] {
+                    let out = parser.feed(&[*byte]);
+                    assert!(out.residue.is_empty(), "late continuation after cutoff {cutoff}");
+                    assert!(out.completed_clipboard_forward.is_none());
+                    assert!(out.clipboard_pastes.is_empty());
+                }
+                assert_eq!(parser.feed(b"typing \x1ba").residue, b"typing \x1ba");
+                assert_eq!(parser.active_clipboard_forward_token(), None);
+            }
+        }
+    }
+}

@@ -1148,13 +1148,9 @@ impl StdinAnsiParser {
                     },
                     SeqStatus::NeedMore => {
                         let kitty_prefix = is_kitty_clipboard_prefix(rest);
-                        let expected = self.active_clipboard_forward.as_ref()
-                            .map(|slot| slot.kitty.is_some()).unwrap_or(false)
-                            || self.clipboard_paste_context.is_some()
-                            || self.active_clipboard_paste.is_some();
-                        if kitty_prefix && (rest.starts_with(b"\x1b]5522;")
-                            || expected || self.partial_kitty_deadline.is_some())
-                        {
+                        // A late host reply still owns its OSC framing after its
+                        // request slot expired. Absence of a recipient is not input.
+                        if kitty_prefix {
                             self.partial_kitty_deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
                         } else {
                             self.partial_kitty_deadline = None;
