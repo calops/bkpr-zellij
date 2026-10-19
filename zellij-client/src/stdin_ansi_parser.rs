@@ -192,6 +192,7 @@ pub struct ForwardSlot {
 pub struct ClipboardForwardSlot {
     pub token: u32,
     kitty: Option<KittyClipboardForward>,
+    legacy_cancelled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -259,10 +260,9 @@ fn is_user_input(event: &InputEvent) -> bool {
 /// Cap on the size of an in-flight partial OSC/CSI buffer. Sized to
 /// pass legitimate OSC 52 clipboard payloads, which carry the entire
 /// clipboard base64-encoded and have no protocol-level limit (images,
-/// multi-MB text dumps, etc.). Beyond this we assume a runaway or
-/// malformed sequence and flush the buffered bytes back to residue —
-/// same observable behaviour as today for unterminated OSC, just
-/// bounded.
+/// multi-MB text dumps, etc.). Recognized clipboard replies exceeding this
+/// bound are discarded through their wire boundary, never replayed as keys.
+/// Other unterminated OSC/CSI sequences retain their existing residue fallback.
 const PARTIAL_BUFFER_CAP_BYTES: usize = 100 * 1024 * 1024;
 
 const PASTE_START_MARKER: &[u8] = b"\x1b[200~";
@@ -348,6 +348,7 @@ pub struct StdinAnsiParser {
     partial_nested_clipboard_context: Option<Option<u64>>,
     discard_kitty_osc: bool,
     partial_kitty_deadline: Option<Instant>,
+    partial_kitty_forward_token: Option<u32>,
     /// Same for CSI device-control reports.
     partial_csi: Vec<u8>,
     partial_paste: Vec<u8>,
@@ -383,6 +384,7 @@ impl StdinAnsiParser {
             partial_nested_clipboard_context: None,
             discard_kitty_osc: false,
             partial_kitty_deadline: None,
+            partial_kitty_forward_token: None,
             partial_csi: Vec::new(),
             partial_paste: Vec::new(),
             nested_frame_extractor: nested_session::NestedFrameExtractor::new(),
@@ -490,7 +492,7 @@ impl StdinAnsiParser {
             token,
             self.active_clipboard_forward.as_ref().map(|s| s.token),
         );
-        self.active_clipboard_forward = Some(ClipboardForwardSlot { token, kitty: None });
+        self.active_clipboard_forward = Some(ClipboardForwardSlot { token, kitty: None, legacy_cancelled: false });
     }
 
     /// Register ownership before writing to stdout. Fresh, unguessable ids keep
@@ -583,14 +585,55 @@ impl StdinAnsiParser {
         }
     }
 
-    fn capture_kitty_clipboard(&mut self, raw: &[u8], frame_context: Option<u64>, out: &mut ParseOutput) {
+    fn cancel_legacy_clipboard_forward(&mut self, origin_token: Option<u32>, out: &mut ParseOutput) {
+        if matches!(self.active_clipboard_forward.as_ref(),
+            Some(slot) if slot.kitty.is_none() && Some(slot.token) == origin_token)
+        {
+            let slot = self.active_clipboard_forward.take().unwrap();
+            out.completed_clipboard_forward = Some((slot.token, Vec::new()));
+        }
+    }
+
+    fn finish_cancelled_legacy_clipboard(&mut self, out: &mut ParseOutput) {
+        if self.active_clipboard_forward.as_ref().map(|slot| slot.legacy_cancelled).unwrap_or(false) {
+            self.cancel_legacy_clipboard_forward(self.partial_kitty_forward_token, out);
+        }
+    }
+
+    fn queue_legacy_clipboard_reply(
+        &mut self,
+        raw: &[u8],
+        origin_token: Option<u32>,
+        out: &mut ParseOutput,
+        events: &mut Vec<u8>,
+    ) -> bool {
+        let slot = match self.active_clipboard_forward.as_ref() {
+            Some(slot) if slot.kitty.is_none() && Some(slot.token) == origin_token => slot,
+            _ => return false,
+        };
+        let term_len = if raw.last() == Some(&7) { 1 } else { 2 };
+        let payload = &raw[2..raw.len() - term_len];
+        if slot.legacy_cancelled || raw.len() > PARTIAL_BUFFER_CAP_BYTES
+            || payload.splitn(3, |byte| *byte == b';').nth(2).is_none()
+            || payload.iter().any(|byte| !(0x20..=0x7e).contains(byte))
+        {
+            self.cancel_legacy_clipboard_forward(origin_token, out);
+            return false;
+        }
+        // Keep ordinary input and replies in wire order in termwiz: a key
+        // before this reply cancels its owner, not a replacement request.
+        events.extend_from_slice(raw);
+        true
+    }
+
+    fn capture_kitty_clipboard(&mut self, raw: &[u8], frame_context: Option<u64>, origin_token: Option<u32>, out: &mut ParseOutput) {
         use zellij_utils::kitty_clipboard::{Packet, MAX_TRANSFER_BYTES};
         let term_len = if raw.last() == Some(&7) { 1 } else { 2 };
         let packet = match Packet::parse(&raw[2..raw.len() - term_len]) {
             Some(packet) => packet,
             None => {
                 self.reject_kitty_clipboard_packet(&raw[2..], out,
-                    raw.len() - 2 - term_len > zellij_utils::kitty_clipboard::MAX_PACKET_BYTES);
+                    raw.len() - 2 - term_len > zellij_utils::kitty_clipboard::MAX_PACKET_BYTES, origin_token);
                 return;
             },
         };
@@ -601,7 +644,7 @@ impl StdinAnsiParser {
                 // Actual clipboard contents without the request id cannot be a
                 // paste listing. Dropping just this DATA could truncate a read.
                 self.active_clipboard_paste = None;
-                self.abort_kitty_clipboard_forward(out, false);
+                self.abort_kitty_clipboard_forward(out, false, origin_token);
                 return;
             }
             self.capture_clipboard_paste(&packet, raw, frame_context, out);
@@ -620,13 +663,13 @@ impl StdinAnsiParser {
             return;
         }
         if kitty.failed {
-            self.reject_kitty_clipboard_packet(&raw[2..], out, false);
+            self.reject_kitty_clipboard_packet(&raw[2..], out, false, origin_token);
             return;
         }
         let status = match packet.field(b"status") {
             Some(status) => status,
             None => {
-                self.reject_kitty_clipboard_packet(&raw[2..], out, false);
+                self.reject_kitty_clipboard_packet(&raw[2..], out, false, origin_token);
                 return;
             },
         };
@@ -637,7 +680,7 @@ impl StdinAnsiParser {
             b"ENOSYS" | b"EPERM" | b"EBUSY" => true,
             b"EIO" | b"EINVAL" | b"EFBIG" if kitty.write => true,
             _ => {
-                self.reject_kitty_clipboard_packet(&raw[2..], out, false);
+                self.reject_kitty_clipboard_packet(&raw[2..], out, false, origin_token);
                 return;
             },
         };
@@ -658,7 +701,7 @@ impl StdinAnsiParser {
         }
     }
 
-    fn reject_kitty_clipboard_packet(&mut self, payload: &[u8], out: &mut ParseOutput, oversized: bool) {
+    fn reject_kitty_clipboard_packet(&mut self, payload: &[u8], out: &mut ParseOutput, oversized: bool, origin_token: Option<u32>) {
         use zellij_utils::kitty_clipboard::Packet;
         // The metadata fits before the first payload separator in normal DATA
         // packets, so an oversized stale generation need not cancel a new one.
@@ -685,23 +728,24 @@ impl StdinAnsiParser {
                 }
             }
         }
-        self.abort_kitty_clipboard_forward(out, oversized);
+        self.abort_kitty_clipboard_forward(out, oversized, origin_token);
     }
 
-    fn abort_kitty_clipboard_forward(&mut self, out: &mut ParseOutput, oversized: bool) {
+    fn abort_kitty_clipboard_forward(&mut self, out: &mut ParseOutput, oversized: bool, origin_token: Option<u32>) {
         use zellij_utils::kitty_clipboard::Packet;
-        if let Some(slot) = self.active_clipboard_forward.take() {
-            if let Some(kitty) = slot.kitty {
-                let payload = if !kitty.write { b"5522;type=read:status=EBUSY".as_slice() }
-                    else if oversized { b"5522;type=write:status=EFBIG".as_slice() }
-                    else { b"5522;type=write:status=EINVAL".as_slice() };
-                let reply = Packet::parse(payload).unwrap()
-                    .with_id(kitty.original_id.as_deref(), b"\x1b\\");
-                out.completed_clipboard_forward = Some((slot.token, reply));
-            } else {
-                self.active_clipboard_forward = Some(slot);
-            }
+        if !matches!(self.active_clipboard_forward.as_ref(),
+            Some(slot) if slot.kitty.is_some() && Some(slot.token) == origin_token)
+        {
+            return;
         }
+        let slot = self.active_clipboard_forward.take().unwrap();
+        let kitty = slot.kitty.unwrap();
+        let payload = if !kitty.write { b"5522;type=read:status=EBUSY".as_slice() }
+            else if oversized { b"5522;type=write:status=EFBIG".as_slice() }
+            else { b"5522;type=write:status=EINVAL".as_slice() };
+        let reply = Packet::parse(payload).unwrap()
+            .with_id(kitty.original_id.as_deref(), b"\x1b\\");
+        out.completed_clipboard_forward = Some((slot.token, reply));
     }
 
     pub fn close_clipboard_forward_on_timeout(&mut self, token: u32) -> Option<(u32, Vec<u8>)> {
@@ -760,8 +804,8 @@ impl StdinAnsiParser {
         let bytes = &bytes[..];
         out.nested_frames = nested_frames;
         let sanitized = self.extract_kitty_probe_reply(bytes, &mut out.replies);
-        // Frame before termwiz: OSC 5522 must retain exact payload/terminator
-        // bytes without passing through its unbounded OSC buffer.
+        // Frame clipboard replies before termwiz so unterminated payloads
+        // never enter its unbounded OSC buffer.
         let (residue, input_events) = self.strip_replies(&sanitized, initial_context, &mut out);
         let mut events = Vec::new();
         self.inner.parse(
@@ -889,8 +933,8 @@ impl StdinAnsiParser {
     }
 
     pub fn pending_partial(&self) -> PendingPartial {
-        if is_kitty_clipboard_prefix(&self.partial_osc)
-            && (self.active_clipboard_forward.as_ref().map(|slot| slot.kitty.is_some()).unwrap_or(false)
+        if is_clipboard_reply_prefix(&self.partial_osc)
+            && (self.active_clipboard_forward.is_some()
                 || ((self.clipboard_paste_context.is_some() || self.active_clipboard_paste.is_some())
                     && self.partial_kitty_deadline.map(|deadline| Instant::now() < deadline).unwrap_or(false)))
             || self.host_replies_expected()
@@ -941,9 +985,9 @@ impl StdinAnsiParser {
 
     pub fn finalize_force(&mut self) -> Vec<u8> {
         self.in_bracketed_paste = false;
-        if self.partial_osc.starts_with(b"\x1b]5522;")
-            || (self.partial_kitty_deadline.is_some() && is_kitty_clipboard_prefix(&self.partial_osc))
-        {
+        let kitty_frame = is_kitty_clipboard_prefix(&self.partial_osc);
+        let legacy_frame = is_osc52_clipboard_prefix(&self.partial_osc);
+        if kitty_frame || legacy_frame {
             // A transaction deadline does not terminate its OSC on the wire.
             // Keep consuming the frame after idle ticks, but retain no payload.
             let trailing_escape = self.partial_osc.last() == Some(&0x1b);
@@ -951,15 +995,34 @@ impl StdinAnsiParser {
             if trailing_escape { self.partial_osc.push(0x1b); }
             self.discard_kitty_osc = true;
             self.partial_kitty_deadline = None;
-            self.active_clipboard_paste = None;
-            if let Some(kitty) = self.active_clipboard_forward.as_mut().and_then(|slot| slot.kitty.as_mut()) {
-                kitty.failed = true;
-                kitty.reply_bytes.clear();
+            let origin_token = self.partial_kitty_forward_token;
+            if kitty_frame {
+                self.active_clipboard_paste = None;
+            }
+            if let Some(slot) = self.active_clipboard_forward.as_mut()
+                .filter(|slot| Some(slot.token) == origin_token)
+            {
+                match slot.kitty.as_mut() {
+                    Some(kitty) if kitty_frame => {
+                        kitty.failed = true;
+                        kitty.reply_bytes.clear();
+                    },
+                    None if legacy_frame => slot.legacy_cancelled = true,
+                    _ => {},
+                }
             }
         }
         let mut partial_nested_frame = self.nested_frame_extractor.take_partial();
+        if self.discard_kitty_osc && partial_nested_frame == [0x1b] {
+            // This ESC may be the first half of ST, not a keyboard Escape.
+            // Move it out of the nested extractor without ending OSC discard.
+            if self.partial_osc.is_empty() {
+                self.partial_osc_clipboard_context = self.partial_nested_clipboard_context.take();
+            }
+            self.partial_osc.append(&mut partial_nested_frame);
+        }
         let mut out = Vec::with_capacity(
-            self.partial_osc.len()
+            (if self.discard_kitty_osc { 0 } else { self.partial_osc.len() })
                 + self.partial_csi.len()
                 + self.partial_paste.len()
                 + partial_nested_frame.len()
@@ -1062,8 +1125,10 @@ impl StdinAnsiParser {
         working.append(&mut self.partial_paste);
         working.extend_from_slice(bytes);
 
-        let mut out = Vec::with_capacity(working.len());
-        let mut events = Vec::with_capacity(working.len());
+        let reserve = if is_clipboard_reply_prefix(&working) { 0 } else { working.len() };
+        let mut out = Vec::with_capacity(reserve);
+        let mut events = Vec::with_capacity(reserve);
+        let mut legacy_reply_queued = false;
         let mut i = 0;
         while i < working.len() {
             let rest = &working[i..];
@@ -1074,14 +1139,27 @@ impl StdinAnsiParser {
             } else {
                 self.clipboard_paste_context
             };
+            let origin_token = if self.partial_kitty_deadline.is_some() {
+                self.partial_kitty_forward_token
+            } else {
+                self.active_clipboard_forward.as_ref().map(|slot| slot.token)
+            };
             if self.discard_kitty_osc {
                 if matches!(rest[0], 7 | 0x18 | 0x1a) {
                     self.discard_kitty_osc = false;
+                    self.finish_cancelled_legacy_clipboard(parsed);
                     i += 1;
                 } else if rest[0] == 0x1b {
                     match rest.get(1) {
-                        Some(b'\\') => { self.discard_kitty_osc = false; i += 2; },
-                        Some(_) => { self.discard_kitty_osc = false; },
+                        Some(b'\\') => {
+                            self.discard_kitty_osc = false;
+                            self.finish_cancelled_legacy_clipboard(parsed);
+                            i += 2;
+                        },
+                        Some(_) => {
+                            self.discard_kitty_osc = false;
+                            self.finish_cancelled_legacy_clipboard(parsed);
+                        },
                         None => {
                             self.partial_osc.push(0x1b);
                             self.partial_osc_clipboard_context = Some(frame_context);
@@ -1136,9 +1214,19 @@ impl StdinAnsiParser {
                         self.partial_kitty_deadline = None;
                         if rest.starts_with(b"\x1b]5522;") {
                             if matches!(rest[len - 1], 0x18 | 0x1a) {
-                                self.reject_kitty_clipboard_packet(&rest[2..len - 1], parsed, false);
+                                self.reject_kitty_clipboard_packet(&rest[2..len - 1], parsed, false, origin_token);
                             } else {
-                                self.capture_kitty_clipboard(&rest[..len], frame_context, parsed);
+                                self.capture_kitty_clipboard(&rest[..len], frame_context, origin_token, parsed);
+                            }
+                        } else if rest.starts_with(b"\x1b]52;") {
+                            if !legacy_reply_queued {
+                                if matches!(rest[len - 1], 0x18 | 0x1a) {
+                                    self.cancel_legacy_clipboard_forward(origin_token, parsed);
+                                } else {
+                                    legacy_reply_queued = self.queue_legacy_clipboard_reply(
+                                        &rest[..len], origin_token, parsed, &mut events,
+                                    );
+                                }
                             }
                         } else {
                             events.extend_from_slice(&rest[..len]);
@@ -1147,42 +1235,55 @@ impl StdinAnsiParser {
                         continue;
                     },
                     SeqStatus::NeedMore => {
-                        let kitty_prefix = is_kitty_clipboard_prefix(rest);
+                        let clipboard_prefix = is_clipboard_reply_prefix(rest);
                         // A late host reply still owns its OSC framing after its
                         // request slot expired. Absence of a recipient is not input.
-                        if kitty_prefix {
+                        if clipboard_prefix {
+                            if self.partial_kitty_deadline.is_none() {
+                                self.partial_kitty_forward_token = origin_token;
+                            }
                             self.partial_kitty_deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
                         } else {
                             self.partial_kitty_deadline = None;
                         }
-                        let tail = rest.to_vec();
                         let cap = if rest.starts_with(b"\x1b]5522;") {
                             zellij_utils::kitty_clipboard::MAX_PACKET_BYTES + 4
                         } else {
                             PARTIAL_BUFFER_CAP_BYTES
                         };
-                        if tail.len() > cap && rest.starts_with(b"\x1b]5522;") {
-                            // Host data must never become keyboard input after overflow.
-                            self.reject_kitty_clipboard_packet(&rest[2..], parsed, true);
+                        if rest.len() > cap && clipboard_prefix {
+                            // Neither clipboard protocol may turn encoded data into keys.
+                            if rest.starts_with(b"\x1b]52;") {
+                                if !legacy_reply_queued {
+                                    self.cancel_legacy_clipboard_forward(origin_token, parsed);
+                                }
+                            } else {
+                                self.reject_kitty_clipboard_packet(&rest[2..], parsed, true, origin_token);
+                            }
                             self.discard_kitty_osc = true;
                             self.partial_kitty_deadline = None;
-                            if tail.last() == Some(&0x1b) { self.partial_osc.push(0x1b); }
-                        } else if tail.len() > cap {
-                            out.extend_from_slice(&tail);
+                            if rest.last() == Some(&0x1b) { self.partial_osc.push(0x1b); }
+                        } else if rest.len() > cap {
+                            out.extend_from_slice(rest);
                         } else {
-                            self.partial_osc = tail;
+                            self.partial_osc = rest.to_vec();
                             self.partial_osc_clipboard_context = Some(frame_context);
                         }
                         return (out, events);
                     },
                     SeqStatus::Malformed => {
                         let next_escape = rest[2..].iter().position(|byte| *byte == 0x1b).map(|index| index + 2);
-                        let kitty_prefix = rest.starts_with(b"\x1b]5522;")
-                            || (self.partial_kitty_deadline.is_some()
-                                && next_escape.map(|end| is_kitty_clipboard_prefix(&rest[..end])).unwrap_or(false));
+                        let boundary = next_escape.unwrap_or(rest.len());
+                        let kitty_prefix = is_kitty_clipboard_prefix(&rest[..boundary]);
+                        let legacy_prefix = is_osc52_clipboard_prefix(&rest[..boundary]);
                         self.partial_kitty_deadline = None;
-                        if kitty_prefix {
-                            self.reject_kitty_clipboard_packet(&rest[2..], parsed, false);
+                        if kitty_prefix || legacy_prefix {
+                            if kitty_prefix {
+                                self.reject_kitty_clipboard_packet(&rest[2..], parsed, false, origin_token);
+                            }
+                            if legacy_prefix && !legacy_reply_queued {
+                                self.cancel_legacy_clipboard_forward(origin_token, parsed);
+                            }
                             // An unexpected ESC ends the malformed clipboard packet,
                             // but the new escape sequence still belongs to input.
                             if let Some(next) = next_escape {
@@ -1244,6 +1345,15 @@ impl StdinAnsiParser {
 fn is_kitty_clipboard_prefix(bytes: &[u8]) -> bool {
     const PREFIX: &[u8] = b"\x1b]5522;";
     bytes.starts_with(PREFIX) || (bytes.len() >= 3 && PREFIX.starts_with(bytes))
+}
+
+fn is_osc52_clipboard_prefix(bytes: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"\x1b]52;";
+    bytes.starts_with(PREFIX) || (bytes.len() >= 3 && PREFIX.starts_with(bytes))
+}
+
+fn is_clipboard_reply_prefix(bytes: &[u8]) -> bool {
+    is_kitty_clipboard_prefix(bytes) || is_osc52_clipboard_prefix(bytes)
 }
 
 /// Walk an OSC sequence starting at the head of `buf`. Returns whether

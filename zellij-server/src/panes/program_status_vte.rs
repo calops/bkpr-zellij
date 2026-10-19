@@ -146,7 +146,9 @@ impl ProgramStatusVteParser {
                         self.mode = Mode::Clipboard { escape: true, discarded };
                     } else if !discarded {
                         if self.body.len() == zellij_utils::kitty_clipboard::MAX_PACKET_BYTES {
-                            performer.grid.reject_kitty_clipboard_packet("EFBIG");
+                            // Packet rejection is EINVAL; aggregate storage overflow
+                            // is reported separately by WriteBuffer as EFBIG.
+                            performer.grid.reject_kitty_clipboard_packet("EINVAL");
                             self.body.clear();
                             self.mode = Mode::Clipboard { escape: false, discarded: true };
                         } else { self.body.push(byte); }
@@ -442,7 +444,7 @@ mod tests {
         oversized.extend(std::iter::repeat_n(b'A', 16384));
         oversized.extend_from_slice(b"\x1b\\");
         for (bad, status) in [
-            (oversized, "EFBIG"),
+            (oversized, "EINVAL"),
             (b"\x1b]5522;type=wdata:id=x:id=y:mime=dGV4dC9wbGFpbg==;Q0ND\x1b\\".to_vec(), "EINVAL"),
             (b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Q0ND\x18".to_vec(), "EINVAL"),
             (b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Q0ND\x1ba".to_vec(), "EINVAL"),

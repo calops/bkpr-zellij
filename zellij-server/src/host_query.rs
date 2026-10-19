@@ -137,16 +137,7 @@ impl HostQuery {
     pub fn empty_reply_bytes(&self) -> Vec<u8> {
         match self {
             HostQuery::KittyClipboardSupport => b"\x1b[?5522;0$y".to_vec(),
-            // No synthetic clipboard contents: unsupported hosts remain silent.
-            HostQuery::KittyClipboard { .. } => Vec::new(),
-            HostQuery::ClipboardContent {
-                selection,
-                terminator,
-            } => {
-                let mut v = format!("\x1b]52;{};", selection).into_bytes();
-                v.extend_from_slice(terminator.as_bytes());
-                v
-            },
+            // Clipboard silence/cancellation is not evidence of empty contents.
             _ => Vec::new(),
         }
     }
@@ -238,25 +229,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clipboard_content_empty_reply_mirrors_the_query_shape() {
-        assert_eq!(
-            HostQuery::ClipboardContent {
-                selection: 'c',
-                terminator: OscTerminator::Bel,
-            }
-            .empty_reply_bytes(),
-            b"\x1b]52;c;\x07",
-        );
-        assert_eq!(
-            HostQuery::ClipboardContent {
-                selection: 'p',
-                terminator: OscTerminator::St,
-            }
-            .empty_reply_bytes(),
-            b"\x1b]52;p;\x1b\\",
-        );
-    }
 
     #[test]
     fn non_clipboard_queries_have_no_empty_reply() {
