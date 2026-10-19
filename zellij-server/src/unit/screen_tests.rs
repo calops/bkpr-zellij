@@ -920,6 +920,16 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
         .expect("TEST");
 }
 
+fn shared_width_screen(size: Size, mirrored: bool) -> (
+    Screen,
+    Receiver<(PluginInstruction, ErrorContext)>,
+) {
+    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, mirrored);
+    let (to_plugin, plugin_receiver) = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    (screen, plugin_receiver)
+}
+
 fn shared_width_tab(screen: &mut Screen, tab_id: usize, initial_width: usize) {
     use zellij_utils::input::layout::SplitSize;
     let plugin = RunPluginOrAlias::from_url(
@@ -951,6 +961,11 @@ fn shared_width_tab(screen: &mut Screen, tab_id: usize, initial_width: usize) {
         HashMap::from([(plugin, vec![tab_id as u32 + 10])]),
         tab_id, true, (1, false), None,
     ).unwrap();
+    let tab = &screen.tabs[&tab_id];
+    assert!(tab.get_pane_with_id(PaneId::Plugin(tab_id as u32 + 10)).is_some(),
+        "the native layout must register its actual sidebar plugin");
+    assert!(tab.get_pane_with_id(PaneId::Terminal(tab_id as u32 + 1)).is_some(),
+        "the native layout must register its application terminal");
 }
 
 fn shared_width_columns(screen: &Screen, tab_id: usize) -> usize {
@@ -962,7 +977,7 @@ fn shared_width_columns(screen: &Screen, tab_id: usize) -> usize {
 #[test]
 fn shared_sidebar_width_follows_native_resize_switch_and_new_tabs() {
     use zellij_utils::data::ResizeStrategy;
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
     shared_width_tab(&mut screen, 0, 38);
     shared_width_tab(&mut screen, 1, 38);
     assert_eq!(shared_width_columns(&screen, 0), 38);
@@ -988,7 +1003,7 @@ fn shared_sidebar_width_follows_native_resize_switch_and_new_tabs() {
 #[test]
 fn shared_sidebar_width_survives_terminal_clamping_and_multiple_clients() {
     let size = Size { cols: 200, rows: 30 };
-    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, false);
+    let (mut screen, _plugin_events) = shared_width_screen(size, false);
     shared_width_tab(&mut screen, 0, 47);
     shared_width_tab(&mut screen, 1, 38);
     screen.set_client_size(2, size);
@@ -1029,7 +1044,7 @@ fn shared_sidebar_width_survives_terminal_clamping_and_multiple_clients() {
 #[test]
 fn shared_sidebar_native_mouse_gutter_keeps_focus_cursor_and_updates_every_tab() {
     for create_second_after_resize in [false, true] {
-        let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+        let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
         shared_width_tab(&mut screen, 0, 38);
         if !create_second_after_resize {
             shared_width_tab(&mut screen, 1, 38);
@@ -1085,7 +1100,7 @@ fn shared_sidebar_native_mouse_gutter_keeps_focus_cursor_and_updates_every_tab()
 #[test]
 fn shared_sidebar_width_new_tabs_while_clamped_do_not_replace_user_intent() {
     use zellij_utils::data::ResizeStrategy;
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
     shared_width_tab(&mut screen, 0, 47);
     shared_width_tab(&mut screen, 1, 38);
     for tab in screen.tabs.values_mut() {
@@ -1120,7 +1135,7 @@ fn shared_sidebar_width_new_tabs_while_clamped_do_not_replace_user_intent() {
 
 #[test]
 fn shared_sidebar_width_fullscreen_and_unrelated_tabs_do_not_rewrite_intent() {
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
     shared_width_tab(&mut screen, 0, 47);
     shared_width_tab(&mut screen, 1, 38);
     new_tab(&mut screen, 3, 2);
@@ -1139,7 +1154,7 @@ fn shared_sidebar_width_fullscreen_and_unrelated_tabs_do_not_rewrite_intent() {
 #[test]
 fn shared_sidebar_incompatible_layout_is_neither_width_source_nor_destination() {
     use zellij_utils::pane_size::{Constraint, Dimension};
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
     shared_width_tab(&mut screen, 0, 47);
     shared_width_tab(&mut screen, 1, 38);
     // A native layout override may retain plugin configuration while imposing
@@ -1174,7 +1189,7 @@ fn shared_sidebar_incompatible_layout_is_neither_width_source_nor_destination() 
 #[test]
 fn shared_sidebar_fit_reference_departure_publishes_restored_width_immediately() {
     let size = Size { cols: 200, rows: 30 };
-    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, false);
+    let (mut screen, _plugin_events) = shared_width_screen(size, false);
     shared_width_tab(&mut screen, 0, 47);
     shared_width_tab(&mut screen, 1, 38);
     screen.go_to_tab(1, 1).unwrap();
@@ -1200,7 +1215,7 @@ fn shared_sidebar_fit_reference_departure_publishes_restored_width_immediately()
 #[test]
 fn shared_sidebar_width_resizes_inactive_stack_list_members_and_their_ptys() {
     use zellij_utils::data::ResizeStrategy;
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    let (mut screen, _plugin_events) = shared_width_screen(Size { cols: 200, rows: 30 }, true);
     let terminal_sizes = TerminalSizes::default();
     screen.bus.os_input = Some(Box::new(FakeInputOutput {
         terminal_sizes: Some(terminal_sizes.clone()),
