@@ -7657,6 +7657,7 @@ impl Tab {
     }
     pub fn set_left_pane_outer_width(&mut self, pane_id: PaneId, columns: usize) {
         if self.tiled_panes.set_left_pane_outer_width(pane_id, columns) {
+            self.resize_all_stack_list_hidden_members();
             self.swap_layouts.set_is_tiled_damaged();
             self.set_force_render();
         }
