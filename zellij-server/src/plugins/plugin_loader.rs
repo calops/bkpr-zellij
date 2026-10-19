@@ -281,6 +281,7 @@ impl<'a> PluginLoader<'a> {
             stdin_pipe,
             stdout_pipe,
             store_limits: create_optimized_store_limits(),
+            render_messages: Default::default(),
         };
         let mut store = Store::new(&self.engine, plugin_env);
 
@@ -393,6 +394,7 @@ impl<'a> PluginLoader<'a> {
             stdin_pipe,
             stdout_pipe,
             store_limits: create_optimized_store_limits(),
+            render_messages: Default::default(),
         };
         let mut store = Store::new(&self.engine, plugin_env);
 

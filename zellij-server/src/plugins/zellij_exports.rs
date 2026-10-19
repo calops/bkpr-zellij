@@ -860,6 +860,11 @@ fn message_to_plugin(env: &PluginEnv, mut message_to_plugin: MessageToPlugin) ->
             env.plugin_cwd.display().to_string(),
         );
     }
+    if let Some(messages) = env.render_messages.borrow_mut().as_mut() {
+        // Deliver render-origin messages only once Screen has applied this frame.
+        messages.push(message_to_plugin);
+        return Ok(());
+    }
     env.senders
         .send_to_plugin(PluginInstruction::MessageFromPlugin {
             source_plugin_id: env.plugin_id,

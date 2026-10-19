@@ -1,7 +1,7 @@
 use super::{PluginId, PluginInstruction};
 use crate::plugins::plugin_map::RunningPlugin;
 use crate::plugins::wasm_bridge::PluginRenderAsset;
-use crate::plugins::zellij_exports::{wasi_read_string, wasi_write_object};
+use crate::plugins::zellij_exports::wasi_write_object;
 use std::collections::{HashMap, HashSet};
 use zellij_utils::data::{PipeMessage, PipeSource};
 use zellij_utils::plugin_api::pipe_message::ProtobufPipeMessage;
@@ -207,25 +207,10 @@ fn apply_pipe_message_to_plugin_inner(
                 .with_context(err_context)?;
             let should_render = should_render == 1;
             if rows > 0 && columns > 0 && should_render {
-                let rendered_bytes = instance
-                    .get_typed_func::<(i32, i32), ()>(&mut running_plugin.store, "render")
-                    .and_then(|render| {
-                        render.call(&mut running_plugin.store, (rows as i32, columns as i32))
-                    })
-                    .map_err(|e| anyhow!(e))
-                    .and_then(|_| {
-                        wasi_read_string(running_plugin.store.data()).map_err(|e| anyhow!(e))
-                    })
-                    .with_context(err_context)?;
+                let plugin_render_asset = running_plugin.render().with_context(err_context)?;
                 let pipes_to_block_or_unblock =
                     pipes_to_block_or_unblock(running_plugin, Some(&pipe_message.source));
-                let plugin_render_asset = PluginRenderAsset::new(
-                    plugin_id,
-                    client_id,
-                    rendered_bytes.as_bytes().to_vec(),
-                )
-                .with_pipes(pipes_to_block_or_unblock);
-                plugin_render_assets.push(plugin_render_asset);
+                plugin_render_assets.push(plugin_render_asset.with_pipes(pipes_to_block_or_unblock));
             } else {
                 let pipes_to_block_or_unblock =
                     pipes_to_block_or_unblock(running_plugin, Some(&pipe_message.source));

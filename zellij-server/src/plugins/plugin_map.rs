@@ -1,6 +1,8 @@
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::PluginId;
-use std::io::Write;
+use crate::plugins::wasm_bridge::PluginRenderAsset;
+use std::cell::RefCell;
+use std::io::{Read, Write};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
@@ -15,6 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use zellij_utils::{
     data::EventType,
     data::InputMode,
+    data::MessageToPlugin,
     input::command::TerminalAction,
     input::keybinds::Keybinds,
     input::layout::{PluginUserConfiguration, RunPlugin, RunPluginLocation},
@@ -299,6 +302,7 @@ pub struct PluginEnv {
     pub keybinds: Keybinds,
     pub intercepting_key_presses: bool,
     pub store_limits: StoreLimits,
+    pub render_messages: RefCell<Option<Vec<MessageToPlugin>>>,
 }
 
 #[derive(Clone)]
@@ -374,6 +378,46 @@ impl RunningPlugin {
             next_event_ids: HashMap::new(),
             last_applied_event_ids: HashMap::new(),
         }
+    }
+    pub fn render(&mut self) -> Result<PluginRenderAsset> {
+        // The guest must emit host commands before ANSI text: both use stdout.
+        *self.store.data().render_messages.borrow_mut() = Some(Vec::new());
+        let render_result = self
+            .instance
+            .get_typed_func::<(i32, i32), ()>(&mut self.store, "render")
+            .and_then(|render| {
+                render.call(&mut self.store, (self.rows as i32, self.columns as i32))
+            });
+        let mut render_messages = self
+            .store
+            .data()
+            .render_messages
+            .borrow_mut()
+            .take()
+            .unwrap_or_default();
+        // Drain even a failed frame, so partial stdout cannot corrupt the next command.
+        let mut bytes = Vec::new();
+        self.store
+            .data()
+            .stdout_pipe
+            .lock()
+            .unwrap()
+            .read_to_end(&mut bytes)?;
+        render_result.map_err(|error| anyhow!(error))?;
+        let text = std::str::from_utf8(&bytes)?;
+        if text.contains('\n') {
+            bytes = text.replace("\n", "\n\r").into_bytes();
+        }
+        if bytes.is_empty() {
+            render_messages.clear();
+        }
+        Ok(PluginRenderAsset {
+            plugin_id: self.store.data().plugin_id,
+            client_id: self.store.data().client_id,
+            bytes,
+            render_messages,
+            ..PluginRenderAsset::default()
+        })
     }
     pub fn next_event_id(&mut self, atomic_event: AtomicEvent) -> usize {
         let current_event_id = *self.next_event_ids.get(&atomic_event).unwrap_or(&0);

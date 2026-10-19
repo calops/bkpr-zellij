@@ -4159,6 +4159,77 @@ impl Screen {
         }
     }
 
+    fn add_plugin_pane(
+        &mut self,
+        plugin_id: PluginId,
+        pane_title: String,
+        run_plugin: Run,
+        start_suppressed: bool,
+        should_focus_plugin: bool,
+        placement: NewPanePlacement,
+        tab_index: Option<usize>,
+        client_id: Option<ClientId>,
+    ) -> Result<()> {
+        let connected_client_id = client_id.and_then(|client_id| {
+            if self.active_tab_ids.contains_key(&client_id) {
+                Some(client_id)
+            } else {
+                self.get_first_client_id()
+            }
+        });
+        let target_tab = if let Some(tab_index) = tab_index {
+            self.tabs.get_mut(&tab_index)
+        } else {
+            connected_client_id.and_then(|client_id| self.get_active_tab_mut(client_id).ok())
+        };
+        if let Some(tab) = target_tab {
+            tab.new_pane(
+                PaneId::Plugin(plugin_id),
+                Some(pane_title),
+                Some(run_plugin),
+                start_suppressed,
+                should_focus_plugin,
+                placement,
+                if tab_index.is_some() { None } else { connected_client_id },
+                None,
+            )?;
+        } else {
+            log::error!("Plugin destination tab not found: {:?}", tab_index);
+        }
+        Ok(())
+    }
+
+    fn apply_plugin_render_assets(
+        &mut self,
+        mut plugin_render_assets: Vec<PluginRenderAsset>,
+    ) -> Result<()> {
+        for index in 0..plugin_render_assets.len() {
+            let (preceding, later) = plugin_render_assets.split_at_mut(index + 1);
+            let asset = &mut preceding[index];
+            let nonempty_frame = !asset.bytes.is_empty();
+            let bytes = std::mem::take(&mut asset.bytes);
+            let mut applied = false;
+            for tab in self.tabs.values_mut() {
+                if tab.has_plugin(asset.plugin_id) {
+                    tab.handle_plugin_bytes(asset.plugin_id, asset.client_id, bytes)
+                        .context("failed to process plugin bytes")?;
+                    applied = nonempty_frame;
+                    break;
+                }
+            }
+            if !applied
+                || (!asset.render_messages.is_empty()
+                    && later.iter().any(|next| {
+                        next.plugin_id == asset.plugin_id && next.client_id == asset.client_id
+                    }))
+            {
+                asset.render_messages.clear();
+            }
+            self.render_blocker.remove_blocking_plugin(asset.plugin_id);
+        }
+        self.render(Some(plugin_render_assets))
+    }
+
     pub fn render(&mut self, plugin_render_assets: Option<Vec<PluginRenderAsset>>) -> Result<()> {
         // here we schedule the RenderToClients background job which debounces renders every 10ms
         // rather than actually rendering
@@ -4172,7 +4243,15 @@ impl Screen {
             .bus
             .senders
             .send_to_background_jobs(BackgroundJob::RenderToClients);
-        if let Some(plugin_render_assets) = plugin_render_assets {
+        if let Some(mut plugin_render_assets) = plugin_render_assets {
+            for asset in &mut plugin_render_assets {
+                for message in asset.render_messages.drain(..) {
+                    self.bus.senders.send_to_plugin(PluginInstruction::MessageFromPlugin {
+                        source_plugin_id: asset.plugin_id,
+                        message,
+                    }).context("failed to deliver rendered plugin message").non_fatal();
+                }
+            }
             let _ = self
                 .bus
                 .senders
@@ -8347,23 +8426,8 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::PaneTitleChanged => {
                 screen.log_and_report_session_state()?;
             },
-            ScreenInstruction::PluginBytes(mut plugin_render_assets) => {
-                for plugin_render_asset in plugin_render_assets.iter_mut() {
-                    let plugin_id = plugin_render_asset.plugin_id;
-                    let client_id = plugin_render_asset.client_id;
-                    let vte_bytes: Vec<u8> = plugin_render_asset.bytes.drain(..).collect();
-
-                    let all_tabs = screen.get_tabs_mut();
-                    for tab in all_tabs.values_mut() {
-                        if tab.has_plugin(plugin_id) {
-                            tab.handle_plugin_bytes(plugin_id, client_id, vte_bytes)
-                                .context("failed to process plugin bytes")?;
-                            break;
-                        }
-                    }
-                    screen.render_blocker.remove_blocking_plugin(plugin_id);
-                }
-                screen.render(Some(plugin_render_assets))?;
+            ScreenInstruction::PluginBytes(plugin_render_assets) => {
+                screen.apply_plugin_render_assets(plugin_render_assets)?;
             },
             ScreenInstruction::Render => {
                 screen.render(None)?;
@@ -10963,34 +11027,17 @@ pub(crate) fn screen_thread_main(
                     } else {
                         log::error!("Must have pane id to replace or connected client_id if replacing a pane");
                     }
-                } else if let Some(client_id) = client_id {
-                    active_tab_and_connected_client_id!(screen, client_id, |active_tab: &mut Tab, _client_id: ClientId| {
-                        active_tab.new_pane(
-                            PaneId::Plugin(plugin_id),
-                            Some(pane_title),
-                            Some(run_plugin),
-                            start_suppressed,
-                            should_focus_plugin.unwrap_or(true),
-                            new_pane_placement,
-                            Some(client_id),
-                            None,
-                        )
-                    }, ?);
-                } else if let Some(active_tab) =
-                    tab_index.and_then(|tab_index| screen.tabs.get_mut(&tab_index))
-                {
-                    active_tab.new_pane(
-                        PaneId::Plugin(plugin_id),
-                        Some(pane_title),
-                        Some(run_plugin),
+                } else {
+                    screen.add_plugin_pane(
+                        plugin_id,
+                        pane_title,
+                        run_plugin,
                         start_suppressed,
                         should_focus_plugin.unwrap_or(true),
                         new_pane_placement,
-                        None,
-                        None,
+                        tab_index,
+                        client_id,
                     )?;
-                } else {
-                    log::error!("Tab index not found: {:?}", tab_index);
                 }
                 if let Some(loading_indication) = plugin_loading_message_cache.remove(&plugin_id) {
                     screen.update_plugin_loading_stage(plugin_id, loading_indication);
