@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 * feat: bridge Kitty OSC 5522 MIME clipboard reads, atomic writes and paste notifications with per-pane mode negotiation, client-bound paste tokens and isolated replies.
+* fix: retain clipboard frame ownership across fragmented headers and reject terminal-control bytes in encoded payloads.
 
 ## [0.45.1] - 2026-08-28
 * fix: nested-session detection over SSH (https://github.com/zellij-org/zellij/pull/5522)

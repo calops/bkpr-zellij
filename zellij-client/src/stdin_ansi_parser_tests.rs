@@ -2264,3 +2264,107 @@ fn kitty_clipboard_and_late_osc52_bytes_cannot_leak_into_another_panes_color_que
     assert_eq!(parser.active_clipboard_forward_token(), Some(1));
     assert!(out.residue.is_empty());
 }
+
+#[test]
+fn kitty_clipboard_every_identifiable_header_prefix_survives_idle_and_query_timeout() {
+    let payload = b"5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbgo=";
+    for timed_out in [false, true] {
+        for terminator in [b"\x1b\\".as_slice(), b"\x07", b"\x18", b"\x1a"] {
+            let template = kitty_clipboard_reply(payload, &[b'a'; 32], terminator);
+            // ESC and ESC ] alone remain keyboard ambiguities. Every later
+            // split, including the OSC number and each metadata byte, is owned.
+            for cutoff in 3..=template.len() - terminator.len() {
+                let mut parser = StdinAnsiParser::new();
+                let query = parser.prepare_clipboard_forward(101, b"\x1b]5522;type=read:id=app;Lg==\x1b\\".to_vec());
+                let id = kitty_clipboard_host_id(&query);
+                parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=OK", &id, b"\x1b\\"));
+                let packet = kitty_clipboard_reply(payload, &id, terminator);
+                let out = parser.feed(&packet[..cutoff]);
+                assert!(out.residue.is_empty(), "prefix {cutoff}");
+                assert!(out.completed_clipboard_forward.is_none());
+                assert_eq!(parser.pending_partial(), PendingPartial::ExpectedReply, "prefix {cutoff}");
+                assert!(parser.finalize_fast_partial().is_empty());
+                if timed_out {
+                    assert_eq!(parser.close_clipboard_forward_on_timeout(101), Some((101, Vec::new())));
+                }
+                assert!(parser.finalize_force().is_empty(), "prefix {cutoff}");
+                assert!(parser.finalize_force().is_empty(), "repeated idle at prefix {cutoff}");
+                for byte in &packet[cutoff..] {
+                    let out = parser.feed(&[*byte]);
+                    assert!(out.residue.is_empty(), "continuation at prefix {cutoff}");
+                    assert!(out.completed_clipboard_forward.is_none());
+                }
+                assert_eq!(parser.feed(b"typing").residue, b"typing");
+                let out = parser.feed(&kitty_clipboard_reply(b"5522;type=read:status=DONE", &id, b"\x1b\\"));
+                if timed_out {
+                    assert!(out.completed_clipboard_forward.is_none());
+                } else {
+                    assert_eq!(out.completed_clipboard_forward,
+                        Some((101, kitty_clipboard_reply(b"5522;type=read:status=EBUSY", b"app", b"\x1b\\"))));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn kitty_clipboard_header_tracking_preserves_bare_escape_alt_typing_and_bracketed_paste() {
+    for timed_out in [false, true] {
+        for prefix in [b"\x1b".as_slice(), b"\x1b]"] {
+            let mut parser = StdinAnsiParser::new();
+            parser.prepare_clipboard_forward(102, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+            assert!(parser.feed(prefix).residue.is_empty());
+            if timed_out { parser.close_clipboard_forward_on_timeout(102); }
+            assert_eq!(parser.finalize_fast_partial(), prefix);
+            assert_eq!(parser.feed(b"5522;literal \x1ba").residue, b"5522;literal \x1ba");
+            let paste = b"\x1b[200~\x1b]5522;type=read:status=OK\x1b\\5522;literal\x1b[201~";
+            let out = parser.feed(paste);
+            assert_eq!(out.residue, paste);
+            assert!(out.completed_clipboard_forward.is_none());
+            assert!(out.clipboard_pastes.is_empty());
+        }
+    }
+}
+
+#[test]
+fn kitty_clipboard_header_candidate_disambiguates_osc52_and_preserves_new_escape_chords() {
+    let mut parser = StdinAnsiParser::new();
+    parser.prepare_clipboard_forward(103, b"\x1b]5522;type=read;Lg==\x1b\\".to_vec());
+    parser.feed(b"\x1b]5");
+    assert_eq!(parser.pending_partial(), PendingPartial::ExpectedReply);
+    let out = parser.feed(b"2;c;c2VjcmV0\x1b\\typing");
+    assert_eq!(out.residue, b"typing");
+    assert!(out.completed_clipboard_forward.is_none());
+    assert_eq!(parser.active_clipboard_forward_token(), Some(103));
+    parser.feed(b"\x1b]5522");
+    let out = parser.feed(b"\x1baKEEP");
+    assert_eq!(out.residue, b"\x1baKEEP");
+    assert_eq!(out.completed_clipboard_forward,
+        Some((103, b"\x1b]5522;type=read:status=EBUSY\x1b\\".to_vec())));
+}
+
+#[test]
+fn kitty_clipboard_paste_recipient_is_pinned_before_every_opening_ok_frame_boundary() {
+    let opening = b"\x1b]5522;type=read:status=OK:loc=primary:pw=c2VjcmV0\x1b\\";
+    for initial_context in [None, Some(100)] {
+        for next_context in [None, Some(200)] {
+            // Includes lone ESC buffered by NestedFrameExtractor, OSC prefix,
+            // every metadata byte, and the split ST before its final backslash.
+            for cutoff in 1..opening.len() {
+                let mut parser = StdinAnsiParser::new();
+                parser.set_clipboard_paste_context(initial_context);
+                let out = parser.feed(&opening[..cutoff]);
+                assert!(out.residue.is_empty());
+                assert!(out.clipboard_pastes.is_empty());
+                parser.set_clipboard_paste_context(next_context);
+                let out = parser.feed(&KITTY_PRIMARY_PASTE[cutoff..]);
+                assert!(out.residue.is_empty());
+                let expected = initial_context.map(|context| vec![(context, KITTY_PRIMARY_PASTE.to_vec())]).unwrap_or_default();
+                assert_eq!(out.clipboard_pastes, expected, "opening cutoff {cutoff}");
+                let fresh = parser.feed(KITTY_PRIMARY_PASTE);
+                let expected = next_context.map(|context| vec![(context, KITTY_PRIMARY_PASTE.to_vec())]).unwrap_or_default();
+                assert_eq!(fresh.clipboard_pastes, expected, "fresh event after cutoff {cutoff}");
+            }
+        }
+    }
+}

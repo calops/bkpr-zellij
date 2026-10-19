@@ -24,6 +24,12 @@ impl<'a> Packet<'a> {
             return None;
         }
         let packet = Self { metadata, payload: parts.next() };
+        // Encoded payloads are ASCII. Never forward C0/C1 controls (including
+        // raw CSI/ST bytes) into the host's OSC parser. Leave printable invalid
+        // base64 to the host, which owns write decoding across packet boundaries.
+        if packet.payload.map(|bytes| bytes.iter().any(|byte| !(0x20..=0x7e).contains(byte))).unwrap_or(false) {
+            return None;
+        }
         // Duplicate routing/type fields are ambiguous and must never claim a slot.
         for key in [b"type".as_slice(), b"id", b"status", b"mime", b"pw", b"name", b"loc"] {
             if metadata.split(|b| *b == b':').filter(|field| field.split(|b| *b == b'=').next() == Some(key)).count() > 1 {
@@ -288,5 +294,21 @@ mod paste_tests {
         }
         assert_eq!(paste_authorization(&PRIMARY[..PRIMARY.len() - 1]), None);
         assert_eq!(paste_authorization(&[PRIMARY, b"typing"].concat()), None);
+    }
+}
+
+#[cfg(test)]
+mod control_payload_tests {
+    use super::*;
+
+    #[test]
+    fn encoded_payloads_cannot_forward_c0_c1_del_or_non_ascii_terminal_bytes() {
+        for control in (0u8..=31).chain(127..=255) {
+            let packet = [b"5522;type=wdata:mime=dGV4dC9wbGFpbg==;QUFB".as_slice(), &[control], b"QkJC"].concat();
+            assert!(Packet::parse(&packet).is_none(), "control {control:#x}");
+        }
+        // Individual wdata chunks need not be padded or align to four bytes.
+        assert!(Packet::parse(b"5522;type=wdata:mime=dGV4dC9wbGFpbg==;Q").is_some());
+        assert!(Packet::parse(b"5522;type=wdata:mime=dGV4dC9wbGFpbg==;UFB").is_some());
     }
 }
