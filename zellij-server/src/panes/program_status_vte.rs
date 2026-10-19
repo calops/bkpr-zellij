@@ -133,9 +133,11 @@ impl ProgramStatusVteParser {
                         self.body.clear();
                         self.mode = Mode::Ground;
                     } else if matches!(byte, 0x18 | 0x1a) {
+                        if !discarded { performer.grid.reject_kitty_clipboard_packet("EINVAL"); }
                         self.body.clear();
                         self.mode = Mode::Ground;
                     } else if escape {
+                        if !discarded { performer.grid.reject_kitty_clipboard_packet("EINVAL"); }
                         self.body.clear();
                         self.parser.advance(&mut performer, b"\x1b");
                         self.mode = Mode::Escape;
@@ -144,6 +146,7 @@ impl ProgramStatusVteParser {
                         self.mode = Mode::Clipboard { escape: true, discarded };
                     } else if !discarded {
                         if self.body.len() == zellij_utils::kitty_clipboard::MAX_PACKET_BYTES {
+                            performer.grid.reject_kitty_clipboard_packet("EFBIG");
                             self.body.clear();
                             self.mode = Mode::Clipboard { escape: false, discarded: true };
                         } else { self.body.push(byte); }
@@ -431,5 +434,40 @@ mod tests {
         assert!(grid.pending_forwarded_queries.is_empty());
         parser.advance_until_terminated(&mut grid, b"\x1b[?5522$p", &|| None);
         assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboardSupport]);
+    }
+
+    #[test]
+    fn kitty_clipboard_rejected_write_packets_abort_instead_of_sending_truncated_contents() {
+        let mut oversized = b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;".to_vec();
+        oversized.extend(std::iter::repeat_n(b'A', 16384));
+        oversized.extend_from_slice(b"\x1b\\");
+        for (bad, status) in [
+            (oversized, "EFBIG"),
+            (b"\x1b]5522;type=wdata:id=x:id=y:mime=dGV4dC9wbGFpbg==;Q0ND\x1b\\".to_vec(), "EINVAL"),
+            (b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Q0ND\x18".to_vec(), "EINVAL"),
+            (b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Q0ND\x1ba".to_vec(), "EINVAL"),
+        ] {
+            let mut parser = ProgramStatusVteParser::new();
+            let mut grid = grid();
+            let stream = [
+                b"\x1b]5522;type=write:id=writer\x1b\\".as_slice(),
+                b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;QUFB\x1b\\",
+                &bad,
+                b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;QkJC\x1b\\",
+                b"\x1b]5522;type=wdata\x1b\\",
+            ].concat();
+            for chunk in stream.chunks(509) {
+                assert_eq!(parser.advance_until_terminated(&mut grid, chunk, &|| None), chunk.len());
+            }
+            assert!(grid.pending_forwarded_queries.is_empty(), "host must not receive the surviving AAABBB bytes");
+            assert_eq!(grid.pending_messages_to_pty, vec![format!("\x1b]5522;type=write:status={}:id=writer\x1b\\", status).into_bytes()]);
+            let replacement = b"\x1b]5522;type=write:id=new\x1b\\\
+                \x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bmV3\x1b\\\
+                \x1b]5522;type=wdata\x1b\\";
+            assert_eq!(parser.advance_until_terminated(&mut grid, replacement, &|| None), replacement.len());
+            assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboard {
+                bytes: replacement.to_vec(), write: true,
+            }]);
+        }
     }
 }

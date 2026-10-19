@@ -594,6 +594,7 @@ pub enum ClientContext {
     RenamedSession,
     ConfigFileUpdated,
     ForwardQueryToHost,
+    SetClipboardPasteMode,
     EmitNestedSessionFrame,
 }
 
@@ -632,6 +633,7 @@ pub enum ServerContext {
     ClearMouseHelpText,
     ClearCommandOutputFlash,
     ForwardQueryToHost,
+    SetClipboardPasteMode,
     KeyPassthroughChanged,
     EmitNestedSessionFrameToClient,
 }

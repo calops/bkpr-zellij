@@ -9408,7 +9408,7 @@ impl ForwardCapture {
     fn drain_forward_queries(&self) -> Vec<(u32, Vec<u8>)> {
         let mut out = Vec::new();
         while let Ok((instr, _ctx)) = self.server_rx.try_recv() {
-            if let ServerInstruction::ForwardQueryToHost(token, bytes, _) = instr {
+            if let ServerInstruction::ForwardQueryToHost(token, bytes, _, _) = instr {
                 out.push((token, bytes));
             }
         }
@@ -9418,7 +9418,7 @@ impl ForwardCapture {
     fn drain_forward_queries_with_async(&self) -> Vec<(u32, Vec<u8>, bool)> {
         let mut out = Vec::new();
         while let Ok((instr, _ctx)) = self.server_rx.try_recv() {
-            if let ServerInstruction::ForwardQueryToHost(token, bytes, resolve_async) = instr {
+            if let ServerInstruction::ForwardQueryToHost(token, bytes, resolve_async, _) = instr {
                 out.push((token, bytes, resolve_async));
             }
         }
@@ -9448,6 +9448,26 @@ impl ForwardCapture {
             }
         }
         out
+    }
+
+    fn drain_clipboard_modes(&self) -> Vec<(ClientId, Option<u64>)> {
+        let mut modes = Vec::new();
+        while let Ok((instruction, _)) = self.server_rx.try_recv() {
+            if let ServerInstruction::SetClipboardPasteMode(client_id, context) = instruction {
+                modes.push((client_id, context));
+            }
+        }
+        modes
+    }
+
+    fn drain_bound_clipboard_queries(&self) -> Vec<(u32, Vec<u8>, Option<ClientId>)> {
+        let mut queries = Vec::new();
+        while let Ok((instruction, _)) = self.server_rx.try_recv() {
+            if let ServerInstruction::ForwardQueryToHost(token, bytes, true, target) = instruction {
+                queries.push((token, bytes, target));
+            }
+        }
+        queries
     }
 }
 
@@ -14367,4 +14387,366 @@ fn kitty_clipboard_queue_is_bounded_and_reports_busy_to_the_rejected_pane() {
     assert_eq!(screen.clipboard_forward_queue.len(), 32);
     assert_eq!(capture.drain_pty_writes(), vec![(b"\x1b]5522;type=read:status=EBUSY:id=app\x1b\\".to_vec(), 99)]);
     assert_eq!(capture.drain_forward_queries().len(), 1);
+}
+
+fn clipboard_paste_fixture() -> (Screen, ForwardCapture) {
+    let size = Size { cols: 120, rows: 30 };
+    let (mut screen, capture) = create_new_screen_with_forward_capture(size);
+    screen.session_is_mirrored = false;
+    new_tab(&mut screen, 1, 0);
+    add_second_pane_to_active_tab(&mut screen, 2);
+    screen.set_client_size(2, size);
+    screen.add_client(2, false).unwrap();
+    screen.focus_pane_with_id(PaneId::Terminal(1), false, false, 1).unwrap();
+    screen.focus_pane_with_id(PaneId::Terminal(2), false, false, 2).unwrap();
+    for terminal_id in [1, 2] {
+        set_pane_clipboard_mode(&mut screen, terminal_id, true);
+    }
+    screen.render(None).unwrap();
+    capture.drain_pty_writes();
+    (screen, capture)
+}
+
+fn set_pane_clipboard_mode(screen: &mut Screen, terminal_id: u32, enabled: bool) {
+    let tab = screen.tabs.values_mut()
+        .find(|tab| tab.has_pane_with_pid(&PaneId::Terminal(terminal_id))).unwrap();
+    tab.handle_pty_bytes(terminal_id,
+        if enabled { b"\x1b[?5522h".to_vec() } else { b"\x1b[?5522l".to_vec() },
+    ).unwrap();
+}
+
+fn clipboard_paste_notification(primary: bool, password: Option<&str>) -> Vec<u8> {
+    let location = if primary { ":loc=primary" } else { "" };
+    let password = password.map(|value| format!(":pw={}", value)).unwrap_or_default();
+    format!(
+        "\x1b]5522;type=read:status=OK{location}{password}\x1b\\\
+         \x1b]5522;type=read:status=DATA:mime=Lg=={password};dGV4dC9wbGFpbgo=\x07\
+         \x1b]5522;type=read:status=DONE{password}\x1b\\"
+    ).into_bytes()
+}
+
+fn clipboard_paste_read(primary: bool, password: &str, name: Option<&str>) -> HostQuery {
+    let location = if primary { ":loc=primary" } else { "" };
+    let name = name.map(|value| format!(":name={}", value)).unwrap_or_default();
+    HostQuery::KittyClipboard {
+        bytes: format!(
+            "\x1b]5522;type=read{location}:pw={password}{name}:id=app;dGV4dC9wbGFpbg==\x1b\\"
+        ).into_bytes(),
+        write: false,
+    }
+}
+
+#[test]
+fn native_clipboard_modes_handoff_per_client_and_capture_original_recipient() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let first_context = screen.clipboard_paste_targets[&1].0;
+    let second_context = screen.clipboard_paste_targets[&2].0;
+    assert_ne!(first_context, second_context);
+    let modes = capture.drain_clipboard_modes();
+    assert!(modes.contains(&(1, Some(first_context))));
+    assert!(modes.contains(&(2, Some(second_context))));
+
+    screen.focus_pane_with_id(PaneId::Terminal(2), false, false, 1).unwrap();
+    screen.render(None).unwrap();
+    let new_context = screen.clipboard_paste_targets[&1].0;
+    assert_ne!(new_context, first_context);
+    assert_ne!(new_context, second_context);
+    assert_eq!(screen.clipboard_paste_targets[&2].0, second_context);
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, Some(new_context))]);
+    capture.drain_pty_writes();
+
+    let original = clipboard_paste_notification(true, Some("c2VjcmV0"));
+    screen.handle_clipboard_paste(1, first_context, original.clone());
+    let second = clipboard_paste_notification(false, None);
+    screen.handle_clipboard_paste(2, second_context, second.clone());
+    assert_eq!(capture.drain_pty_writes(), vec![(original, 1), (second, 2)]);
+    let grant = &screen.clipboard_paste_grants[&PaneId::Terminal(1)];
+    assert_eq!(grant.client_id, 1);
+    assert_eq!(grant.password, b"c2VjcmV0");
+    assert!(grant.primary);
+}
+
+#[test]
+fn native_clipboard_input_never_resumes_solicited_forward_or_broadcasts() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&1].0;
+    screen.tabs.get_mut(&0).unwrap().toggle_sync_panes_is_active();
+    let pane = screen.tabs.get_mut(&0).unwrap()
+        .get_pane_with_id_mut(PaneId::Terminal(1)).unwrap();
+    pane.arm_forward_pause();
+    pane.handle_pty_bytes(b"buffered output".to_vec(), &|| None);
+    let token = screen.forward_host_query(PaneId::Terminal(2), kitty_clipboard_query(true));
+    capture.drain_forward_queries();
+    capture.drain_pty_writes();
+    let bytes = clipboard_paste_notification(false, None);
+    screen.handle_clipboard_paste(1, context, bytes.clone());
+    assert_eq!(capture.drain_pty_writes(), vec![(bytes, 1)]);
+    assert_eq!(screen.clipboard_forward_in_flight_token, Some(token));
+    let pane = screen.tabs.get_mut(&0).unwrap()
+        .get_pane_with_id_mut(PaneId::Terminal(1)).unwrap();
+    assert!(pane.is_forward_paused());
+    assert_eq!(pane.drain_pending_pty_input(), b"buffered output");
+}
+
+#[test]
+fn native_clipboard_rejects_wrong_client_disabled_closed_and_disconnected_targets() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let first_context = screen.clipboard_paste_targets[&1].0;
+    let second_context = screen.clipboard_paste_targets[&2].0;
+    capture.drain_clipboard_modes();
+    let bytes = clipboard_paste_notification(false, Some("cHc="));
+    screen.handle_clipboard_paste(2, first_context, bytes.clone());
+    screen.handle_clipboard_paste(1, second_context, bytes.clone());
+    screen.handle_clipboard_paste(1, u64::MAX, bytes.clone());
+    assert!(capture.drain_pty_writes().is_empty());
+
+    set_pane_clipboard_mode(&mut screen, 1, false);
+    screen.render(None).unwrap();
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, None)]);
+    screen.handle_clipboard_paste(1, first_context, bytes.clone());
+    assert!(capture.drain_pty_writes().is_empty());
+    assert!(!screen.clipboard_paste_grants.contains_key(&PaneId::Terminal(1)));
+
+    let _closed = screen.tabs.get_mut(&0).unwrap()
+        .extract_pane(PaneId::Terminal(2), false).unwrap();
+    capture.drain_pty_writes();
+    screen.handle_clipboard_paste(2, second_context, bytes.clone());
+    assert!(capture.drain_pty_writes().is_empty());
+    screen.remove_client(2).unwrap();
+    capture.drain_pty_writes();
+    screen.handle_clipboard_paste(2, second_context, bytes);
+    assert!(capture.drain_pty_writes().is_empty());
+    assert!(screen.clipboard_paste_history.iter().all(|(_, client_id, _, _)| *client_id != 2));
+}
+
+#[test]
+fn native_clipboard_mode_disables_for_ui_and_plugin_focus_then_uses_fresh_context() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&1].0;
+    capture.drain_clipboard_modes();
+    screen.change_mode(InputMode::RenameTab, None, 1).unwrap();
+    screen.render(None).unwrap();
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, None)]);
+    screen.change_mode(InputMode::Normal, None, 1).unwrap();
+    screen.render(None).unwrap();
+    let new_context = screen.clipboard_paste_targets[&1].0;
+    assert_ne!(new_context, context);
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, Some(new_context))]);
+    screen.get_active_tab_mut(1).unwrap().new_pane(
+        PaneId::Plugin(9), None, None, false, true,
+        NewPanePlacement::default(), Some(1), None,
+    ).unwrap();
+    screen.render(None).unwrap();
+    assert!(!screen.clipboard_paste_targets.contains_key(&1));
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, None)]);
+}
+
+#[test]
+fn native_clipboard_stream_is_revalidated_before_delivery_or_authorization() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&1].0;
+    let invalid: &[&[u8]] = &[
+        b"\x1b]5522;type=read:status=OK:pw=cHc=\x1b\\",
+        b"\x1b]5522;type=read:status=OK:id=foreign\x1b\\\
+          \x1b]5522;type=read:status=DATA:mime=Lg==;YQ==\x1b\\\
+          \x1b]5522;type=read:status=DONE\x1b\\",
+        b"\x1b]5522;type=read:status=OK\x1b\\\
+          \x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;YQ==\x1b\\\
+          \x1b]5522;type=read:status=DONE\x1b\\",
+    ];
+    for bytes in invalid {
+        screen.handle_clipboard_paste(1, context, bytes.to_vec());
+    }
+    assert!(capture.drain_pty_writes().is_empty());
+    assert!(screen.clipboard_paste_grants.is_empty());
+}
+
+#[test]
+fn paste_grant_requires_same_pane_location_password_and_nonempty_name() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&1].0;
+    screen.handle_clipboard_paste(1, context, clipboard_paste_notification(true, Some("cHc=")));
+    capture.drain_clipboard_modes();
+    capture.drain_pty_writes();
+    for (pane_id, request) in [
+        (PaneId::Terminal(2), clipboard_paste_read(true, "cHc=", Some("UGFzdGUgZXZlbnQ="))),
+        (PaneId::Terminal(1), clipboard_paste_read(false, "cHc=", Some("UGFzdGUgZXZlbnQ="))),
+        (PaneId::Terminal(1), clipboard_paste_read(true, "b3RoZXI=", Some("UGFzdGUgZXZlbnQ="))),
+        (PaneId::Terminal(1), clipboard_paste_read(true, "cHc=", None)),
+        (PaneId::Terminal(1), clipboard_paste_read(true, "cHc=", Some(""))),
+    ] {
+        assert_eq!(screen.forward_host_query(pane_id, request), 0);
+    }
+    assert!(capture.drain_forward_queries().is_empty());
+    let denied = capture.drain_pty_writes();
+    assert_eq!(denied.len(), 5);
+    assert!(denied.iter().all(|(bytes, _)| bytes.windows(12).any(|part| part == b"status=EPERM")));
+    assert!(screen.clipboard_paste_grants.contains_key(&PaneId::Terminal(1)));
+    let request = clipboard_paste_read(true, "cHc=", Some("UGFzdGUgZXZlbnQ="));
+    let token = screen.forward_host_query(PaneId::Terminal(1), request.clone());
+    assert_ne!(token, 0);
+    assert_eq!(capture.drain_bound_clipboard_queries(), vec![(token, request.to_query_bytes(), Some(1))]);
+    assert!(!screen.clipboard_paste_grants.contains_key(&PaneId::Terminal(1)));
+    assert_eq!(screen.forward_host_query(PaneId::Terminal(1), request), 0);
+    assert!(capture.drain_forward_queries().is_empty());
+}
+
+#[test]
+fn arbitrary_clipboard_password_never_bypasses_read_opt_out() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    capture.drain_clipboard_modes();
+    let request = clipboard_paste_read(false, "c2VjcmV0", Some("RWRpdG9y"));
+    assert_eq!(screen.forward_host_query(PaneId::Terminal(1), request), 0);
+    assert!(capture.drain_forward_queries().is_empty());
+    assert_eq!(capture.drain_pty_writes(), vec![(
+        b"\x1b]5522;type=read:status=EPERM:id=app\x1b\\".to_vec(), 1,
+    )]);
+}
+
+#[test]
+fn paste_grant_read_stays_serialized_and_bound_to_its_host_with_global_reads_enabled() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&2].0;
+    screen.handle_clipboard_paste(2, context, clipboard_paste_notification(false, Some("dHdv")));
+    capture.drain_clipboard_modes();
+    capture.drain_pty_writes();
+    screen.paste_buffer_read_enabled = true;
+    let first = screen.forward_host_query(PaneId::Terminal(1), kitty_clipboard_query(true));
+    let request = clipboard_paste_read(false, "dHdv", Some("UGFzdGUgZXZlbnQ="));
+    let bound = screen.forward_host_query(PaneId::Terminal(2), request.clone());
+    assert_eq!(capture.drain_bound_clipboard_queries().len(), 1);
+    assert_eq!(screen.clipboard_forward_targets.get(&bound), Some(&2));
+    assert!(!screen.clipboard_paste_grants.contains_key(&PaneId::Terminal(2)));
+    screen.focus_pane_with_id(PaneId::Terminal(2), false, false, 1).unwrap();
+    screen.handle_forwarded_reply_from_host(first, Vec::new()).unwrap();
+    assert_eq!(capture.drain_bound_clipboard_queries(), vec![(bound, request.to_query_bytes(), Some(2))]);
+}
+
+#[test]
+fn disconnect_revokes_grants_and_cancels_queued_bound_reads_without_fallback() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&2].0;
+    screen.handle_clipboard_paste(2, context, clipboard_paste_notification(false, Some("dHdv")));
+    capture.drain_clipboard_modes();
+    capture.drain_pty_writes();
+    let first = screen.forward_host_query(PaneId::Terminal(1), kitty_clipboard_query(true));
+    let bound = screen.forward_host_query(PaneId::Terminal(2),
+        clipboard_paste_read(false, "dHdv", Some("UGFzdGUgZXZlbnQ=")));
+    capture.drain_bound_clipboard_queries();
+    assert_eq!(screen.clipboard_forward_targets.get(&bound), Some(&2));
+    screen.remove_client(2).unwrap();
+    assert!(!screen.clipboard_forward_targets.contains_key(&bound));
+    assert!(screen.clipboard_forward_queue.is_empty());
+    assert!(screen.clipboard_paste_grants.values().all(|grant| grant.client_id != 2));
+    screen.handle_forwarded_reply_from_host(first, Vec::new()).unwrap();
+    assert!(capture.drain_forward_queries().is_empty());
+}
+
+#[test]
+fn expired_paste_grants_and_expired_or_evicted_contexts_are_not_authority() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let first_context = screen.clipboard_paste_targets[&1].0;
+    screen.handle_clipboard_paste(1, first_context, clipboard_paste_notification(false, Some("cHc=")));
+    screen.clipboard_paste_grants.get_mut(&PaneId::Terminal(1)).unwrap().expires =
+        std::time::Instant::now() - std::time::Duration::from_secs(1);
+    capture.drain_clipboard_modes();
+    capture.drain_pty_writes();
+    assert_eq!(screen.forward_host_query(PaneId::Terminal(1),
+        clipboard_paste_read(false, "cHc=", Some("UGFzdGUgZXZlbnQ="))), 0);
+    assert!(capture.drain_forward_queries().is_empty());
+    capture.drain_pty_writes();
+    for index in 0..300 {
+        let terminal_id = if index % 2 == 0 { 2 } else { 1 };
+        screen.focus_pane_with_id(PaneId::Terminal(terminal_id), false, false, 1).unwrap();
+        screen.sync_clipboard_paste_modes();
+    }
+    assert!(screen.clipboard_paste_history.len() <= 256);
+    assert_eq!(screen.clipboard_paste_targets[&2].1, PaneId::Terminal(2));
+    screen.handle_clipboard_paste(1, first_context, clipboard_paste_notification(false, None));
+    assert!(capture.drain_pty_writes().is_empty());
+    let (context, client_id, _, expires) = screen.clipboard_paste_history.back_mut().unwrap();
+    let old_context = *context;
+    let old_client = *client_id;
+    *expires = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    screen.handle_clipboard_paste(old_client, old_context, clipboard_paste_notification(false, None));
+    assert!(capture.drain_pty_writes().is_empty());
+}
+
+#[test]
+fn clipboard_decrqm_exposes_support_but_reports_each_panes_actual_mode() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    capture.drain_clipboard_modes();
+    set_pane_clipboard_mode(&mut screen, 2, false);
+    for (pane_id, host_reply, expected) in [
+        (1, b"\x1b[?5522;2$y".as_slice(), b"\x1b[?5522;1$y".as_slice()),
+        (2, b"\x1b[?5522;1$y".as_slice(), b"\x1b[?5522;2$y".as_slice()),
+        (1, b"\x1b[?5522;0$y".as_slice(), b"\x1b[?5522;0$y".as_slice()),
+        (1, b"\x1b[?5522;4$y".as_slice(), b"\x1b[?5522;4$y".as_slice()),
+    ] {
+        let token = screen.forward_host_query(PaneId::Terminal(pane_id), HostQuery::KittyClipboardSupport);
+        assert_eq!(capture.drain_forward_queries(), vec![(token, b"\x1b[?5522$p".to_vec())]);
+        screen.handle_forwarded_reply_from_host(token, host_reply.to_vec()).unwrap();
+        assert_eq!(capture.drain_pty_writes(), vec![(expected.to_vec(), pane_id)]);
+    }
+}
+
+#[test]
+fn terminal_pane_exposes_its_own_clipboard_paste_mode() {
+    let mut first = new_terminal_pane_for_pause_test(1);
+    let mut second = new_terminal_pane_for_pause_test(2);
+    assert!(!first.clipboard_paste_mode());
+    first.handle_pty_bytes(b"\x1b[?5522h".to_vec(), &|| None);
+    assert!(first.clipboard_paste_mode());
+    assert!(!second.clipboard_paste_mode());
+    second.handle_pty_bytes(b"\x1b[?5522h".to_vec(), &|| None);
+    first.handle_pty_bytes(b"\x1b[?5522l".to_vec(), &|| None);
+    assert!(!first.clipboard_paste_mode());
+    assert!(second.clipboard_paste_mode());
+}
+
+#[test]
+fn native_clipboard_input_rejects_non_native_clients_even_with_a_previous_context() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    let context = screen.clipboard_paste_targets[&2].0;
+    capture.drain_clipboard_modes();
+    screen.connected_clients.borrow_mut().insert(2, true);
+    screen.render(None).unwrap();
+    assert_eq!(capture.drain_clipboard_modes(), vec![(2, None)]);
+    screen.handle_clipboard_paste(2, context, clipboard_paste_notification(false, Some("cHc=")));
+    assert!(capture.drain_pty_writes().is_empty());
+    assert!(!screen.clipboard_paste_grants.contains_key(&PaneId::Terminal(2)));
+}
+
+#[test]
+fn native_clipboard_mode_is_explicitly_disabled_on_initial_inactive_pane_and_detach() {
+    let (mut screen, capture) =
+        create_new_screen_with_forward_capture(Size { cols: 80, rows: 20 });
+    new_tab(&mut screen, 1, 0);
+    screen.render(None).unwrap();
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, None)]);
+    screen.render(None).unwrap();
+    assert!(capture.drain_clipboard_modes().is_empty());
+    set_pane_clipboard_mode(&mut screen, 1, true);
+    screen.render(None).unwrap();
+    let context = screen.clipboard_paste_targets[&1].0;
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, Some(context))]);
+    screen.remove_client(1).unwrap();
+    assert_eq!(capture.drain_clipboard_modes(), vec![(1, None)]);
+    assert!(screen.clipboard_paste_targets.is_empty());
+    assert!(screen.clipboard_paste_history.is_empty());
+}
+
+#[test]
+fn clipboard_decrqm_ignores_other_host_reports_and_never_exposes_the_hosts_enabled_state() {
+    let (mut screen, capture) = clipboard_paste_fixture();
+    set_pane_clipboard_mode(&mut screen, 2, false);
+    for (reply, expected) in [
+        (b"\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?5522;1$y\x1b[?997;1n".as_slice(), b"\x1b[?5522;2$y".as_slice()),
+        (b"\x1b[?5522;4$y\x1b[?997;1n".as_slice(), b"\x1b[?5522;4$y".as_slice()),
+        (b"\x1b[?997;1n".as_slice(), b"\x1b[?5522;0$y".as_slice()),
+    ] {
+        let token = screen.forward_host_query(PaneId::Terminal(2), HostQuery::KittyClipboardSupport);
+        screen.handle_forwarded_reply_from_host(token, reply.to_vec()).unwrap();
+        assert_eq!(capture.drain_pty_writes(), vec![(expected.to_vec(), 2)]);
+    }
 }

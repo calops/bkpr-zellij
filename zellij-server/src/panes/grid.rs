@@ -823,6 +823,7 @@ pub struct Grid {
     pub lock_renders: bool,
     pub cursor_key_mode: bool, // DECCKM - when set, cursor keys should send ANSI direction codes (eg. "OD") instead of the arrow keys (eg. "[D")
     pub bracketed_paste_mode: bool, // when set, paste instructions to the terminal should be escaped with a special sequence
+    pub clipboard_paste_mode: bool,
     pub erasure_mode: bool,         // ERM
     pub sixel_scrolling: bool,      // DECSDM
     pub insert_mode: bool,
@@ -1206,6 +1207,7 @@ impl Grid {
             should_render: true,
             cursor_key_mode: false,
             bracketed_paste_mode: false,
+            clipboard_paste_mode: false,
             erasure_mode: false,
             sixel_scrolling: false,
             insert_mode: false,
@@ -1268,6 +1270,14 @@ impl Grid {
             osc133_command_selection: true,
             command_output_flash: None,
             word_separators: DEFAULT_WORD_SEPARATORS.to_owned(),
+        }
+    }
+    pub(crate) fn reject_kitty_clipboard_packet(&mut self, status: &str) {
+        if self.kitty_clipboard_write.abort() {
+            let metadata = format!("5522;type=write:status={}", status);
+            let response = zellij_utils::kitty_clipboard::Packet::parse(metadata.as_bytes()).unwrap();
+            self.pending_messages_to_pty
+                .push(response.with_id(self.kitty_clipboard_write.id(), b"\x1b\\"));
         }
     }
     pub fn set_selection_options(&mut self, osc133_command_selection: bool, word_separators: &str) {
@@ -2797,6 +2807,7 @@ impl Grid {
         self.viewport = VecDeque::from(vec![Row::new().canonical()]);
         self.alternate_screen_state = None;
         self.cursor_key_mode = false;
+        self.clipboard_paste_mode = false;
         self.clear_viewport_before_rendering = true;
         self.cursor = Cursor::new(0, 0, self.styled_underlines);
         self.saved_cursor_position = None;
@@ -4810,7 +4821,10 @@ impl Perform for Grid {
                 let payload = params.join(&b';');
                 let packet = match Packet::parse(&payload) {
                     Some(packet) => packet,
-                    None => return,
+                    None => {
+                        self.reject_kitty_clipboard_packet("EINVAL");
+                        return;
+                    },
                 };
                 let terminator = crate::host_query::OscTerminator::from_bell_terminated(bell_terminated);
                 let raw = packet.with_id(packet.field(b"id"), terminator.as_bytes());
@@ -5081,6 +5095,9 @@ impl Perform for Grid {
                         2004 => {
                             self.bracketed_paste_mode = false;
                         },
+                        5522 => {
+                            self.clipboard_paste_mode = false;
+                        },
                         1049 => {
                             if let Some(mut alternate_screen_state) =
                                 self.alternate_screen_state.take()
@@ -5184,6 +5201,9 @@ impl Perform for Grid {
                         },
                         2004 => {
                             self.bracketed_paste_mode = true;
+                        },
+                        5522 => {
+                            self.clipboard_paste_mode = true;
                         },
                         1049 => {
                             // enter alternate buffer

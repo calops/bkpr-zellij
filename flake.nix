@@ -92,8 +92,8 @@
                   "program_status"
                 ];
                 postCheck = ''
-                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib kitty_clipboard
-                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib kitty_clipboard
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib clipboard
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib clipboard
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib shared_sidebar_ -- --test-threads=1
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib stdin_ansi_parser
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib stdin_handler

@@ -2731,6 +2731,18 @@ pub(crate) fn route_thread_main(
                                 );
                             }
                         },
+                        ClientToServerMsg::ClipboardPaste { context, ref bytes } => {
+                            let _ = send_to_screen_or_retry_queue!(
+                                senders,
+                                ScreenInstruction::ClipboardPaste {
+                                    client_id,
+                                    context,
+                                    bytes: bytes.clone(),
+                                },
+                                instruction,
+                                retry_queue
+                            );
+                        },
                         ClientToServerMsg::HostTerminalThemeChanged { mode } => {
                             let _ = send_to_screen_or_retry_queue!(
                                 senders,

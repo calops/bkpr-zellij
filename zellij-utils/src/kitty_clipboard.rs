@@ -1,9 +1,12 @@
 //! Kitty's OSC 5522 clipboard protocol (https://sw.kovidgoyal.net/kitty/clipboard/).
 //! Payloads remain encoded: a multiplexer must not reinterpret MIME data or errors.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 pub const MAX_PACKET_BYTES: usize = 16 * 1024;
 // Enough for the protocol's mandatory 64 MiB of decoded write data, plus framing.
 pub const MAX_TRANSFER_BYTES: usize = 100 * 1024 * 1024;
+pub const MAX_PASTE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet<'a> {
@@ -22,7 +25,7 @@ impl<'a> Packet<'a> {
         }
         let packet = Self { metadata, payload: parts.next() };
         // Duplicate routing/type fields are ambiguous and must never claim a slot.
-        for key in [b"type".as_slice(), b"id", b"status"] {
+        for key in [b"type".as_slice(), b"id", b"status", b"mime", b"pw", b"name", b"loc"] {
             if metadata.split(|b| *b == b':').filter(|field| field.split(|b| *b == b'=').next() == Some(key)).count() > 1 {
                 return None;
             }
@@ -108,9 +111,80 @@ impl WriteBuffer {
         Ok(None)
     }
 
+    /// Rejecting even one data packet invalidates the entire transaction.
+    pub fn abort(&mut self) -> bool {
+        let active = self.started.take().is_some();
+        self.bytes.clear();
+        active
+    }
+
     pub fn id(&self) -> Option<&[u8]> {
         self.id.as_deref()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteAuthorization {
+    pub password: Option<Vec<u8>>,
+    pub primary: bool,
+}
+
+/// Validate an unsolicited MIME listing before exposing its permission token.
+/// The listing is not clipboard contents and cannot authorize another location.
+pub fn paste_authorization(mut bytes: &[u8]) -> Option<PasteAuthorization> {
+    if bytes.len() > MAX_PASTE_BYTES { return None; }
+    let mut authorization: Option<PasteAuthorization> = None;
+    let mut data_seen = false;
+    while !bytes.is_empty() {
+        let body = bytes.strip_prefix(b"\x1b]5522;")?;
+        let end = body.iter().position(|byte| matches!(*byte, 7 | 0x1b))? + 7;
+        let terminator = if bytes[end] == 7 { 1 }
+            else if bytes.get(end + 1) == Some(&b'\\') { 2 } else { return None; };
+        let packet = Packet::parse(&bytes[2..end])?;
+        if packet.field(b"type") != Some(b"read") || packet.field(b"id").is_some() { return None; }
+        match packet.field(b"status")? {
+            b"OK" if authorization.is_none() => {
+                if !packet.payload.unwrap_or_default().is_empty() { return None; }
+                let primary = match packet.field(b"loc") {
+                    None => false,
+                    Some(b"primary") => true,
+                    _ => return None,
+                };
+                let password = match packet.field(b"pw") {
+                    Some(password) => {
+                        let decoded = STANDARD.decode(password).ok()?;
+                        if decoded.is_empty() || std::str::from_utf8(&decoded).is_err() { return None; }
+                        Some(password.to_vec())
+                    },
+                    None => None,
+                };
+                authorization = Some(PasteAuthorization { password, primary });
+            },
+            b"DATA" | b"DONE" => {
+                let grant = authorization.as_ref()?;
+                if let Some(password) = packet.field(b"pw") {
+                    if Some(password) != grant.password.as_deref() { return None; }
+                }
+                if let Some(location) = packet.field(b"loc") {
+                    if location != b"primary" || !grant.primary { return None; }
+                }
+                if packet.field(b"status") == Some(b"DATA") {
+                    if packet.field(b"mime") != Some(b"Lg==") { return None; }
+                    let decoded = STANDARD.decode(packet.payload?).ok()?;
+                    std::str::from_utf8(&decoded).ok()?;
+                    data_seen = true;
+                } else {
+                    if !data_seen || !packet.payload.unwrap_or_default().is_empty()
+                        || end + terminator != bytes.len()
+                    { return None; }
+                    return authorization;
+                }
+            },
+            _ => return None,
+        }
+        bytes = &bytes[end + terminator..];
+    }
+    None
 }
 
 #[cfg(test)]
@@ -177,5 +251,42 @@ mod tests {
         assert_eq!(buffer.id(), Some(b"owner".as_slice()));
         assert!(buffer.bytes.is_empty());
         assert_eq!(buffer.push(&invalid, b"ignored").unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    const PRIMARY: &[u8] = b"\x1b]5522;type=read:status=OK:loc=primary:pw=c2VjcmV0\x1b\\\
+        \x1b]5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbiBpbWFnZS9wbmc=\x07\
+        \x1b]5522;type=read:status=DONE:pw=c2VjcmV0\x1b\\";
+
+    #[test]
+    fn validates_complete_paste_listing_and_location_scoped_password() {
+        assert_eq!(paste_authorization(PRIMARY), Some(PasteAuthorization {
+            password: Some(b"c2VjcmV0".to_vec()), primary: true,
+        }));
+        let without_password = b"\x1b]5522;type=read:status=OK\x1b\\\
+            \x1b]5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbgo=\x1b\\\
+            \x1b]5522;type=read:status=DONE\x1b\\";
+        assert_eq!(paste_authorization(without_password), Some(PasteAuthorization { password: None, primary: false }));
+    }
+
+    #[test]
+    fn rejects_clipboard_contents_password_substitution_and_request_ids_as_paste_events() {
+        let text = std::str::from_utf8(PRIMARY).unwrap();
+        for invalid in [
+            text.replace("mime=Lg==", "mime=aW1hZ2UvcG5n"),
+            text.replace("status=DONE:pw=c2VjcmV0", "status=DONE:pw=b3RoZXI="),
+            text.replace("status=DATA:mime=Lg==", "status=DATA:loc=other:mime=Lg=="),
+            text.replace("status=OK:loc=primary", "status=OK:id=unrelated:loc=primary"),
+            text.replace("status=OK:loc=primary", "status=OK:loc=primary:pw=ZHVwbGljYXRl"),
+            text.replace("dGV4dC9wbGFpbiBpbWFnZS9wbmc=", "!invalid-base64!"),
+        ] {
+            assert_eq!(paste_authorization(invalid.as_bytes()), None);
+        }
+        assert_eq!(paste_authorization(&PRIMARY[..PRIMARY.len() - 1]), None);
+        assert_eq!(paste_authorization(&[PRIMARY, b"typing"].concat()), None);
     }
 }

@@ -563,6 +563,11 @@ pub enum ScreenInstruction {
         pane_id: PaneId,
         query: crate::host_query::HostQuery,
     },
+    ClipboardPaste {
+        client_id: ClientId,
+        context: u64,
+        bytes: Vec<u8>,
+    },
     NestedSessionMessageFromPane {
         pane_id: PaneId,
         message: NestedSessionMessage,
@@ -1110,6 +1115,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             },
             ScreenInstruction::SetSixelSupport { .. } => ScreenContext::SetSixelSupport,
             ScreenInstruction::ForwardHostQuery { .. } => ScreenContext::ForwardHostQuery,
+            ScreenInstruction::ClipboardPaste { .. } => ScreenContext::Paste,
             ScreenInstruction::NestedSessionMessageFromPane { .. } => {
                 ScreenContext::NestedSessionMessageFromPane
             },
@@ -1616,6 +1622,12 @@ pub(crate) struct Screen {
     clipboard_forward_queue: VecDeque<PendingForward>,
     clipboard_forward_in_flight_token: Option<u32>,
     paste_buffer_read_enabled: bool,
+    clipboard_paste_targets: HashMap<ClientId, (u64, PaneId)>,
+    clipboard_paste_mode_synced: HashSet<ClientId>,
+    clipboard_paste_history: VecDeque<(u64, ClientId, PaneId, Instant)>,
+    next_clipboard_paste_context: u64,
+    clipboard_paste_grants: HashMap<PaneId, ClipboardPasteGrant>,
+    clipboard_forward_targets: HashMap<u32, ClientId>,
     nested_guest_tracker: NestedGuestTracker,
     nested_ancestry: Vec<String>,
     nested_via_client_id: Option<ClientId>,
@@ -1704,6 +1716,13 @@ struct PendingForward {
 struct PendingForwardEntry {
     pane_id: PaneId,
     query: crate::host_query::HostQuery,
+}
+
+struct ClipboardPasteGrant {
+    client_id: ClientId,
+    password: Vec<u8>,
+    primary: bool,
+    expires: Instant,
 }
 
 /// Reserved sentinel token for Zellij's own startup batch of host
@@ -1862,6 +1881,12 @@ impl Screen {
             clipboard_forward_queue: VecDeque::new(),
             clipboard_forward_in_flight_token: None,
             paste_buffer_read_enabled: false,
+            clipboard_paste_targets: HashMap::new(),
+            clipboard_paste_mode_synced: HashSet::new(),
+            clipboard_paste_history: VecDeque::new(),
+            next_clipboard_paste_context: 1,
+            clipboard_paste_grants: HashMap::new(),
+            clipboard_forward_targets: HashMap::new(),
             nested_guest_tracker: NestedGuestTracker::default(),
             nested_ancestry: vec![],
             nested_via_client_id: None,
@@ -2856,6 +2881,152 @@ impl Screen {
             terminal_emulator_color_codes.insert(color_register, color_sequence);
         }
     }
+    fn pane_clipboard_paste_mode(&self, pane_id: PaneId) -> bool {
+        self.tabs
+            .values()
+            .any(|tab| tab.pane_clipboard_paste_mode(pane_id))
+    }
+
+    fn sync_clipboard_paste_modes(&mut self) {
+        let now = Instant::now();
+        self.clipboard_paste_history
+            .retain(|(_, _, _, expires)| *expires > now);
+        self.clipboard_paste_grants
+            .retain(|_, grant| grant.expires > now);
+        let connected_clients = self.connected_clients.clone();
+        for client_id in connected_clients.borrow().keys().copied() {
+            let target = self.get_active_pane_id(&client_id).filter(|pane_id| {
+                !self.client_is_web(client_id)
+                    && !self.watcher_clients.contains_key(&client_id)
+                    && (matches!(
+                        self.get_client_input_mode(client_id),
+                        Some(InputMode::Normal | InputMode::Locked)
+                    ) || self.should_route_keys_to_pane(client_id, *pane_id))
+                    && !self.tabs.values().any(|tab| {
+                        tab.pane_has_guest_modal_for_client(*pane_id, client_id)
+                    })
+                    && self.pane_clipboard_paste_mode(*pane_id)
+            });
+            let previous = self.clipboard_paste_targets.get(&client_id).copied();
+            if previous.map(|(_, pane_id)| pane_id) == target
+                && self.clipboard_paste_mode_synced.contains(&client_id)
+            {
+                continue;
+            }
+            if let Some((context, pane_id)) = previous {
+                self.clipboard_paste_targets.remove(&client_id);
+                // A client captures the context at the first OK packet. Keep
+                // the old owner while its already-started stream finishes.
+                self.clipboard_paste_history.push_back((
+                    context,
+                    client_id,
+                    pane_id,
+                    now + std::time::Duration::from_secs(35),
+                ));
+                while self.clipboard_paste_history.len() > 256 {
+                    self.clipboard_paste_history.pop_front();
+                }
+            }
+            let context = target.map(|pane_id| {
+                let context = self.next_clipboard_paste_context;
+                self.next_clipboard_paste_context = context
+                    .checked_add(1)
+                    .expect("clipboard paste context exhausted");
+                self.clipboard_paste_targets
+                    .insert(client_id, (context, pane_id));
+                context
+            });
+            self.clipboard_paste_mode_synced.insert(client_id);
+            let _ = self.bus.senders.send_to_server(
+                ServerInstruction::SetClipboardPasteMode(client_id, context),
+            );
+        }
+    }
+
+    fn handle_clipboard_paste(&mut self, client_id: ClientId, context: u64, bytes: Vec<u8>) {
+        if !self.connected_clients.borrow().contains_key(&client_id)
+            || self.client_is_web(client_id)
+            || self.watcher_clients.contains_key(&client_id)
+        {
+            return;
+        }
+        let pane_id = self.clipboard_paste_targets.get(&client_id)
+            .filter(|(current_context, _)| *current_context == context)
+            .map(|(_, pane_id)| *pane_id)
+            .or_else(|| {
+                let now = Instant::now();
+                self.clipboard_paste_history.iter().find_map(
+                    |(old_context, owner, pane_id, expires)| {
+                        (*old_context == context && *owner == client_id && *expires > now)
+                            .then_some(*pane_id)
+                    },
+                )
+            });
+        let pane_id = match pane_id {
+            Some(pane_id) if self.pane_clipboard_paste_mode(pane_id) => pane_id,
+            _ => return,
+        };
+        let authorization = match zellij_utils::kitty_clipboard::paste_authorization(&bytes) {
+            Some(authorization) => authorization,
+            None => return,
+        };
+        let terminal_id = match pane_id {
+            PaneId::Terminal(terminal_id) => terminal_id,
+            PaneId::Plugin(_) => return,
+        };
+        self.clipboard_paste_grants.remove(&pane_id);
+        if let Some(password) = authorization.password {
+            self.clipboard_paste_grants.insert(pane_id, ClipboardPasteGrant {
+                client_id,
+                password,
+                primary: authorization.primary,
+                expires: Instant::now() + std::time::Duration::from_secs(30),
+            });
+        }
+        // Unsolicited input must not release a solicited query's pause,
+        // replay buffered PTY output, or pass through sync-pane input routing.
+        let _ = self.bus.senders.send_to_pty_writer(
+            PtyWriteInstruction::Write(bytes, terminal_id, None),
+        );
+    }
+
+    fn consume_clipboard_paste_grant(
+        &mut self,
+        pane_id: PaneId,
+        query: &crate::host_query::HostQuery,
+    ) -> Option<ClientId> {
+        let bytes = match query {
+            crate::host_query::HostQuery::KittyClipboard { bytes, write: false } => bytes,
+            _ => return None,
+        };
+        let packet_bytes = bytes.strip_prefix(b"\x1b]")?;
+        let packet_bytes = packet_bytes.strip_suffix(b"\x1b\\")
+            .or_else(|| packet_bytes.strip_suffix(b"\x07"))?;
+        let packet = zellij_utils::kitty_clipboard::Packet::parse(packet_bytes)?;
+        if packet.field(b"type") != Some(b"read") || packet.field(b"status").is_some() {
+            return None;
+        }
+        let password = packet.field(b"pw")?;
+        if packet.field(b"name").unwrap_or_default().is_empty() {
+            return None;
+        }
+        let primary = match packet.field(b"loc") {
+            None => false,
+            Some(b"primary") => true,
+            _ => return None,
+        };
+        let grant = self.clipboard_paste_grants.get(&pane_id)?;
+        if grant.expires <= Instant::now()
+            || grant.password != password
+            || grant.primary != primary
+            || !self.connected_clients.borrow().contains_key(&grant.client_id)
+            || !self.pane_clipboard_paste_mode(pane_id)
+        {
+            return None;
+        }
+        self.clipboard_paste_grants.remove(&pane_id)
+            .map(|grant| grant.client_id)
+    }
 
     /// Enqueue a whitelisted host-terminal query from pane `pane_id`.
     /// Queries are serialized globally: at most one is in flight to the
@@ -2878,8 +3049,10 @@ impl Screen {
         if matches!(query, crate::host_query::HostQuery::ClipboardContent { .. }
             | crate::host_query::HostQuery::KittyClipboard { .. })
         {
+            let forced_target = self.consume_clipboard_paste_grant(pane_id, &query);
             if !self.paste_buffer_read_enabled
                 && !matches!(query, crate::host_query::HostQuery::KittyClipboard { write: true, .. })
+                && forced_target.is_none()
             {
                 let reply = query.clipboard_error_reply(b"EPERM");
                 let _ = self.resume_pane_after_forward(pane_id, reply);
@@ -2903,7 +3076,7 @@ impl Screen {
                 let _ = self.resume_pane_after_forward(pane_id, reply);
                 return STARTUP_SENTINEL_TOKEN;
             }
-            return self.enqueue_clipboard_forward(pane_id, query);
+            return self.enqueue_clipboard_forward(pane_id, query, forced_target);
         }
         let token = self.next_forward_token;
         // Skip over the reserved sentinel (0) on wrap; allocate a fresh
@@ -2928,11 +3101,15 @@ impl Screen {
         &mut self,
         pane_id: PaneId,
         query: crate::host_query::HostQuery,
+        forced_target: Option<ClientId>,
     ) -> u32 {
         let token = self.next_forward_token;
         self.next_forward_token = self.next_forward_token.wrapping_add(1);
         if self.next_forward_token == STARTUP_SENTINEL_TOKEN {
             self.next_forward_token = 1;
+        }
+        if let Some(client_id) = forced_target {
+            self.clipboard_forward_targets.insert(token, client_id);
         }
         if self.clipboard_forward_in_flight_token.is_some() {
             self.clipboard_forward_queue.push_back(PendingForward {
@@ -2953,6 +3130,7 @@ impl Screen {
         query: crate::host_query::HostQuery,
     ) {
         let query_bytes = query.to_query_bytes();
+        let forced_target = self.clipboard_forward_targets.remove(&token);
         self.pending_clipboard_forwards
             .insert(token, PendingForwardEntry { pane_id, query });
         self.clipboard_forward_in_flight_token = Some(token);
@@ -2963,6 +3141,7 @@ impl Screen {
                 token,
                 query_bytes,
                 true,
+                forced_target,
             ));
         let senders = self.bus.senders.clone();
         crate::global_async_runtime::get_tokio_runtime().spawn(async move {
@@ -2991,6 +3170,7 @@ impl Screen {
         self.clipboard_forward_in_flight_token = None;
         while let Some(next) = self.clipboard_forward_queue.pop_front() {
             if !self.pane_exists(&next.pane_id) {
+                self.clipboard_forward_targets.remove(&next.token);
                 continue;
             }
             self.dispatch_clipboard_forward(next.token, next.pane_id, next.query);
@@ -3050,6 +3230,7 @@ impl Screen {
                 token,
                 query_bytes,
                 false,
+                None,
             ));
         let senders = self.bus.senders.clone();
         crate::global_async_runtime::get_tokio_runtime().spawn(async move {
@@ -3114,6 +3295,22 @@ impl Screen {
                         self.synthesize_cached_reply(&query)
                     } else {
                         reply_bytes
+                    };
+                    let payload = if matches!(query, crate::host_query::HostQuery::KittyClipboardSupport) {
+                        // Other unsolicited host reports can share this DA-delimited
+                        // batch. Advertise the pane's own mode, never the host's state.
+                        let response = payload.windows(b"\x1b[?5522;0$y".len()).find(|bytes| {
+                            bytes.starts_with(b"\x1b[?5522;") && bytes.ends_with(b"$y")
+                                && (b'0'..=b'4').contains(&bytes[8])
+                        });
+                        match response.map(|bytes| bytes[8]) {
+                            Some(b'0' | b'4') => response.unwrap().to_vec(),
+                            Some(_) if self.pane_clipboard_paste_mode(pane_id) => b"\x1b[?5522;1$y".to_vec(),
+                            Some(_) => b"\x1b[?5522;2$y".to_vec(),
+                            None => query.empty_reply_bytes(),
+                        }
+                    } else {
+                        payload
                     };
                     // Route via Tab so the reply lands on the pane in
                     // the correct stream position and any PTY input
@@ -4305,6 +4502,7 @@ impl Screen {
         // message, triggering our render_to_clients method which does the actual rendering
 
         self.sync_nested_guest_fullscreen_state();
+        self.sync_clipboard_paste_modes();
 
         let _ = self
             .bus
@@ -4332,6 +4530,7 @@ impl Screen {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
         let err_context = "failed to render screen";
+        self.sync_clipboard_paste_modes();
 
         // Separate rendering for regular clients and watchers
         let has_regular_clients = self
@@ -5269,6 +5468,27 @@ impl Screen {
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
+        let _ = self.bus.senders.send_to_server(
+            ServerInstruction::SetClipboardPasteMode(client_id, None),
+        );
+        self.clipboard_paste_targets.remove(&client_id);
+        self.clipboard_paste_mode_synced.remove(&client_id);
+        self.clipboard_paste_history.retain(|(_, owner, _, _)| *owner != client_id);
+        self.clipboard_paste_grants.retain(|_, grant| grant.client_id != client_id);
+        let mut rejected = Vec::new();
+        let clipboard_forward_targets = &self.clipboard_forward_targets;
+        self.clipboard_forward_queue.retain(|pending| {
+            if clipboard_forward_targets.get(&pending.token) == Some(&client_id) {
+                rejected.push((pending.token, pending.pane_id, pending.query.clipboard_error_reply(b"EPERM")));
+                false
+            } else {
+                true
+            }
+        });
+        for (token, pane_id, reply) in rejected {
+            self.clipboard_forward_targets.remove(&token);
+            self.resume_pane_after_forward(pane_id, reply).non_fatal();
+        }
 
         self.set_client_dimmed(client_id, false, None);
         self.last_mouse_positions.remove(&client_id);
@@ -10345,6 +10565,9 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::ForwardHostQuery { pane_id, query } => {
                 screen.forward_host_query(pane_id, query);
+            },
+            ScreenInstruction::ClipboardPaste { client_id, context, bytes } => {
+                screen.handle_clipboard_paste(client_id, context, bytes);
             },
             ScreenInstruction::NestedSessionMessageFromPane { pane_id, message } => {
                 screen.handle_nested_session_message_from_pane(pane_id, message);

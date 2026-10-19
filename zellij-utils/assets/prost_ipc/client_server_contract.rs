@@ -3068,7 +3068,7 @@ impl ThemeHue {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -3130,6 +3130,8 @@ pub mod client_to_server_msg {
         SetMobileRenderPreferences(super::SetMobileRenderPreferencesMsg),
         #[prost(message, tag="27")]
         HostTerminalFocusChanged(super::HostTerminalFocusChangedMsg),
+        #[prost(message, tag="28")]
+        ClipboardPaste(super::ClipboardPasteMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3271,6 +3273,14 @@ pub struct ForwardedReplyFromHostMsg {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClipboardPasteMsg {
+    #[prost(uint64, tag="1")]
+    pub context: u64,
+    #[prost(bytes="vec", tag="2")]
+    pub bytes: ::prost::alloc::vec::Vec<u8>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HostTerminalThemeChangedMsg {
     #[prost(enumeration="HostTerminalThemeIndication", tag="1")]
     pub mode: i32,
@@ -3347,7 +3357,7 @@ impl HostTerminalThemeIndication {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -3393,6 +3403,8 @@ pub mod server_to_client_msg {
         EmitNestedSessionFrame(super::EmitNestedSessionFrameMsg),
         #[prost(message, tag="19")]
         MobileState(super::MobileStateMsg),
+        #[prost(message, tag="20")]
+        SetClipboardPasteMode(super::SetClipboardPasteModeMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3501,6 +3513,12 @@ pub struct ForwardQueryToHostMsg {
     pub query_bytes: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag="3")]
     pub resolve_async: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetClipboardPasteModeMsg {
+    #[prost(uint64, optional, tag="1")]
+    pub context: ::core::option::Option<u64>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

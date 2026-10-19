@@ -4,6 +4,7 @@ use crate::{
     client_server_contract::client_server_contract::{
         client_to_server_msg, server_to_client_msg, ActionMsg, AttachClientMsg,
         AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg, ClientExitedMsg,
+        ClipboardPasteMsg, SetClipboardPasteModeMsg,
         ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg, ConfigFileUpdatedMsg,
         ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg,
         EmitNestedSessionFrameMsg, ExitMsg, ExitReason as ProtoExitReason,
@@ -145,6 +146,9 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                     token,
                     reply_bytes,
                 })
+            },
+            ClientToServerMsg::ClipboardPaste { context, bytes } => {
+                client_to_server_msg::Message::ClipboardPaste(ClipboardPasteMsg { context, bytes })
             },
             ClientToServerMsg::HostTerminalThemeChanged { mode } => {
                 let proto_mode: ProtoHostTerminalThemeIndication = mode.into();
@@ -319,6 +323,12 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                     reply_bytes: msg.reply_bytes,
                 })
             },
+            Some(client_to_server_msg::Message::ClipboardPaste(msg)) => {
+                Ok(ClientToServerMsg::ClipboardPaste {
+                    context: msg.context,
+                    bytes: msg.bytes,
+                })
+            },
             Some(client_to_server_msg::Message::HostTerminalThemeChanged(msg)) => {
                 let proto_mode = ProtoHostTerminalThemeIndication::try_from(msg.mode)
                     .ok()
@@ -449,6 +459,11 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
                 query_bytes,
                 resolve_async,
             }),
+            ServerToClientMsg::SetClipboardPasteMode { context } => {
+                server_to_client_msg::Message::SetClipboardPasteMode(SetClipboardPasteModeMsg {
+                    context,
+                })
+            },
             ServerToClientMsg::SetSoftKeyboard { on } => {
                 server_to_client_msg::Message::SetSoftKeyboard(SetSoftKeyboardMsg { on })
             },
@@ -691,6 +706,11 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
                     token: msg.token,
                     query_bytes: msg.query_bytes,
                     resolve_async: msg.resolve_async,
+                })
+            },
+            Some(server_to_client_msg::Message::SetClipboardPasteMode(msg)) => {
+                Ok(ServerToClientMsg::SetClipboardPasteMode {
+                    context: msg.context,
                 })
             },
             Some(server_to_client_msg::Message::SetSoftKeyboard(msg)) => {
