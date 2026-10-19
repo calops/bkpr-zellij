@@ -1495,6 +1495,93 @@ impl TiledPanes {
             },
         }
     }
+
+    fn left_pane_outer_width_limit(&self, pane_id: PaneId) -> Option<usize> {
+        if self.fullscreen_is_active.is_some() || self.panes_to_hide.contains(&pane_id) {
+            return None;
+        }
+        let display = *self.display_area.borrow();
+        let sidebar = self.panes.get(&pane_id)?;
+        let geom = sidebar.position_and_size();
+        if geom.x != 0 || geom.y != 0 || geom.rows.as_usize() != display.rows
+            || !geom.cols.is_percent() || geom.cols.as_usize() >= display.cols
+        {
+            return None;
+        }
+        let old_remaining = display.cols - geom.cols.as_usize();
+        let mut minimum_remaining = MIN_TERMINAL_WIDTH;
+        for (id, pane) in &self.panes {
+            if *id == pane_id {
+                continue;
+            }
+            let other = pane.position_and_size();
+            // A rail must be outside the application area. Do not reshape unrelated
+            // layouts, fixed columns, or hidden/fullscreen geometry.
+            if other.x < geom.cols.as_usize() || !other.cols.is_percent() {
+                return None;
+            }
+            minimum_remaining = minimum_remaining.max(
+                (old_remaining * pane.min_width()).div_ceil(other.cols.as_usize()),
+            );
+        }
+        let maximum = display.cols.saturating_sub(minimum_remaining);
+        (maximum > 0).then_some(maximum)
+    }
+
+    /// Resize a full-height left rail in outer cells, retaining flexible dimensions
+    /// so native keyboard and mouse resizing continue to work normally.
+    pub fn set_left_pane_outer_width(&mut self, pane_id: PaneId, intended: usize) -> bool {
+        if self.panes.get(&pane_id).is_some_and(|pane| pane.cols() == intended) {
+            return false;
+        }
+        let Some(maximum) = self.left_pane_outer_width_limit(pane_id) else {
+            return false;
+        };
+        let sidebar = self.panes.get(&pane_id).unwrap();
+        let geom = sidebar.position_and_size();
+        let display = *self.display_area.borrow();
+        let old_remaining = display.cols - geom.cols.as_usize();
+        let target = intended.clamp(sidebar.min_width().min(maximum), maximum);
+        if geom.cols.as_usize() == target {
+            return false;
+        }
+        let original: Vec<_> = self.panes.iter()
+            .map(|(id, pane)| (*id, pane.position_and_size()))
+            .collect();
+        // Lock only for this solver invocation. The other panes retain their relative
+        // shares of the application area, including nested native splits.
+        for (id, pane) in &mut self.panes {
+            let mut next = pane.position_and_size();
+            next.cols = if *id == pane_id {
+                zellij_utils::pane_size::Dimension::fixed(target)
+            } else {
+                let mut cols = next.cols;
+                cols.constraint = zellij_utils::pane_size::Constraint::Percent(
+                    next.cols.as_usize() as f64 * 100.0 / old_remaining as f64,
+                );
+                cols
+            };
+            pane.set_geom(next);
+        }
+        let result = TiledPaneGrid::new(
+            &mut self.panes, &self.panes_to_hide, display, *self.viewport.borrow(),
+        ).layout(SplitDirection::Horizontal, display.cols);
+        if result.is_err() || self.panes.values().any(|pane| pane.cols() < pane.min_width()) {
+            for (id, original_geom) in original {
+                self.panes.get_mut(&id).unwrap().set_geom(original_geom);
+            }
+            return false;
+        }
+        for pane in self.panes.values_mut() {
+            let mut next = pane.position_and_size();
+            next.cols.constraint = zellij_utils::pane_size::Constraint::Percent(
+                next.cols.as_usize() as f64 * 100.0 / display.cols as f64,
+            );
+            pane.set_geom(next);
+        }
+        self.set_pane_frames(self.pane_frame_style);
+        true
+    }
     fn display_area_changed(&self, new_screen_size: Size) -> bool {
         let display_area = self.display_area.borrow();
         new_screen_size.rows != display_area.rows || new_screen_size.cols != display_area.cols

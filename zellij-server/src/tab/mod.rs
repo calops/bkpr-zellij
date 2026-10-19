@@ -7655,6 +7655,13 @@ impl Tab {
             },
         }
     }
+    pub fn set_left_pane_outer_width(&mut self, pane_id: PaneId, columns: usize) {
+        if self.tiled_panes.set_left_pane_outer_width(pane_id, columns) {
+            self.swap_layouts.set_is_tiled_damaged();
+            self.set_force_render();
+        }
+    }
+
     pub fn resize_pane_with_id(&mut self, strategy: ResizeStrategy, pane_id: PaneId) -> Result<()> {
         let err_context = || format!("unable to resize pane");
         if self.pane_is_stack_list_member(&pane_id) {
