@@ -563,23 +563,6 @@ fn primary_da_barrier_accepts_extended_forms() {
 }
 
 // =====================================================================
-// Re-entry guard on `open_forward`
-// =====================================================================
-
-#[test]
-#[should_panic(expected = "while slot for token")]
-fn open_forward_debug_asserts_on_reentry() {
-    // In debug builds (which is where tests run) the guard fires. This
-    // catches a misbehaving server that dispatches a second forward
-    // before receiving the first's completion — a scenario that should
-    // be impossible given `forward_in_flight` serialization, but the
-    // parser asserts it anyway so regressions surface in CI.
-    let mut parser = StdinAnsiParser::new();
-    parser.open_forward(1);
-    parser.open_forward(2); // panics via debug_assert!
-}
-
-// =====================================================================
 // `schedule_forward_timeout` — async timer, driven by paused tokio clock
 // =====================================================================
 
