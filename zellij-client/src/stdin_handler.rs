@@ -96,6 +96,7 @@ pub(crate) fn stdin_loop(
     let mut kitty_parser = KittyKeyboardParser::new();
     let mut current_buffer = vec![];
     let (stdin_tx, stdin_rx) = mpsc::sync_channel(32);
+    let mut palette_stdout = os_input.get_stdout_writer();
     let _stdin_pump = std::thread::Builder::new()
         .name("stdin_pump".to_string())
         .spawn({
@@ -136,11 +137,9 @@ pub(crate) fn stdin_loop(
                         if parse_output.replies.iter().any(|reply| {
                             matches!(reply, HostReply::HostTerminalThemeChanged(_))
                         }) {
-                            let mut parser = stdin_ansi_parser.lock().unwrap();
-                            parser.expect_host_replies();
-                            let mut stdout = os_input.get_stdout_writer();
-                            let _ = stdout.write_all(build_palette_query_string().as_bytes());
-                            let _ = stdout.flush();
+                            stdin_ansi_parser.lock().unwrap().expect_host_replies();
+                            let _ = palette_stdout.write_all(build_palette_query_string().as_bytes());
+                            let _ = palette_stdout.flush();
                         }
                         if !parse_output.replies.is_empty() {
                             let _ = send_input_instructions.send(
