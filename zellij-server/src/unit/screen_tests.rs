@@ -1036,7 +1036,7 @@ fn shared_sidebar_native_mouse_gutter_keeps_focus_cursor_and_updates_every_tab()
             .unwrap().1.cursor_coordinates(Some(1))
     };
     let before_cursor = cursor(&screen);
-    let edge = shared_width_columns(&screen, 0) - 1;
+    let edge = u16::try_from(shared_width_columns(&screen, 0) - 1).unwrap();
     screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
     screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
     screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
