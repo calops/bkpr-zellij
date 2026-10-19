@@ -236,6 +236,7 @@ pub struct PaneResizeState {
     pub start_position: Position,
     pub start_geom: PaneGeom,
     pub is_floating: bool,
+    pub suppress_click_focus: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,11 +390,19 @@ impl MouseHandler {
             return Ok(effect);
         }
         let context = Self::gather_mouse_event_context(tab, event, client_id, passthrough_pane_id)?;
-        let action = match Self::tiled_gutter_behind_passive_popup(tab, event, &context) {
+        let redirected = Self::tiled_gutter_behind_passive_popup(tab, event, &context);
+        let suppress_click_focus = redirected.is_some();
+        let action = match redirected {
             Some(action) => action,
             None => Self::determine_mouse_action(event, &context)?,
         };
-        Self::execute_mouse_action(tab, action, event, client_id)
+        let effect = Self::execute_mouse_action(tab, action, event, client_id)?;
+        if suppress_click_focus {
+            if let Some(resize) = tab.pane_being_resized_with_mouse.as_mut() {
+                resize.suppress_click_focus = true;
+            }
+        }
+        Ok(effect)
     }
 
     fn tiled_gutter_behind_passive_popup(
@@ -403,7 +412,7 @@ impl MouseHandler {
     ) -> Option<MouseAction> {
         if event.event_type != MouseEventType::Press || !event.left || event.ctrl || event.alt
             || context.pane_being_resized || context.selecting_with_mouse || context.pane_being_moved
-            || tab.tiled_panes.fullscreen_is_active()
+            || tab.is_fullscreen_active()
         {
             return None;
         }
@@ -693,6 +702,7 @@ impl MouseHandler {
             start_position: position,
             start_geom,
             is_floating,
+            suppress_click_focus: false,
         });
 
         Ok(())
@@ -1054,9 +1064,11 @@ impl MouseHandler {
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let err_context = || "failed to stop resize";
+        let suppress_click_focus = tab.pane_being_resized_with_mouse.as_ref()
+            .is_some_and(|resize| resize.suppress_click_focus);
         let never_resized = Self::stop_pane_resize_with_mouse(tab, position, client_id)
             .with_context(err_context)?;
-        if never_resized {
+        if never_resized && !suppress_click_focus {
             let pane_id_at_position = Self::get_pane_at(tab, &position, false)
                 .with_context(err_context)?
                 .map(|p| p.pid());

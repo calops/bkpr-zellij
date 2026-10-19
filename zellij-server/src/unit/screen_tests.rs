@@ -1542,7 +1542,7 @@ fn screen_plugin_origin_tab_is_authoritative_before_focus_and_first_frame() {
     mouse_fixture_updates(&plugin_receiver);
 }
 
-fn passive_popup_over_tiled_gutter_fixture() -> (
+fn passive_popup_over_tiled_gutter_fixture(popup_width: usize) -> (
     Screen,
     Receiver<(PluginInstruction, ErrorContext)>,
 ) {
@@ -1581,7 +1581,7 @@ fn passive_popup_over_tiled_gutter_fixture() -> (
                 borderless: Some(true),
                 ..FloatingPaneCoordinates::default()
                     .with_x_fixed(39).with_y_fixed(3)
-                    .with_width_fixed(30).with_height_fixed(12)
+                    .with_width_fixed(popup_width).with_height_fixed(12)
             }),
             None,
         ).unwrap();
@@ -1601,7 +1601,7 @@ fn passive_popup_over_tiled_gutter_fixture() -> (
 
 #[test]
 fn passive_popup_outline_keeps_native_gutter_resizable_after_tab_switching() {
-    let (mut screen, plugin_receiver) = passive_popup_over_tiled_gutter_fixture();
+    let (mut screen, plugin_receiver) = passive_popup_over_tiled_gutter_fixture(30);
     for tab_id in [0, 1] {
         screen.go_to_tab(tab_id + 1, 1).unwrap();
         let sidebar = PaneId::Plugin(tab_id as u32 + 10);
@@ -1625,7 +1625,7 @@ fn passive_popup_outline_keeps_native_gutter_resizable_after_tab_switching() {
 #[test]
 fn passive_popup_content_clicks_and_hover_still_reach_the_popup() {
     use zellij_utils::data::Mouse;
-    let (mut screen, plugin_receiver) = passive_popup_over_tiled_gutter_fixture();
+    let (mut screen, plugin_receiver) = passive_popup_over_tiled_gutter_fixture(30);
     screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 41)), 1);
     assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
         .iter().any(|(id, _, _)| *id == 20));
@@ -1649,7 +1649,7 @@ fn passive_popup_content_clicks_and_hover_still_reach_the_popup() {
 
 #[test]
 fn selectable_pinned_pane_retains_its_own_frame_drag_controls() {
-    let (mut screen, _) = passive_popup_over_tiled_gutter_fixture();
+    let (mut screen, _) = passive_popup_over_tiled_gutter_fixture(30);
     let popup = PaneId::Plugin(20);
     let tab = screen.tabs.get_mut(&0).unwrap();
     tab.set_pane_selectable(popup, true);
@@ -1659,6 +1659,69 @@ fn selectable_pinned_pane_retains_its_own_frame_drag_controls() {
     screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, 49)), 1);
     assert_eq!(screen.tabs[&0].get_pane_with_id(popup).unwrap().x(), 49);
     assert_eq!(screen.tabs[&0].get_pane_with_id(PaneId::Plugin(10)).unwrap().cols(), 40);
+}
+
+#[test]
+fn passive_popup_gutter_click_or_rejected_drag_never_reveals_hidden_floating_panes() {
+    for (delta, popup_width) in [(0, 30), (157, 160)] {
+        let (mut screen, _) = passive_popup_over_tiled_gutter_fixture(popup_width);
+        let tab = screen.tabs.get_mut(&0).unwrap();
+        tab.new_floating_pane(
+            PaneId::Terminal(90), None, None, false, false,
+            Some(FloatingPaneCoordinates::default()
+                .with_x_fixed(100).with_y_fixed(8)
+                .with_width_fixed(50).with_height_fixed(12)),
+            None,
+        ).unwrap();
+        assert!(!tab.are_floating_panes_visible());
+        let cursor = tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap().cursor_coordinates(Some(1));
+        let floating_geometry = tab.get_pane_with_id(PaneId::Terminal(90))
+            .unwrap().position_and_size();
+        screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, 39)), 1);
+        if delta != 0 {
+            // Leave less than the native minimum width in the application pane.
+            // The release stays inside a realistically wide passive details card.
+            screen.handle_mouse_event(
+                MouseEvent::new_left_motion_event(Position::new(10, 39 + delta)), 1,
+            );
+        }
+        screen.handle_mouse_event(
+            MouseEvent::new_left_release_event(Position::new(10, 39 + delta)), 1,
+        );
+        let tab = &screen.tabs[&0];
+        assert_eq!(tab.get_pane_with_id(PaneId::Plugin(10)).unwrap().cols(), 40);
+        assert!(!tab.are_floating_panes_visible());
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+        assert_eq!(tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap().cursor_coordinates(Some(1)), cursor);
+        assert_eq!(tab.get_pane_with_id(PaneId::Terminal(90))
+            .unwrap().position_and_size(), floating_geometry);
+    }
+}
+
+#[test]
+fn passive_popup_gutter_never_resizes_tiled_panes_beneath_floating_fullscreen() {
+    let (mut screen, _) = passive_popup_over_tiled_gutter_fixture(30);
+    let tab = screen.tabs.get_mut(&0).unwrap();
+    tab.new_floating_pane(
+        PaneId::Terminal(90), None, None, false, true,
+        Some(FloatingPaneCoordinates::default()
+            .with_x_fixed(100).with_y_fixed(8)
+            .with_width_fixed(50).with_height_fixed(12)),
+        None,
+    ).unwrap();
+    tab.toggle_pane_fullscreen(PaneId::Terminal(90));
+    assert!(tab.is_fullscreen_active());
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(90)));
+    screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, 39)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, 49)), 1);
+    screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, 49)), 1);
+    let tab = &screen.tabs[&0];
+    assert!(tab.is_fullscreen_active());
+    assert_eq!(tab.fullscreen_pane_id(), Some(PaneId::Terminal(90)));
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(90)));
+    assert_eq!(tab.get_pane_with_id(PaneId::Plugin(10)).unwrap().cols(), 40);
 }
 
 #[test]
