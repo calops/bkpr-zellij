@@ -1547,6 +1547,7 @@ pub(crate) struct Screen {
     /// The indices of this [`Screen`]'s active [`Tab`]s.
     active_tab_ids: BTreeMap<ClientId, usize>,
     client_sizes: HashMap<ClientId, Size>,
+    last_mouse_positions: HashMap<ClientId, Position>,
     global_last_active_tab_id: usize,
     tab_history: BTreeMap<ClientId, Vec<usize>>,
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
@@ -1757,6 +1758,7 @@ impl Screen {
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             active_tab_ids: BTreeMap::new(),
             client_sizes: HashMap::new(),
+            last_mouse_positions: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
             last_single_pane_tab_names: HashMap::new(),
@@ -2131,16 +2133,6 @@ impl Screen {
                         self.update_client_tab_focus(client_id, new_tab_index);
                     }
 
-                    if let Some(current_tab) = self.get_indexed_tab_mut(current_tab_index) {
-                        if current_tab.has_no_connected_clients() {
-                            current_tab.visible(false).with_context(err_context)?;
-                        }
-                    } else {
-                        Err::<(), _>(anyhow!("Tab index {:?} not found", current_tab_index))
-                            .with_context(err_context)
-                            .non_fatal();
-                    }
-
                     // Clear tab bell notification for the newly active tab
                     if let Some(new_tab) = self.tabs.get_mut(&new_tab_index) {
                         let tab_id = new_tab.id;
@@ -2164,6 +2156,26 @@ impl Screen {
                             self.report_key_passthrough_state(affected_client_id, old, new);
                         }
                         let _ = self.sync_scroll_mode_on_focus(affected_client_id);
+                    }
+                    if let Some(current_tab) = self.get_indexed_tab_mut(current_tab_index) {
+                        if current_tab.has_no_connected_clients() {
+                            current_tab.visible(false).with_context(err_context)?;
+                        }
+                    }
+                    for affected_client_id in affected_client_ids {
+                        let can_replay = if let Some(current_tab) =
+                            self.get_indexed_tab_mut(current_tab_index)
+                        {
+                            let can_replay = current_tab.can_replay_mouse_hover();
+                            current_tab.clear_mouse_hover_for_client(affected_client_id);
+                            can_replay
+                        } else {
+                            false
+                        };
+                        if can_replay {
+                            self.replay_mouse_hover(affected_client_id)
+                                .with_context(err_context)?;
+                        }
                     }
                     return self.render(None).with_context(err_context);
                 },
@@ -5113,6 +5125,7 @@ impl Screen {
         let err_context = || format!("failed to remove client {client_id}");
 
         self.set_client_dimmed(client_id, false, None);
+        self.last_mouse_positions.remove(&client_id);
         let passthrough_panes: Vec<PaneId> = self
             .nested_guest_choices
             .iter()
@@ -6150,12 +6163,15 @@ impl Screen {
         Ok(())
     }
     /// Collect plugin IDs that should receive a broadcast event for a given client.
-    /// Returns plugin IDs from the client's active tab plus background plugins
-    /// subscribed to the given event type.
+    /// Tab topology includes inactive tabs so their plugins can prepare unfocused UI;
+    /// other events target active-tab plugins and subscribed background plugins.
     fn targeted_plugin_ids(&self, client_id: ClientId, event_type: EventType) -> Vec<PluginId> {
         let mut plugin_ids = Vec::new();
-        // Active-tab plugins
-        if let Some(active_tab_id) = self.active_tab_ids.get(&client_id) {
+        if event_type == EventType::TabUpdate {
+            for tab in self.tabs.values() {
+                plugin_ids.extend(tab.get_plugin_ids());
+            }
+        } else if let Some(active_tab_id) = self.active_tab_ids.get(&client_id) {
             if let Some(tab) = self.tabs.get(active_tab_id) {
                 plugin_ids.extend(tab.get_plugin_ids());
             }
@@ -7276,7 +7292,16 @@ impl Screen {
             }
         }
     }
+    fn replay_mouse_hover(&mut self, client_id: ClientId) -> Result<()> {
+        if let Some(position) = self.last_mouse_positions.get(&client_id).copied() {
+            let tab = self.get_active_tab_mut(client_id)?;
+            tab.replay_mouse_hover(position, client_id)?;
+        }
+        Ok(())
+    }
+
     pub fn handle_mouse_event(&mut self, event: MouseEvent, client_id: ClientId) {
+        self.last_mouse_positions.insert(client_id, event.position);
         let is_bare_motion = event.event_type == MouseEventType::Motion
             && !event.left
             && !event.right

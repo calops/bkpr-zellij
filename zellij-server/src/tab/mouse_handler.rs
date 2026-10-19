@@ -424,6 +424,51 @@ impl MouseHandler {
         }
     }
 
+    pub(crate) fn clear_mouse_hover_for_client(tab: &mut Tab, client_id: ClientId) {
+        clear_hover_for_client(tab, client_id);
+        tab.mouse_last_pane_id.remove(&client_id);
+        tab.mouse_help_text_visible.remove(&client_id);
+        tab.last_mouse_activity_time.remove(&client_id);
+    }
+
+    pub(crate) fn can_replay_mouse_hover(tab: &Tab) -> bool {
+        tab.pane_being_resized_with_mouse.is_none()
+            && tab.selecting_with_mouse_in_pane.is_none()
+            && !tab.floating_panes.pane_is_being_moved_with_mouse()
+    }
+
+    pub(crate) fn replay_mouse_hover(
+        tab: &mut Tab,
+        position: Position,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        if !tab.mouse_hover_effects || !Self::can_replay_mouse_hover(tab) {
+            return Ok(MouseEffect::default());
+        }
+        let pane_id = Self::get_pane_at(tab, &position, false)?.map(|pane| pane.pid());
+        let previous_plugin = tab.plugin_hover_pane_id.get(&client_id).copied();
+        // A tab change is not terminal input or a focus-follows-mouse motion.
+        let effect = Self::execute_update_hover(tab, pane_id, Some(position), client_id)?;
+        for id in tab.tiled_panes.pane_ids().chain(tab.floating_panes.pane_ids()) {
+            if Some(*id) == pane_id || Some(*id) == previous_plugin
+                || !matches!(id, PaneId::Plugin(_))
+            {
+                continue;
+            }
+            if let Some(pane) = tab.get_pane_with_id(*id) {
+                if !pane.selectable() && pane.borderless() {
+                    // Unfocused UI can be staged while its tab is hidden. Synchronize
+                    // missed passive panes too, even if they never owned host hover.
+                    let _ = pane.mouse_event(
+                        &MouseEvent::new_buttonless_motion(Position::new(0, u16::MAX)),
+                        client_id,
+                    );
+                }
+            }
+        }
+        Ok(effect)
+    }
+
     fn intercept_guest_modal_mouse_event(
         tab: &mut Tab,
         event: &MouseEvent,
@@ -724,18 +769,20 @@ impl MouseHandler {
     ) -> Result<()> {
         let err_context = || format!("failed to resize tiled pane {pane_id:?}");
 
-        let viewport = tab.viewport.borrow();
-        let viewport_cols = viewport.cols;
-        let viewport_rows = viewport.rows;
+        // Resize percentages apply to the whole tiled grid, including edge UI panes.
+        // Copy dimensions so frame reconciliation can mutably update the viewport.
+        let display_area = *tab.display_area.borrow();
+        let display_cols = display_area.cols;
+        let display_rows = display_area.rows;
 
         let change_by_percent = (
-            if viewport_cols > 0 {
-                (change_by.0 / viewport_cols as f64) * 100.0
+            if display_cols > 0 {
+                (change_by.0 / display_cols as f64) * 100.0
             } else {
                 0.0
             },
-            if viewport_rows > 0 {
-                (change_by.1 / viewport_rows as f64) * 100.0
+            if display_rows > 0 {
+                (change_by.1 / display_rows as f64) * 100.0
             } else {
                 0.0
             },

@@ -21,11 +21,10 @@ use zellij_utils::{
     data::{Palette, Style},
     input::layout::{FloatingPaneLayout, Run, RunPluginOrAlias, TiledPaneLayout},
     input::options::PaneFrameStyle,
-    pane_size::{PaneGeom, Size, SizeInPixels, Viewport},
+    pane_size::{PaneGeom, Size, SizeInPixels},
 };
 
 pub struct LayoutApplier<'a> {
-    viewport: Rc<RefCell<Viewport>>, // includes all non-UI panes
     senders: ThreadSenders,
     sixel_image_store: Rc<RefCell<SixelImageStore>>,
     kitty_image_store: Rc<RefCell<KittyImageStore>>,
@@ -51,7 +50,6 @@ pub struct LayoutApplier<'a> {
 
 impl<'a> LayoutApplier<'a> {
     pub fn new(
-        viewport: &Rc<RefCell<Viewport>>,
         senders: &ThreadSenders,
         sixel_image_store: &Rc<RefCell<SixelImageStore>>,
         kitty_image_store: &Rc<RefCell<KittyImageStore>>,
@@ -74,7 +72,6 @@ impl<'a> LayoutApplier<'a> {
         explicitly_disable_kitty_keyboard_protocol: bool,
         blocking_terminal: Option<(u32, NotificationEnd)>,
     ) -> Self {
-        let viewport = viewport.clone();
         let senders = senders.clone();
         let sixel_image_store = sixel_image_store.clone();
         let kitty_image_store = kitty_image_store.clone();
@@ -87,7 +84,6 @@ impl<'a> LayoutApplier<'a> {
         let display_area = display_area.clone();
         let os_api = os_api.clone();
         LayoutApplier {
-            viewport,
             senders,
             sixel_image_store,
             kitty_image_store,
@@ -230,12 +226,7 @@ impl<'a> LayoutApplier<'a> {
         );
         pane_applier.finalize_tiled_state();
 
-        LayoutApplier::offset_viewport(
-            self.viewport.clone(),
-            self.display_area.clone(),
-            self.tiled_panes,
-            self.pane_frame_style,
-        );
+        self.tiled_panes.set_pane_frames(self.pane_frame_style);
         Ok(())
     }
     pub fn override_tiled_panes_layout_for_existing_panes(
@@ -323,12 +314,7 @@ impl<'a> LayoutApplier<'a> {
             self.tiled_panes.expand_pane_in_stack(*pane_id);
         }
 
-        LayoutApplier::offset_viewport(
-            self.viewport.clone(),
-            self.display_area.clone(),
-            self.tiled_panes,
-            self.pane_frame_style,
-        );
+        self.tiled_panes.set_pane_frames(self.pane_frame_style);
         Ok(())
     }
     fn close_non_retained_panes(
@@ -1039,50 +1025,6 @@ impl<'a> LayoutApplier<'a> {
         self.tiled_panes.resize(new_screen_size);
         Ok(())
     }
-    pub fn offset_viewport(
-        viewport: Rc<RefCell<Viewport>>,
-        display_area: Rc<RefCell<Size>>,
-        tiled_panes: &mut TiledPanes,
-        pane_frame_style: PaneFrameStyle,
-    ) {
-        {
-            // reset viewport before reapplying offset
-            let mut viewport = viewport.borrow_mut();
-            *viewport = (*display_area.borrow()).into();
-        }
-        let boundary_geoms = tiled_panes.non_selectable_pane_geoms_inside_viewport();
-        {
-            // curly braces here is so that we free viewport immediately when we're done
-            let mut viewport = viewport.borrow_mut();
-            for position_and_size in boundary_geoms {
-                if position_and_size.x == viewport.x
-                    && position_and_size.x + position_and_size.cols == viewport.x + viewport.cols
-                {
-                    if position_and_size.y == viewport.y {
-                        viewport.y += position_and_size.rows;
-                        viewport.rows -= position_and_size.rows;
-                    } else if position_and_size.y + position_and_size.rows
-                        == viewport.y + viewport.rows
-                    {
-                        viewport.rows -= position_and_size.rows;
-                    }
-                }
-                if position_and_size.y == viewport.y
-                    && position_and_size.y + position_and_size.rows == viewport.y + viewport.rows
-                {
-                    if position_and_size.x == viewport.x {
-                        viewport.x += position_and_size.cols;
-                        viewport.cols -= position_and_size.cols;
-                    } else if position_and_size.x + position_and_size.cols
-                        == viewport.x + viewport.cols
-                    {
-                        viewport.cols -= position_and_size.cols;
-                    }
-                }
-            }
-        }
-        tiled_panes.set_pane_frames(pane_frame_style);
-    }
     fn adjust_viewport(&mut self) -> Result<()> {
         // here we offset the viewport after applying a tiled panes layout
         // from borderless panes that are on the edges of the
@@ -1097,12 +1039,7 @@ impl<'a> LayoutApplier<'a> {
             *display_area
         };
         self.resize_whole_tab(display_area).context(err_context)?;
-        LayoutApplier::offset_viewport(
-            self.viewport.clone(),
-            self.display_area.clone(),
-            self.tiled_panes,
-            self.pane_frame_style,
-        );
+        self.tiled_panes.set_pane_frames(self.pane_frame_style);
         Ok(())
     }
     fn set_focused_tiled_pane(&mut self, focus_pane_id: Option<PaneId>, client_id: ClientId) {

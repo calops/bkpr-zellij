@@ -50,13 +50,16 @@ fn pane_content_offset(position_and_size: &PaneGeom, viewport: &Viewport) -> (us
     // if the pane is not on the bottom or right edge on the screen, we need to reserve one space
     // from its content to leave room for the boundary between it and the next pane (if it doesn't
     // draw its own frame)
-    let columns_offset = if position_and_size.x + position_and_size.cols.as_usize() < viewport.cols
+    let columns_offset = if position_and_size.x + position_and_size.cols.as_usize()
+        < viewport.x + viewport.cols
     {
         1
     } else {
         0
     };
-    let rows_offset = if position_and_size.y + position_and_size.rows.as_usize() < viewport.rows {
+    let rows_offset = if position_and_size.y + position_and_size.rows.as_usize()
+        < viewport.y + viewport.rows
+    {
         1
     } else {
         0
@@ -532,25 +535,44 @@ impl TiledPanes {
             })
             .collect()
     }
-    pub fn non_selectable_pane_geoms_inside_viewport(&self) -> Vec<Viewport> {
-        self.panes
-            .values()
-            .filter_map(|p| {
-                let geom = p.position_and_size();
-                // a borderless plugin pane is part of the ui (eg. the tab-bar or the status-bar)
-                // and so is offset out of the viewport just like a non-selectable pane - we cannot
-                // rely on selectability alone here, because a plugin only reports it once it has
-                // loaded, and until then we'd be calculating (and sending to the pty) wrong sizes
-                // for the other panes in this tab
-                let is_ui_pane =
-                    !p.selectable() || (p.borderless() && matches!(p.pid(), PaneId::Plugin(_)));
-                if is_ui_pane && is_inside_viewport(&self.viewport.borrow(), p) {
-                    Some(geom.into())
-                } else {
-                    None
+    fn update_viewport(&mut self) {
+        // Geometry changes can move borderless UI panes as well as application panes.
+        // Derive the viewport from the display each time, never from its previous offset.
+        let display_viewport: Viewport = (*self.display_area.borrow()).into();
+        let mut viewport = display_viewport;
+        for pane in self.panes.values() {
+            // Plugin selectability is reported asynchronously; borderless plugins are UI
+            // even before that report, or while temporarily accepting keyboard controls.
+            let is_ui_pane = !pane.selectable()
+                || (pane.borderless() && matches!(pane.pid(), PaneId::Plugin(_)));
+            if !is_ui_pane || !is_inside_viewport(&display_viewport, pane) {
+                continue;
+            }
+            let geometry = pane.position_and_size();
+            let columns = geometry.cols.as_usize();
+            let rows = geometry.rows.as_usize();
+            if geometry.x == viewport.x
+                && geometry.x + columns == viewport.x + viewport.cols
+            {
+                if geometry.y == viewport.y {
+                    viewport.y += rows;
+                    viewport.rows -= rows;
+                } else if geometry.y + rows == viewport.y + viewport.rows {
+                    viewport.rows -= rows;
                 }
-            })
-            .collect()
+            }
+            if geometry.y == viewport.y
+                && geometry.y + rows == viewport.y + viewport.rows
+            {
+                if geometry.x == viewport.x {
+                    viewport.x += columns;
+                    viewport.cols -= columns;
+                } else if geometry.x + columns == viewport.x + viewport.cols {
+                    viewport.cols -= columns;
+                }
+            }
+        }
+        *self.viewport.borrow_mut() = viewport;
     }
     pub fn first_selectable_pane_id(&self) -> Option<PaneId> {
         self.panes
@@ -609,6 +631,7 @@ impl TiledPanes {
     }
     pub fn set_pane_frames(&mut self, pane_frame_style: PaneFrameStyle) {
         self.pane_frame_style = pane_frame_style;
+        self.update_viewport();
         let draws_full_frames = pane_frame_style.draws_full_frames();
         let draws_titles = pane_frame_style.draws_titles();
         let single_selectable_tiled_pane = self
@@ -670,10 +693,21 @@ impl TiledPanes {
                 }
             } else if draws_full_frames && !pane.borderless() {
                 pane.set_content_offset(Offset::frame(1));
-            } else if draws_full_frames && pane.borderless() {
-                pane.set_content_offset(Offset::default());
-            } else if !is_inside_viewport(pane_viewport, pane) {
-                pane.set_content_offset(Offset::default());
+            } else if (draws_full_frames && pane.borderless())
+                || !is_inside_viewport(pane_viewport, pane)
+            {
+                let geometry = pane.current_geom();
+                // Keep the shared boundary beside left-edge UI out of its paintable
+                // content. The native frame hit-test uses this same reserved cell.
+                let right = usize::from(
+                    !draws_full_frames
+                        && geometry.x < viewport.x
+                        && geometry.x + geometry.cols.as_usize() == viewport.x,
+                );
+                pane.set_content_offset(Offset {
+                    right,
+                    ..Offset::default()
+                });
             } else {
                 let mut position_and_size = pane.current_geom();
                 let is_stacked = position_and_size.is_stacked();
@@ -1130,6 +1164,17 @@ impl TiledPanes {
             pane.render_full_viewport();
         }
         self.reset_boundaries();
+    }
+    pub fn render_region(&mut self, region: Viewport, output: &mut Output) -> Result<()> {
+        for (pane_id, pane) in &mut self.panes {
+            if !self.panes_to_hide.contains(pane_id) {
+                pane.render_region(region, output, None)?;
+            }
+        }
+        for boundaries in self.client_id_to_boundaries.values_mut() {
+            boundaries.invalidate_region(region);
+        }
+        Ok(())
     }
     pub fn has_active_panes(&self) -> bool {
         !self.active_panes.is_empty()
@@ -1968,11 +2013,7 @@ impl TiledPanes {
             },
         }
 
-        for pane in self.panes.values_mut() {
-            // TODO: only for the panes whose width/height actually changed
-            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).non_fatal();
-        }
-        self.reset_boundaries();
+        self.set_pane_frames(self.pane_frame_style);
         Ok(pane_size_changed)
     }
 
@@ -1997,10 +2038,7 @@ impl TiledPanes {
                 .with_context(err_context);
         }
 
-        for pane in self.panes.values_mut() {
-            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).non_fatal();
-        }
-        self.reset_boundaries();
+        self.set_pane_frames(self.pane_frame_style);
         Ok(())
     }
 
@@ -3172,10 +3210,7 @@ impl TiledPanes {
 
 #[allow(clippy::borrowed_box)]
 pub fn is_inside_viewport(viewport: &Viewport, pane: &Box<dyn Pane>) -> bool {
-    let pane_position_and_size = pane.current_geom();
-    pane_position_and_size.y >= viewport.y
-        && pane_position_and_size.y + pane_position_and_size.rows.as_usize()
-            <= viewport.y + viewport.rows
+    pane_geom_is_inside_viewport(viewport, &pane.current_geom())
 }
 
 pub fn pane_geom_is_inside_viewport(viewport: &Viewport, geom: &PaneGeom) -> bool {
@@ -3183,4 +3218,44 @@ pub fn pane_geom_is_inside_viewport(viewport: &Viewport, geom: &PaneGeom) -> boo
         && geom.y + geom.rows.as_usize() <= viewport.y + viewport.rows
         && geom.x >= viewport.x
         && geom.x + geom.cols.as_usize() <= viewport.x + viewport.cols
+}
+
+#[cfg(test)]
+mod viewport_geometry_regressions {
+    use super::*;
+    use super::pane_resizer_test_mock::{dim_fixed, spec, MockPane};
+
+    #[test]
+    fn horizontal_ui_panes_stay_outside_the_application_viewport_at_every_width() {
+        for sidebar_width in [10, 38, 79, 80, 81, 120, 150] {
+            let viewport = Viewport {
+                x: sidebar_width,
+                y: 2,
+                cols: 160 - sidebar_width,
+                rows: 30,
+            };
+            let sidebar: Box<dyn Pane> = Box::new(MockPane::from_spec(spec(
+                1, 0, 2, dim_fixed(sidebar_width), dim_fixed(30),
+            )));
+            let terminal: Box<dyn Pane> = Box::new(MockPane::from_spec(spec(
+                2, sidebar_width, 2, dim_fixed(viewport.cols), dim_fixed(30),
+            )));
+            assert!(!is_inside_viewport(&viewport, &sidebar));
+            assert!(is_inside_viewport(&viewport, &terminal));
+        }
+    }
+
+    #[test]
+    fn separator_offsets_use_absolute_right_and_bottom_viewport_edges() {
+        let viewport = Viewport { x: 80, y: 3, cols: 80, rows: 30 };
+        for (x, y, cols, rows, expected) in [
+            (80, 3, 30, 12, (1, 1)),
+            (110, 3, 50, 12, (0, 1)),
+            (80, 15, 30, 18, (1, 0)),
+            (80, 3, 80, 30, (0, 0)),
+        ] {
+            let geometry = spec(1, x, y, dim_fixed(cols), dim_fixed(rows)).geom();
+            assert_eq!(pane_content_offset(&geometry, &viewport), expected);
+        }
+    }
 }

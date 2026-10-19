@@ -915,6 +915,221 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
         .expect("TEST");
 }
 
+fn tab_switch_mouse_fixture(
+    mirrored: bool,
+) -> (
+    Screen,
+    Receiver<(PluginInstruction, ErrorContext)>,
+    Receiver<(PtyWriteInstruction, ErrorContext)>,
+) {
+    let size = Size { cols: 121, rows: 20 };
+    let (mut screen, _, _) = create_new_screen_with_capture(size, true, true, true, mirrored);
+    let (to_plugin, plugin_receiver) = channels::unbounded();
+    let (to_writer, writer_receiver) = channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    screen.bus.senders.to_pty_writer = Some(SenderWithContext::new(to_writer));
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    for (tab_id, plugin_id) in [(0, 10), (1, 11)] {
+        let tab = screen.tabs.get_mut(&tab_id).unwrap();
+        tab.new_floating_pane(
+            PaneId::Plugin(plugin_id),
+            None,
+            None,
+            false,
+            false,
+            Some(FloatingPaneCoordinates {
+                pinned: Some(true),
+                borderless: Some(true),
+                ..FloatingPaneCoordinates::default()
+                    .with_x_fixed(8)
+                    .with_y_fixed(3)
+                    .with_width_fixed(30)
+                    .with_height_fixed(8)
+            }),
+            None,
+        ).unwrap();
+        tab.set_pane_selectable(PaneId::Plugin(plugin_id), false);
+        tab.update_focus_follows_mouse(true);
+    }
+    screen.go_to_tab(1, 1).unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while writer_receiver.try_recv().is_ok() {}
+    (screen, plugin_receiver, writer_receiver)
+}
+
+fn mouse_fixture_updates(
+    receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+) -> Vec<(Option<u32>, Option<ClientId>, Event)> {
+    let mut updates = Vec::new();
+    while let Ok((instruction, _)) = receiver.try_recv() {
+        if let PluginInstruction::Update(events) = instruction {
+            updates.extend(events);
+        }
+    }
+    updates
+}
+
+fn mouse_fixture_hovers(
+    updates: &[(Option<u32>, Option<ClientId>, Event)],
+) -> Vec<(u32, ClientId, zellij_utils::data::Mouse)> {
+    updates.iter().filter_map(|(plugin_id, client_id, event)| match event {
+        Event::Mouse(mouse) => Some(((*plugin_id)?, (*client_id)?, *mouse)),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn screen_tab_switch_replays_plugin_hover_and_physical_exit() {
+    use zellij_utils::data::Mouse;
+    let (mut screen, plugin_receiver, writer_receiver) = tab_switch_mouse_fixture(true);
+    screen.tabs.get_mut(&1).unwrap()
+        .handle_pty_bytes(2, b"\x1b[6;13H\x1b[?25h".to_vec()).unwrap();
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 12)), 1);
+    assert_eq!(
+        mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver)),
+        vec![(10, 1, Mouse::Hover(2, 4))]
+    );
+    screen.go_to_tab(2, 1).unwrap();
+    let updates = mouse_fixture_updates(&plugin_receiver);
+    assert_eq!(
+        mouse_fixture_hovers(&updates),
+        vec![(10, 1, Mouse::Hover(0, u16::MAX as usize)), (11, 1, Mouse::Hover(2, 4))]
+    );
+    let source_topology = updates.iter().position(|(pid, cid, event)| {
+        *pid == Some(10) && *cid == Some(1) && matches!(event,
+            Event::TabUpdate(tabs) if tabs.iter().any(|tab| tab.position == 1 && tab.active))
+    }).unwrap();
+    let source_hidden = updates.iter().position(|(pid, _, event)| {
+        *pid == Some(10) && matches!(event, Event::Visible(false))
+    }).unwrap();
+    let source_exit = updates.iter().position(|(pid, cid, event)| {
+        *pid == Some(10) && *cid == Some(1)
+            && matches!(event, Event::Mouse(Mouse::Hover(0, column)) if *column == u16::MAX as usize)
+    }).unwrap();
+    assert!(source_topology < source_hidden && source_hidden < source_exit);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(2)));
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().get_active_terminal_cursor_position(1),
+        Some((12, 5, true))
+    );
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(18, 100)), 1);
+    assert_eq!(
+        mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver)),
+        vec![(11, 1, Mouse::Hover(0, u16::MAX as usize))]
+    );
+    assert!(!screen.get_active_tab(1).unwrap().has_plugin_mouse_hover_for_client(1));
+    assert!(!writer_receiver.try_recv().is_ok(), "hover replay must not inject application input");
+}
+
+#[test]
+fn screen_tab_switch_hover_ownership_is_per_client() {
+    use zellij_utils::data::Mouse;
+    let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(false);
+    screen.set_client_size(2, Size { cols: 121, rows: 20 });
+    screen.add_client(2, false).unwrap();
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 12)), 1);
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(6, 14)), 2);
+    mouse_fixture_updates(&plugin_receiver);
+    screen.go_to_tab(2, 1).unwrap();
+    let updates = mouse_fixture_updates(&plugin_receiver);
+    assert_eq!(
+        mouse_fixture_hovers(&updates),
+        vec![(10, 1, Mouse::Hover(0, u16::MAX as usize)), (11, 1, Mouse::Hover(2, 4))]
+    );
+    assert_eq!(screen.get_active_tab(2).unwrap().id, 0);
+    assert!(screen.get_active_tab(2).unwrap().has_plugin_mouse_hover_for_client(2));
+    assert!(!updates.iter().any(|(pid, _, event)|
+        *pid == Some(10) && matches!(event, Event::Visible(false))));
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(18, 100)), 2);
+    assert_eq!(
+        mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver)),
+        vec![(10, 2, Mouse::Hover(0, u16::MAX as usize))]
+    );
+}
+
+#[test]
+fn screen_tab_switch_does_not_invent_or_reuse_disconnected_pointer() {
+    let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
+    screen.go_to_tab(2, 1).unwrap();
+    assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver)).is_empty());
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 12)), 1);
+    mouse_fixture_updates(&plugin_receiver);
+    screen.remove_client(1).unwrap();
+    assert!(!screen.last_mouse_positions.contains_key(&1));
+    screen.add_client(1, false).unwrap();
+    mouse_fixture_updates(&plugin_receiver);
+    screen.go_to_tab(1, 1).unwrap();
+    assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver)).is_empty());
+}
+
+#[test]
+fn screen_tab_switch_hover_replay_respects_mouse_grab_and_disabled_hover() {
+    for grabbed in [false, true] {
+        let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
+        screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 12)), 1);
+        mouse_fixture_updates(&plugin_receiver);
+        if grabbed {
+            screen.tabs.get_mut(&0).unwrap().selecting_with_mouse_in_pane =
+                Some(PaneId::Terminal(1));
+        } else {
+            screen.tabs.get_mut(&1).unwrap().update_mouse_hover_effects(false);
+        }
+        screen.go_to_tab(2, 1).unwrap();
+        assert!(mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver))
+            .iter().all(|(pid, _, _)| *pid != 11));
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(2)));
+    }
+}
+
+#[test]
+fn screen_tab_switch_hover_replay_does_not_focus_or_forward_terminal_tracking() {
+    let (mut screen, plugin_receiver, writer_receiver) = tab_switch_mouse_fixture(true);
+    let destination = screen.tabs.get_mut(&1).unwrap();
+    destination.vertical_split(PaneId::Terminal(3), None, 1, None, None).unwrap();
+    destination.handle_pty_bytes(2, b"\x1b[?1003h\x1b[?1006h".to_vec()).unwrap();
+    assert_eq!(destination.get_active_pane_id(1), Some(PaneId::Terminal(3)));
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(1, 20)), 1);
+    mouse_fixture_updates(&plugin_receiver);
+    while writer_receiver.try_recv().is_ok() {}
+    screen.go_to_tab(2, 1).unwrap();
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(3)));
+    assert!(writer_receiver.try_recv().is_err());
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(1, 20)), 1);
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(2)));
+}
+
+#[test]
+fn screen_tab_switch_synchronizes_staged_passive_misses_from_known_pointer() {
+    use zellij_utils::data::Mouse;
+    let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(18, 100)), 1);
+    mouse_fixture_updates(&plugin_receiver);
+    screen.go_to_tab(2, 1).unwrap();
+    assert_eq!(
+        mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver)),
+        vec![(11, 1, Mouse::Hover(0, u16::MAX as usize))]
+    );
+}
+
+#[test]
+fn screen_tab_switch_mirrored_clients_replay_their_own_known_positions() {
+    use zellij_utils::data::Mouse;
+    let (mut screen, plugin_receiver, _) = tab_switch_mouse_fixture(true);
+    screen.set_client_size(2, Size { cols: 121, rows: 20 });
+    screen.add_client(2, false).unwrap();
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(5, 12)), 1);
+    screen.handle_mouse_event(MouseEvent::new_buttonless_motion(Position::new(6, 14)), 2);
+    mouse_fixture_updates(&plugin_receiver);
+    screen.go_to_tab(2, 1).unwrap();
+    let hovers = mouse_fixture_hovers(&mouse_fixture_updates(&plugin_receiver));
+    assert!(hovers.contains(&(10, 1, Mouse::Hover(0, u16::MAX as usize))));
+    assert!(hovers.contains(&(10, 2, Mouse::Hover(0, u16::MAX as usize))));
+    assert!(hovers.contains(&(11, 1, Mouse::Hover(2, 4))));
+    assert!(hovers.contains(&(11, 2, Mouse::Hover(3, 6))));
+    assert_eq!(hovers.len(), 4);
+}
+
 #[test]
 fn open_new_tab() {
     let size = Size {
@@ -3404,9 +3619,9 @@ pub fn send_cli_toggle_full_screen_action() {
 }
 
 #[test]
-pub fn send_cli_toggle_pane_frames_action() {
+pub fn cli_frame_toggle_keeps_contents_and_tiled_separator_geometry() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 10; // CLI clients need not be attached to the screen.
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -3420,19 +3635,28 @@ pub fn send_cli_toggle_pane_frames_action() {
         ServerInstruction::KillSession,
         server_receiver
     );
-    let toggle_pane_frames_action = CliAction::TogglePaneFrames;
-    send_cli_action_to_server(&session_metadata, toggle_pane_frames_action, client_id);
+    for (pane, contents) in [(0, "LEFT CONTENT"), (1, "RIGHT CONTENT")] {
+        mock_screen.to_screen.send(ScreenInstruction::PtyBytes(pane, contents.as_bytes().to_vec()))
+            .unwrap();
+    }
+    send_cli_action_to_server(&session_metadata, CliAction::TogglePaneFrames, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![server_instruction, screen_thread]);
     let snapshots = take_snapshots_and_cursor_coordinates_from_render_events(
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
+    let (_, final_snapshot) = snapshots.last().expect("the CLI frame change must render");
+    assert!(final_snapshot.contains("LEFT CONTENT"));
+    assert!(final_snapshot.contains("RIGHT CONTENT"));
+    for row in final_snapshot.lines() {
+        let (_, contents) = row.split_once(": ").unwrap();
+        let separators: Vec<_> = contents.chars().enumerate()
+            .filter_map(|(x, character)| (character == '│').then_some(x))
+            .collect();
+        assert_eq!(separators, vec![size.cols / 2 - 1]);
+        assert!(!contents.chars().any(|character| matches!(character, '┌' | '┐' | '└' | '┘' | '─')));
     }
-    assert_snapshot!(format!("{}", snapshot_count));
 }
 
 #[test]

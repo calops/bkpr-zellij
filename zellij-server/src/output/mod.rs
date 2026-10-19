@@ -20,7 +20,7 @@ use std::{
 use zellij_utils::data::{HighlightLayer, PaneContents, PaneRenderReport};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::pane_size::SizeInPixels;
-use zellij_utils::pane_size::{PaneGeom, Size};
+use zellij_utils::pane_size::{PaneGeom, Size, Viewport};
 
 fn vte_goto_instruction(x_coords: usize, y_coords: usize, vte_output: &mut String) -> Result<()> {
     write!(
@@ -339,7 +339,7 @@ fn adjust_middle_segment_for_wide_chars(
         current_x += t_character.width();
         if current_x >= middle_start && absolute_middle_start_index.is_none() {
             if current_x > middle_start {
-                pad_left_end_by = current_x - middle_start;
+                pad_left_end_by = middle_start - (current_x - t_character.width());
                 absolute_middle_start_index = Some(absolute_index);
             } else {
                 absolute_middle_start_index = Some(absolute_index + 1);
@@ -1677,6 +1677,33 @@ impl CharacterChunk {
         }
         width
     }
+    pub fn retain_columns(&mut self, left: usize, right: usize) {
+        let mut x = self.x;
+        let mut first = None;
+        let mut end = 0;
+        let mut first_x = x;
+        for (index, character) in self.terminal_characters.iter().enumerate() {
+            let width = character.width();
+            if width > 0 && x >= right {
+                break;
+            }
+            if x + width > left || (width == 0 && first.is_some()) {
+                if first.is_none() {
+                    first = Some(index);
+                    first_x = x;
+                }
+                end = index + 1;
+            }
+            x += width;
+        }
+        if let Some(first) = first {
+            self.terminal_characters.truncate(end);
+            self.terminal_characters.drain(..first);
+            self.x = first_x;
+        } else {
+            self.terminal_characters.clear();
+        }
+    }
     pub fn drain_by_width(&mut self, x: usize) -> impl Iterator<Item = TerminalCharacter> {
         let mut drained_part: VecDeque<TerminalCharacter> = VecDeque::new();
         let mut drained_part_len = 0;
@@ -1692,9 +1719,17 @@ impl CharacterChunk {
                 if drained_part_len == x {
                     self.terminal_characters.insert(0, next_character); // put it back
                 } else if next_character.width() > 1 {
-                    for _ in 1..next_character.width() {
-                        self.terminal_characters.insert(0, EMPTY_TERMINAL_CHARACTER);
-                        drained_part.push_back(EMPTY_TERMINAL_CHARACTER);
+                    let left_width = x - drained_part_len;
+                    let right_width = next_character.width() - left_width;
+                    let padding = TerminalCharacter::new_singlewidth_styled(
+                        ' ',
+                        next_character.styles,
+                    );
+                    for _ in 0..left_width {
+                        drained_part.push_back(padding.clone());
+                    }
+                    for _ in 0..right_width {
+                        self.terminal_characters.insert(0, padding.clone());
                     }
                 }
                 break;
@@ -1733,11 +1768,19 @@ impl CharacterChunk {
             .drain(..absolute_middle_start_index)
             .collect();
         if pad_left_end_by > 0 {
-            characters_on_the_left.resize(pad_left_end_by, EMPTY_TERMINAL_CHARACTER);
+            let padding = terminal_characters
+                .first()
+                .map(|character| TerminalCharacter::new_singlewidth_styled(' ', character.styles.clone()))
+                .unwrap_or(EMPTY_TERMINAL_CHARACTER);
+            characters_on_the_left.resize(characters_on_the_left.len() + pad_left_end_by, padding);
         }
         if pad_right_start_by > 0 {
+            let padding = terminal_characters
+                .last()
+                .map(|character| TerminalCharacter::new_singlewidth_styled(' ', character.styles.clone()))
+                .unwrap_or(EMPTY_TERMINAL_CHARACTER);
             for _ in 0..pad_right_start_by {
-                characters_on_the_right.insert(0, EMPTY_TERMINAL_CHARACTER);
+                characters_on_the_right.insert(0, padding.clone());
             }
         }
         Ok((characters_on_the_left, characters_on_the_right))
@@ -1748,6 +1791,7 @@ impl CharacterChunk {
 pub struct OutputBuffer {
     pub changed_lines: HashSet<usize>, // line index
     pub should_update_all_lines: bool,
+    damaged_regions: Vec<Viewport>,
     styled_underlines: bool,
 }
 
@@ -1756,6 +1800,7 @@ impl Default for OutputBuffer {
         OutputBuffer {
             changed_lines: HashSet::new(),
             should_update_all_lines: true, // first time we should do a full render
+            damaged_regions: Vec::new(),
             styled_underlines: true,
         }
     }
@@ -1776,12 +1821,18 @@ impl OutputBuffer {
             }
         }
     }
+    pub fn update_region(&mut self, region: Viewport) {
+        if !self.should_update_all_lines && region.cols > 0 && region.rows > 0 {
+            self.damaged_regions.push(region);
+        }
+    }
     pub fn update_all_lines(&mut self) {
         self.clear();
         self.should_update_all_lines = true;
     }
     pub fn clear(&mut self) {
         self.changed_lines.clear();
+        self.damaged_regions.clear();
         self.should_update_all_lines = false;
     }
     pub fn serialize(
@@ -1842,6 +1893,44 @@ impl OutputBuffer {
                 let x = x_offset;
                 let y = line_index + y_offset;
                 changed_chunks.push(CharacterChunk::new(terminal_characters, x, y));
+            }
+            for region in &self.damaged_regions {
+                let right = (region.x + region.cols).min(viewport_width);
+                for line_index in region.y..(region.y + region.rows).min(viewport_height) {
+                    if self.changed_lines.contains(&line_index) || region.x >= right {
+                        continue;
+                    }
+                    let mut characters = Vec::with_capacity(right - region.x + 2);
+                    let mut x = 0;
+                    let mut chunk_x = region.x;
+                    let mut padding = EMPTY_TERMINAL_CHARACTER;
+                    if let Some(row) = viewport.get(line_index) {
+                        if let Some(bg_color) = row.bg_color {
+                            padding.styles.update(|styles| styles.background = Some(bg_color));
+                        }
+                        for character in &row.columns {
+                            let width = character.width();
+                            if width > 0 && x >= right {
+                                break;
+                            }
+                            if x + width > region.x || (width == 0 && !characters.is_empty()) {
+                                if characters.is_empty() {
+                                    chunk_x = x;
+                                }
+                                characters.push(character.clone());
+                            }
+                            x += width;
+                        }
+                    }
+                    // Keep complete wide glyphs at either edge, and preserve the row's
+                    // erased-cell background without allocating the rest of the row.
+                    characters.resize(characters.len() + right.saturating_sub(x.max(region.x)), padding);
+                    changed_chunks.push(CharacterChunk::new(
+                        characters,
+                        chunk_x + x_offset,
+                        line_index + y_offset,
+                    ));
+                }
             }
             changed_chunks
         }
@@ -1914,8 +2003,18 @@ impl OutputBuffer {
             for line_index in 0..viewport_height {
                 add_changed_line(line_index);
             }
-        } else {
+        } else if self.damaged_regions.is_empty() {
             for line_index in self.changed_lines.iter().copied() {
+                add_changed_line(line_index);
+            }
+        } else {
+            let mut lines: Vec<_> = self.changed_lines.iter().copied().collect();
+            for region in &self.damaged_regions {
+                lines.extend(region.y..(region.y + region.rows).min(viewport_height));
+            }
+            lines.sort_unstable();
+            lines.dedup();
+            for line_index in lines {
                 add_changed_line(line_index);
             }
         }

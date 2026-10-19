@@ -35,6 +35,29 @@ use zellij_utils::{
 const RESIZE_INCREMENT_WIDTH: usize = 5;
 const RESIZE_INCREMENT_HEIGHT: usize = 2;
 
+fn is_passive_plugin(pane: &dyn Pane) -> bool {
+    !pane.selectable() && pane.borderless() && matches!(pane.pid(), PaneId::Plugin(_))
+}
+
+fn coordinate_viewport(
+    pane: &dyn Pane,
+    is_pinned: bool,
+    display_area: Size,
+    viewport: Viewport,
+) -> Viewport {
+    if is_pinned && pane.borderless() && matches!(pane.pid(), PaneId::Plugin(_)) {
+        // Pinned borderless UI, including focused modals, can cover reserved chrome.
+        Viewport {
+            x: 0,
+            y: 0,
+            cols: display_area.cols,
+            rows: display_area.rows,
+        }
+    } else {
+        viewport
+    }
+}
+
 pub struct FloatingPanes {
     panes: BTreeMap<PaneId, Box<dyn Pane>>,
     display_area: Rc<RefCell<Size>>,
@@ -119,6 +142,51 @@ impl FloatingPanes {
         }
         self.set_force_render();
     }
+    pub fn collect_ui_overlay_geometries(&self, geometries: &mut Vec<(PaneId, PaneGeom)>) {
+        for (id, pane) in &self.panes {
+            if self
+                .fullscreen_pane_id
+                .is_some_and(|fullscreen| fullscreen != *id)
+                || !is_passive_plugin(pane.as_ref())
+            {
+                continue;
+            }
+            let geom = pane.position_and_size();
+            if geom.is_pinned {
+                geometries.push((*id, geom));
+            }
+        }
+    }
+    pub fn is_passive_ui_overlay(&self, pane_id: PaneId) -> bool {
+        self.fullscreen_pane_id.is_none()
+            && !self.active_panes.pane_id_is_focused(&pane_id)
+            && self.panes.get(&pane_id).is_some_and(|pane| {
+                is_passive_plugin(pane.as_ref()) && pane.position_and_size().is_pinned
+            })
+    }
+    pub fn render_region(&mut self, region: Viewport, output: &mut Output) -> Result<()> {
+        let visible = self.panes_are_visible();
+        let mut z_index = 0;
+        for pane_id in &self.z_indices {
+            let pane = match self.panes.get_mut(pane_id) {
+                Some(pane) => pane,
+                None => continue,
+            };
+            if self
+                .fullscreen_pane_id
+                .is_some_and(|fullscreen| fullscreen != *pane_id)
+                || (self.fullscreen_pane_id.is_none()
+                    && !visible
+                    && !pane.position_and_size().is_pinned)
+            {
+                continue;
+            }
+            z_index += 1;
+            pane.render_region(region, output, Some(z_index))?;
+        }
+        Ok(())
+    }
+
     pub fn stack(&self) -> Option<FloatingPanesStack> {
         if *self.fullscreen_covers_ui.borrow() {
             return None;
@@ -1110,8 +1178,8 @@ impl FloatingPanes {
 
         {
             let viewport = { self.viewport.borrow().clone() };
+            let display_area = *self.display_area.borrow();
             let pane = self.get_pane_mut(pane_id).with_context(err_context)?;
-            let mut pane_geom = pane.position_and_size();
             if let Some(pinned) = new_coordinates.pinned.as_ref() {
                 pane.set_pinned(*pinned);
             }
@@ -1122,6 +1190,9 @@ impl FloatingPanes {
                     pane.set_borderless(false);
                 };
             }
+            let mut pane_geom = pane.position_and_size();
+            let viewport =
+                coordinate_viewport(pane.as_ref(), pane_geom.is_pinned, display_area, viewport);
             pane_geom.adjust_coordinates(new_coordinates, viewport);
             pane.set_geom(pane_geom);
             pane.set_should_render(true);
@@ -1137,7 +1208,16 @@ impl FloatingPanes {
 
             self.desired_pane_positions.insert(pane_id, pane_geom);
         }
-        let _ = self.set_pane_frames();
+        if self.is_passive_ui_overlay(pane_id) {
+            // Coordinates only change this borderless pane. Reapplying every
+            // float's frame would reflow unrelated terminal grids in full.
+            if let Some(pane) = self.panes.get_mut(&pane_id) {
+                resize_pty!(pane, os_api, self.senders, self.character_cell_size)
+                    .with_context(err_context)?;
+            }
+        } else {
+            let _ = self.set_pane_frames();
+        }
         Ok(())
     }
     pub fn move_clients_out_of_pane(&mut self, pane_id: PaneId) {

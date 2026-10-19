@@ -598,7 +598,6 @@ fn test_apply_empty_layout() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -684,7 +683,6 @@ fn test_apply_simple_two_pane_layout() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -771,7 +769,6 @@ fn test_apply_three_pane_layout() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -857,7 +854,6 @@ fn test_apply_horizontal_split_with_sizes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -943,7 +939,6 @@ fn test_apply_vertical_split_with_sizes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1032,7 +1027,6 @@ fn test_apply_nested_layout() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1117,7 +1111,6 @@ fn test_apply_layout_with_focus() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1205,7 +1198,6 @@ fn test_apply_layout_with_commands() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1290,7 +1282,6 @@ fn test_apply_layout_with_named_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1375,7 +1366,6 @@ fn test_apply_layout_with_borderless_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1469,7 +1459,6 @@ fn test_apply_layout_with_floating_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1564,7 +1553,6 @@ fn test_apply_layout_with_floating_pane_with_command() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1673,7 +1661,6 @@ fn test_apply_layout_with_mixed_tiled_and_floating_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1765,7 +1752,6 @@ fn test_reapply_layout_exact_match() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1869,7 +1855,6 @@ fn test_reapply_layout_logical_position_match() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -1974,7 +1959,6 @@ fn test_reapply_layout_with_more_positions() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2084,7 +2068,6 @@ fn test_reapply_floating_pane_layout() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2198,7 +2181,6 @@ fn test_apply_complex_nested_layout() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2288,7 +2270,6 @@ fn test_apply_layout_with_stacked_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2384,7 +2365,6 @@ fn test_apply_layout_with_multiple_stacks() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2487,7 +2467,6 @@ fn test_apply_layout_with_plugin_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2596,7 +2575,6 @@ fn test_apply_layout_with_mixed_plugin_and_terminal_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2665,7 +2643,7 @@ fn test_apply_layout_with_missing_plugin_ids() {
         rows: 50,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -2688,7 +2666,6 @@ fn test_apply_layout_with_missing_plugin_ids() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2766,7 +2743,6 @@ fn test_apply_layout_with_excess_terminal_ids() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -2866,7 +2842,6 @@ fn test_override_layout_basic_with_both_tiled_and_floating() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3011,7 +2986,6 @@ fn test_override_layout_hide_floating_panes_true() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3144,7 +3118,6 @@ fn test_override_layout_show_floating_panes() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3283,7 +3256,6 @@ fn test_override_tiled_exact_match_preservation_commands() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3411,7 +3383,6 @@ fn test_override_tiled_exact_match_preservation_plugins() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3537,7 +3508,6 @@ fn test_override_tiled_all_panes_closed_no_matches() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3668,7 +3638,6 @@ fn test_override_tiled_mixed_some_matches_some_new() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3788,7 +3757,6 @@ fn test_override_tiled_new_panes_for_unmatched_positions() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -3900,7 +3868,6 @@ fn test_override_tiled_focus_on_new_pane() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4014,7 +3981,6 @@ fn test_override_tiled_focus_when_focused_pane_closed() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4141,7 +4107,6 @@ fn test_override_tiled_empty_layout_closes_all() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4281,7 +4246,6 @@ fn test_override_floating_exact_match_preservation() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4425,7 +4389,6 @@ fn test_override_floating_all_closed_no_matches() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4569,7 +4532,6 @@ fn test_override_floating_new_panes_created() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4716,7 +4678,6 @@ fn test_override_floating_focus_handling() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4850,7 +4811,6 @@ fn test_override_floating_position_and_size_update() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -4964,7 +4924,6 @@ fn test_override_floating_return_value_has_panes() {
     ) = create_layout_applier_fixtures(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5090,7 +5049,6 @@ fn test_override_floating_return_value_no_panes() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5232,7 +5190,6 @@ fn test_override_full_tiled_and_floating_together() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5379,7 +5336,6 @@ fn test_override_viewport_adjustment_with_borderless() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5479,7 +5435,7 @@ fn test_override_tiled_retain_terminal_panes_partial_match() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -5504,7 +5460,6 @@ fn test_override_tiled_retain_terminal_panes_partial_match() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5613,7 +5568,7 @@ fn test_override_tiled_retain_terminal_panes_no_matches() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -5638,7 +5593,6 @@ fn test_override_tiled_retain_terminal_panes_no_matches() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5787,7 +5741,6 @@ fn test_override_floating_retain_terminal_panes_partial_match() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -5946,7 +5899,6 @@ fn test_override_floating_retain_terminal_panes_no_matches() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -6086,7 +6038,7 @@ fn test_override_mixed_retain_terminal_panes_both_tiled_and_floating() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -6111,7 +6063,6 @@ fn test_override_mixed_retain_terminal_panes_both_tiled_and_floating() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -6273,7 +6224,6 @@ fn test_override_retain_terminal_but_close_plugin_panes() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -6407,7 +6357,7 @@ fn test_override_tiled_retain_plugin_panes_partial_match() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -6432,7 +6382,6 @@ fn test_override_tiled_retain_plugin_panes_partial_match() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -6547,7 +6496,7 @@ fn test_override_tiled_retain_plugin_panes_no_matches() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -6572,7 +6521,6 @@ fn test_override_tiled_retain_plugin_panes_no_matches() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -6702,7 +6650,7 @@ fn test_override_floating_retain_plugin_panes_partial_match() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -6727,7 +6675,6 @@ fn test_override_floating_retain_plugin_panes_partial_match() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -6852,7 +6799,7 @@ fn test_override_floating_retain_plugin_panes_no_matches() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -6877,7 +6824,6 @@ fn test_override_floating_retain_plugin_panes_no_matches() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -7010,7 +6956,7 @@ fn test_override_mixed_retain_plugin_panes_both_tiled_and_floating() {
         rows: 40,
     };
     let (
-        viewport,
+        _,
         senders,
         sixel_image_store,
         link_handler,
@@ -7035,7 +6981,6 @@ fn test_override_mixed_retain_plugin_panes_both_tiled_and_floating() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),
@@ -7193,7 +7138,6 @@ fn test_override_retain_plugin_but_close_terminal_panes() {
     ) = create_layout_applier_fixtures_with_receivers(size);
 
     let mut applier = LayoutApplier::new(
-        &viewport,
         &senders,
         &sixel_image_store,
         &Rc::new(RefCell::new(KittyImageStore::default())),

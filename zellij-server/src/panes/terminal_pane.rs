@@ -21,7 +21,7 @@ use std::time::{self, Instant};
 use zellij_utils::data::PaneContents;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
-use zellij_utils::pane_size::Offset;
+use zellij_utils::pane_size::{Offset, Viewport};
 use zellij_utils::{
     data::{
         BareKey, InputMode, KeyWithModifier, Palette, PaletteColor, PaneId as ZellijUtilsPaneId,
@@ -464,6 +464,27 @@ impl Pane for TerminalPane {
         // diff as it usually does with the OutputBuffer
         self.frame.clear();
         self.grid.render_full_viewport();
+    }
+    fn render_region(
+        &mut self,
+        region: Viewport,
+        output: &mut crate::output::Output,
+        z_index: Option<usize>,
+    ) -> Result<()> {
+        if let Some(content) = self.content_region(region) {
+            self.grid.output_buffer.update_region(content);
+            self.grid.mark_for_rerender();
+        }
+        if !self.borderless {
+            for (client_id, frame) in &self.frame {
+                output.add_character_chunks_to_client(
+                    *client_id,
+                    frame.render_region(region)?,
+                    z_index,
+                )?;
+            }
+        }
+        Ok(())
     }
     fn selectable(&self) -> bool {
         self.selectable

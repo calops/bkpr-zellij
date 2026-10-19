@@ -1047,6 +1047,83 @@ fn test_output_buffer_changed_chunks_in_viewport_partial() {
 }
 
 #[test]
+fn passive_popup_damage_preserves_wide_combining_cells_background_and_pending_rows() {
+    use zellij_utils::pane_size::Viewport;
+    let mut row = Row::from_columns(
+        "a界\u{301}bc".chars().map(TerminalCharacter::new).collect());
+    row.bg_color = Some(AnsiCode::ColorIndex(25));
+    row.columns[1].styles.update(|styles| styles.foreground = Some(AnsiCode::ColorIndex(196)));
+    let expected_wide = vec![row.columns[1].clone(), row.columns[2].clone()];
+    let viewport = vec![row, Row::from_columns(
+        "PENDING".chars().map(TerminalCharacter::new).collect())];
+    let mut buffer = OutputBuffer::default();
+    buffer.clear();
+    buffer.update_region(Viewport { x: 2, y: 0, cols: 1, rows: 1 });
+    buffer.update_region(Viewport { x: 7, y: 0, cols: 2, rows: 1 });
+    buffer.update_region(Viewport { x: 2, y: 1, cols: 1, rows: 1 });
+    buffer.update_line(1);
+    let chunks = buffer.changed_chunks_in_viewport(&viewport, 300, 90, 4, 6);
+    assert_eq!(chunks.len(), 3, "ordinary dirty rows supersede overlapping damage spans");
+    assert_eq!((chunks[0].x, chunks[0].y, chunks[0].width()), (4, 7, 300));
+    assert_eq!((chunks[1].x, chunks[1].y, chunks[1].width()), (5, 6, 2));
+    assert_eq!(chunks[1].terminal_characters, expected_wide);
+    assert_eq!((chunks[2].x, chunks[2].y, chunks[2].width()), (11, 6, 2));
+    for character in &chunks[2].terminal_characters {
+        assert_eq!(character.character, ' ');
+        assert_eq!(character.styles.background, Some(AnsiCode::ColorIndex(25)));
+    }
+    assert_eq!(buffer.changed_rects_in_viewport(90), HashMap::from([(0, 2)]));
+    buffer.clear();
+    assert!(buffer.changed_chunks_in_viewport(&viewport, 300, 90, 4, 6).is_empty());
+}
+
+#[test]
+fn passive_popup_frame_span_keeps_complete_wide_glyphs() {
+    let mut chunk = create_character_chunk_from_str("a界\u{301}bc", 10, 4);
+    chunk.retain_columns(12, 13);
+    assert_eq!(chunk.x, 11);
+    assert_eq!(chunk.width(), 2);
+    assert_eq!(
+        chunk.terminal_characters.iter().map(|character| character.character).collect::<String>(),
+        "界\u{301}"
+    );
+}
+
+#[test]
+fn passive_popup_occlusion_preserves_wide_prefix_and_split_cell_background() {
+    let background = Some(AnsiCode::ColorIndex(25));
+    let mut chunk = create_character_chunk_from_str(&"a界bc".repeat(24), 0, 5);
+    for character in &mut chunk.terminal_characters {
+        character.styles.update(|styles| styles.background = background);
+    }
+    let stack = FloatingPanesStack { layers: vec![create_pane_geom(12, 5, 24, 1)] };
+    let visible = stack.visible_character_chunks(vec![chunk], None).unwrap();
+    let left = visible.iter().find(|chunk| chunk.x == 0).unwrap();
+    assert_eq!(left.width(), 12);
+    assert_eq!(
+        left.terminal_characters.iter().map(|character| character.character).collect::<String>(),
+        "a界bca界bca "
+    );
+    assert_eq!(left.terminal_characters.last().unwrap().styles.background, background);
+    let right = visible.iter().find(|chunk| chunk.x == 36).unwrap();
+    assert_eq!(right.width(), 84);
+    assert_eq!(right.terminal_characters[0].character, '界');
+    for width in [1, 2] {
+        let mut chunk = create_character_chunk_from_str("界bc", 0, 5);
+        chunk.terminal_characters[0].styles.update(|styles| styles.background = background);
+        let drained: Vec<_> = chunk.drain_by_width(width).collect();
+        assert_eq!(drained.iter().map(TerminalCharacter::width).sum::<usize>(), width);
+        assert_eq!(chunk.width(), 4 - width);
+        if width == 1 {
+            assert_eq!(drained[0].styles.background, background);
+            assert_eq!(chunk.terminal_characters[0].styles.background, background);
+        }
+    }
+}
+
+
+
+#[test]
 fn test_pane_defaults_preserved_when_middle_covered() {
     let pane_geom = create_pane_geom(5, 5, 3, 1);
     let stack = FloatingPanesStack {

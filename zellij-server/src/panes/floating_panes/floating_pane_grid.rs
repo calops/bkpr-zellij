@@ -116,6 +116,12 @@ impl<'a> FloatingPaneGrid<'a> {
 
         for (pane_id, pane) in panes.iter_mut() {
             let mut new_pane_geom = pane.current_geom();
+            let new_viewport = super::coordinate_viewport(
+                pane.as_ref(),
+                new_pane_geom.is_pinned,
+                space,
+                new_viewport,
+            );
             let desired_pane_geom = desired_pane_positions
                 .get(pane_id)
                 .with_context(|| {
