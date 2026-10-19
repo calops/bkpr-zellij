@@ -1,4 +1,4 @@
-//! Bound raw OSC 7501 before vte's general-purpose (unbounded) OSC buffer.
+//! Bound raw OSC 7501 and Kitty OSC 5522 before vte's unbounded OSC buffer.
 //! Other terminal sequences still go through vte, unchanged.
 use super::grid::Grid;
 use vte::{Params, Perform};
@@ -8,6 +8,8 @@ enum Mode {
     Ground,
     Escape,
     Prefix(usize),
+    ClipboardPrefix(usize),
+    Clipboard { escape: bool, discarded: bool },
     OtherString { bell: bool, escape: bool },
     Status { escape: bool, discarded: bool },
 }
@@ -92,7 +94,9 @@ impl ProgramStatusVteParser {
                 Mode::Ground => self.mode = Mode::Escape,
                 Mode::Escape => self.mode = after_escape(byte),
                 Mode::Prefix(n) => {
-                    if byte == b"7501;"[n] {
+                    if n == 0 && byte == b'5' {
+                        self.mode = Mode::ClipboardPrefix(1);
+                    } else if byte == b"7501;"[n] {
                         if n == 4 {
                             // The already-forwarded prefix cannot dispatch anything; cancel it.
                             self.parser.advance(&mut performer, b"\x18");
@@ -103,6 +107,46 @@ impl ProgramStatusVteParser {
                     } else {
                         self.mode = if matches!(byte, 7 | 0x18 | 0x1a) { Mode::Ground }
                             else { Mode::OtherString { bell: true, escape: byte == 0x1b } };
+                    }
+                },
+                Mode::ClipboardPrefix(n) => {
+                    if byte == b"5522;"[n] {
+                        if n == 4 {
+                            self.parser.advance(&mut performer, b"\x18");
+                            self.body.clear();
+                            self.body.extend_from_slice(b"5522;");
+                            self.mode = Mode::Clipboard { escape: false, discarded: false };
+                            forward = false;
+                        } else { self.mode = Mode::ClipboardPrefix(n + 1); }
+                    } else {
+                        self.mode = if matches!(byte, 7 | 0x18 | 0x1a) { Mode::Ground }
+                            else { Mode::OtherString { bell: true, escape: byte == 0x1b } };
+                    }
+                },
+                Mode::Clipboard { escape, discarded } => {
+                    forward = false;
+                    if byte == 7 || (escape && byte == b'\\') {
+                        if !discarded {
+                            let params = self.body.split(|b| *b == b';').collect::<Vec<_>>();
+                            performer.osc_dispatch(&params, byte == 7);
+                        }
+                        self.body.clear();
+                        self.mode = Mode::Ground;
+                    } else if matches!(byte, 0x18 | 0x1a) {
+                        self.body.clear();
+                        self.mode = Mode::Ground;
+                    } else if escape {
+                        self.body.clear();
+                        self.parser.advance(&mut performer, b"\x1b");
+                        self.mode = Mode::Escape;
+                        continue;
+                    } else if byte == 0x1b {
+                        self.mode = Mode::Clipboard { escape: true, discarded };
+                    } else if !discarded {
+                        if self.body.len() == zellij_utils::kitty_clipboard::MAX_PACKET_BYTES {
+                            self.body.clear();
+                            self.mode = Mode::Clipboard { escape: false, discarded: true };
+                        } else { self.body.push(byte); }
                     }
                 },
                 Mode::OtherString { bell, escape } => {
@@ -354,5 +398,38 @@ mod tests {
         parser.advance_until_terminated(&mut grid, b"\x1b]133;A\x07", &|| Some(100));
         assert_eq!(grid.program_status.snapshot().len(), 1);
         assert_eq!(grid.program_status.snapshot()[0].state, "idle");
+    }
+
+    #[test]
+    fn kitty_clipboard_raw_fragmentation_and_oversized_packets_are_bounded() {
+        let mut parser = ProgramStatusVteParser::new();
+        let mut grid = grid();
+        let mut hostile = b"\x1b]5522;type=read;".to_vec();
+        hostile.extend(std::iter::repeat_n(b'A', 128 * 1024));
+        hostile.extend_from_slice(b"\x1b\\");
+        for chunk in hostile.chunks(1031) {
+            assert_eq!(parser.advance_until_terminated(&mut grid, chunk, &|| None), chunk.len());
+        }
+        assert!(grid.pending_forwarded_queries.is_empty());
+        assert!(parser.body.capacity() <= 32768);
+        let valid = b"\x1b]5522;type=read:id=pane;Lg==\x1b\\";
+        for byte in valid {
+            assert_eq!(parser.advance_until_terminated(&mut grid, &[*byte], &|| None), 1);
+        }
+        assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboard {
+            bytes: valid.to_vec(), write: false,
+        }]);
+    }
+
+    #[test]
+    fn kitty_clipboard_raw_cancellation_does_not_turn_malformed_metadata_into_a_request() {
+        let mut parser = ProgramStatusVteParser::new();
+        let mut grid = grid();
+        parser.advance_until_terminated(&mut grid, b"\x1b]5522;type=re\x01ad;Lg==\x1b\\", &|| None);
+        assert!(grid.pending_forwarded_queries.is_empty());
+        parser.advance_until_terminated(&mut grid, b"\x1b]5522;type=read;Lg==\x18", &|| None);
+        assert!(grid.pending_forwarded_queries.is_empty());
+        parser.advance_until_terminated(&mut grid, b"\x1b[?5522$p", &|| None);
+        assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboardSupport]);
     }
 }

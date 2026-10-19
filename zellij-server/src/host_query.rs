@@ -60,6 +60,9 @@ pub enum HostQuery {
         selection: char,
         terminator: OscTerminator,
     },
+    /// Kitty OSC 5522, restricted to clipboard requests (never arbitrary OSC).
+    KittyClipboard { bytes: Vec<u8>, write: bool },
+    KittyClipboardSupport,
     /// `CSI ? 996 n` — query the host terminal's color-palette theme
     /// mode (light or dark). NOT forwarded to the host. Zellij has
     /// already queried the host once at startup (via the client's
@@ -79,6 +82,8 @@ impl HostQuery {
         match self {
             HostQuery::TextAreaPixelSize => b"\x1b[14t".to_vec(),
             HostQuery::CharacterCellPixelSize => b"\x1b[16t".to_vec(),
+            HostQuery::KittyClipboard { bytes, .. } => bytes.clone(),
+            HostQuery::KittyClipboardSupport => b"\x1b[?5522$p".to_vec(),
             HostQuery::DefaultForeground { terminator } => {
                 let mut v = b"\x1b]10;?".to_vec();
                 v.extend_from_slice(terminator.as_bytes());
@@ -111,8 +116,29 @@ impl HostQuery {
         }
     }
 
+    pub fn clipboard_error_reply(&self, status: &[u8]) -> Vec<u8> {
+        if let HostQuery::KittyClipboard { bytes, write } = self {
+            let body = match bytes.get(2..) {
+                Some(body) => body,
+                None => return Vec::new(),
+            };
+            let end = body.iter().position(|b| *b == 0x07 || *b == 0x1b).unwrap_or(body.len());
+            if let Some(packet) = zellij_utils::kitty_clipboard::Packet::parse(&body[..end]) {
+                let kind = if *write { "write" } else { "read" };
+                let payload = format!("5522;type={}:status={}", kind, String::from_utf8_lossy(status));
+                let reply = zellij_utils::kitty_clipboard::Packet::parse(payload.as_bytes()).unwrap();
+                let id = packet.id();
+                return reply.with_id(packet.field(b"id").map(|_| id.as_slice()), b"\x1b\\");
+            }
+        }
+        Vec::new()
+    }
+
     pub fn empty_reply_bytes(&self) -> Vec<u8> {
         match self {
+            HostQuery::KittyClipboardSupport => b"\x1b[?5522;0$y".to_vec(),
+            // No synthetic clipboard contents: unsupported hosts remain silent.
+            HostQuery::KittyClipboard { .. } => Vec::new(),
             HostQuery::ClipboardContent {
                 selection,
                 terminator,

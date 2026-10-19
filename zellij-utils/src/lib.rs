@@ -11,6 +11,7 @@ mod home_unix;
 mod home_windows;
 pub mod input;
 pub mod kdl;
+pub mod kitty_clipboard;
 pub mod nested_session_contract;
 pub mod pane_size;
 pub mod plugin_api;

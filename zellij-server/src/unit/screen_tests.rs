@@ -9645,6 +9645,55 @@ fn a_queued_clipboard_read_for_a_closed_pane_is_skipped() {
     assert!(screen.clipboard_forward_in_flight_token.is_none());
 }
 
+fn kitty_clipboard_query(write: bool) -> HostQuery {
+    HostQuery::KittyClipboard {
+        bytes: if write {
+            b"\x1b]5522;type=write:id=app\x1b\\\x1b]5522;type=wdata\x1b\\".to_vec()
+        } else {
+            b"\x1b]5522;type=read:id=app;Lg==\x1b\\".to_vec()
+        },
+        write,
+    }
+}
+
+#[test]
+fn kitty_clipboard_opt_out_returns_permission_denied_but_does_not_disable_writes() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 80, rows: 20 });
+    screen.forward_host_query(PaneId::Terminal(3), kitty_clipboard_query(false));
+    assert!(capture.drain_forward_queries().is_empty());
+    assert_eq!(capture.drain_pty_writes(), vec![(b"\x1b]5522;type=read:status=EPERM:id=app\x1b\\".to_vec(), 3)]);
+    let token = screen.forward_host_query(PaneId::Terminal(4), kitty_clipboard_query(true));
+    assert_eq!(capture.drain_forward_queries_with_async(), vec![(token, kitty_clipboard_query(true).to_query_bytes(), true)]);
+}
+
+#[test]
+fn kitty_clipboard_contents_only_resume_the_originating_pane_and_stale_tokens_are_ignored() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 80, rows: 20 });
+    screen.paste_buffer_read_enabled = true;
+    let token = screen.forward_host_query(PaneId::Terminal(8), kitty_clipboard_query(false));
+    let response = b"\x1b]5522;type=read:status=OK:id=app\x1b\\\
+        \x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n:id=app;iVBORw==\x1b\\\
+        \x1b]5522;type=read:status=DONE:id=app\x1b\\".to_vec();
+    screen.handle_forwarded_reply_from_host(token, response.clone()).unwrap();
+    assert_eq!(capture.drain_pty_writes(), vec![(response, 8)]);
+    let next = screen.forward_host_query(PaneId::Terminal(9), kitty_clipboard_query(false));
+    screen.handle_forwarded_reply_from_host(token, b"stale clipboard".to_vec()).unwrap();
+    assert!(capture.drain_pty_writes().is_empty());
+    assert_eq!(screen.clipboard_forward_in_flight_token, Some(next));
+    screen.handle_forwarded_reply_from_host(next, Vec::new()).unwrap();
+    assert_eq!(capture.drain_pty_writes(), vec![(Vec::new(), 9)], "an unsupported host must not invent text or image contents");
+    assert!(screen.clipboard_forward_in_flight_token.is_none());
+}
+
+#[test]
+fn kitty_clipboard_negotiation_reports_unsupported_when_the_host_is_silent() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 80, rows: 20 });
+    let token = screen.forward_host_query(PaneId::Terminal(3), HostQuery::KittyClipboardSupport);
+    assert_eq!(capture.drain_forward_queries(), vec![(token, b"\x1b[?5522$p".to_vec())]);
+    screen.handle_forwarded_reply_from_host(token, Vec::new()).unwrap();
+    assert_eq!(capture.drain_pty_writes(), vec![(b"\x1b[?5522;0$y".to_vec(), 3)]);
+}
+
 #[test]
 fn clear_nested_guest_does_not_notify_guest_focus_lost_on_teardown() {
     let size = Size { cols: 80, rows: 20 };
@@ -14101,4 +14150,19 @@ pub fn reported_pixel_dimensions_are_applied_to_existing_ptys() {
         "existing ptys are resized with pixel dimensions once these are reported, got: {:?}",
         resizes_after_reply
     );
+}
+
+#[test]
+fn kitty_clipboard_queue_is_bounded_and_reports_busy_to_the_rejected_pane() {
+    let (mut screen, capture) = create_new_screen_with_forward_capture(Size { cols: 80, rows: 20 });
+    screen.paste_buffer_read_enabled = true;
+    screen.forward_host_query(PaneId::Terminal(1), kitty_clipboard_query(false));
+    for pane in 2..34 {
+        screen.forward_host_query(PaneId::Terminal(pane), kitty_clipboard_query(false));
+    }
+    assert_eq!(screen.clipboard_forward_queue.len(), 32);
+    screen.forward_host_query(PaneId::Terminal(99), kitty_clipboard_query(false));
+    assert_eq!(screen.clipboard_forward_queue.len(), 32);
+    assert_eq!(capture.drain_pty_writes(), vec![(b"\x1b]5522;type=read:status=EBUSY:id=app\x1b\\".to_vec(), 99)]);
+    assert_eq!(capture.drain_forward_queries().len(), 1);
 }
