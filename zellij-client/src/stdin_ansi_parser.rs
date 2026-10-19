@@ -1214,6 +1214,21 @@ impl StdinAnsiParser {
                 match apc_status(rest) {
                     SeqStatus::Complete(len) => {
                         let payload = &rest[2..len - 2];
+                        let capability_reply = payload.strip_prefix(b"1+r")
+                            .or_else(|| payload.strip_prefix(b"0+r"));
+                        let recognized = capability_reply.is_some_and(|capabilities| {
+                            capabilities.split(|byte| *byte == b';').all(|capability| {
+                                matches!(capability.split(|byte| *byte == b'=').next(),
+                                    Some(b"524742") | Some(b"5463"))
+                            })
+                        });
+                        if !recognized {
+                            // DCS is also application/input data. Only our
+                            // RGB/Tc capability replies belong to this parser.
+                            out.extend_from_slice(&rest[..len]);
+                            i += len;
+                            continue;
+                        }
                         if let Some(capabilities) = payload.strip_prefix(b"1+r") {
                             if capabilities.split(|byte| *byte == b';').any(|capability| {
                                 matches!(capability,

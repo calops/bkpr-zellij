@@ -2590,7 +2590,7 @@ fn osc_rgb_and_unknown_capabilities_do_not_advertise_truecolor() {
     parser.expect_host_replies();
     let out = parser.feed(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1bP1+r436f=323536\x1b\\\x1bP0+r5463\x1b\\\x1b[?1;2c");
     assert!(!out.replies.iter().any(|reply| matches!(reply, HostReply::TruecolorSupport(_))));
-    assert!(out.residue.is_empty());
+    assert_eq!(out.residue, b"\x1bP1+r436f=323536\x1b\\");
 }
 
 #[test]
@@ -2615,5 +2615,25 @@ fn pasted_capability_responses_are_literal_for_every_fragment_boundary() {
         assert!(!first.replies.iter().chain(second.replies.iter()).any(|reply| {
             matches!(reply, HostReply::TruecolorSupport(_))
         }), "split {}", split);
+    }
+}
+
+#[test]
+fn foreign_dcs_remains_literal_at_every_fragment_boundary() {
+    for response in [
+        b"\x1bP1$qm\x1b\\q".as_slice(),
+        b"\x1bP1+r436f=323536\x1b\\q".as_slice(),
+        b"\x1bP0+r73657472676266\x1b\\q".as_slice(),
+    ] {
+        for split in 0..=response.len() {
+            let mut parser = StdinAnsiParser::new();
+            parser.expect_host_replies();
+            let first = parser.feed(&response[..split]);
+            let second = parser.feed(&response[split..]);
+            assert_eq!([first.residue, second.residue].concat(), response, "split {}", split);
+            assert!(!first.replies.iter().chain(second.replies.iter()).any(|reply| {
+                matches!(reply, HostReply::TruecolorSupport(_))
+            }));
+        }
     }
 }
