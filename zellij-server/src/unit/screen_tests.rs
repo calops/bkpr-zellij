@@ -179,23 +179,28 @@ fn route_arbitrary_action_to_server(
     .unwrap();
 }
 
+type TerminalSizes = Arc<Mutex<HashMap<u32, (u16, u16)>>>;
+
 #[derive(Clone, Default)]
 struct FakeInputOutput {
     fake_filesystem: Arc<Mutex<HashMap<String, String>>>,
     server_to_client_messages: Arc<Mutex<HashMap<ClientId, Vec<ServerToClientMsg>>>>,
     tty_stdin_bytes: Arc<Mutex<BTreeMap<u32, Vec<u8>>>>,
+    terminal_sizes: Option<TerminalSizes>,
 }
 
 impl ServerOsApi for FakeInputOutput {
     fn set_terminal_size_using_terminal_id(
         &self,
-        _terminal_id: u32,
-        _cols: u16,
-        _rows: u16,
+        terminal_id: u32,
+        cols: u16,
+        rows: u16,
         _width_in_pixels: Option<u16>,
         _height_in_pixels: Option<u16>,
     ) -> Result<()> {
-        // noop
+        if let Some(sizes) = &self.terminal_sizes {
+            sizes.lock().unwrap().insert(terminal_id, (cols, rows));
+        }
         Ok(())
     }
     fn spawn_terminal(
@@ -1023,32 +1028,57 @@ fn shared_sidebar_width_survives_terminal_clamping_and_multiple_clients() {
 
 #[test]
 fn shared_sidebar_native_mouse_gutter_keeps_focus_cursor_and_updates_every_tab() {
-    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
-    shared_width_tab(&mut screen, 0, 38);
-    shared_width_tab(&mut screen, 1, 38);
-    screen.go_to_tab(1, 1).unwrap();
-    screen.tabs.get_mut(&0).unwrap().handle_pty_bytes(
-        1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
-    ).unwrap();
-    let cursor = |screen: &Screen| {
-        screen.tabs[&0].get_tiled_panes()
-            .find(|(id, _)| **id == PaneId::Terminal(1))
-            .unwrap().1.cursor_coordinates(Some(1))
-    };
-    let before_cursor = cursor(&screen);
-    let edge = shared_width_columns(&screen, 0) - 1;
-    screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
-    screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
-    screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
-    let resized = shared_width_columns(&screen, 0);
-    assert!(resized > 38);
-    assert_eq!(shared_width_columns(&screen, 1), resized);
-    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
-    assert_eq!(cursor(&screen), before_cursor);
-    for tab in screen.tabs.values() {
-        let sidebar = tab.get_tiled_panes().find(|(id, _)| matches!(id, PaneId::Plugin(_)))
-            .unwrap().1;
-        assert_eq!(sidebar.get_content_columns() + 1, sidebar.cols());
+    for create_second_after_resize in [false, true] {
+        let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+        shared_width_tab(&mut screen, 0, 38);
+        if !create_second_after_resize {
+            shared_width_tab(&mut screen, 1, 38);
+        }
+        screen.go_to_tab(1, 1).unwrap();
+        screen.tabs.get_mut(&0).unwrap().handle_pty_bytes(
+            1, b"\x1b[?25l\x1b[3;8HAPP".to_vec(),
+        ).unwrap();
+        let cursor = |screen: &Screen, tab_id: usize, terminal_id| {
+            screen.tabs[&tab_id].get_pane_with_id(PaneId::Terminal(terminal_id))
+                .unwrap().cursor_coordinates(Some(1))
+        };
+        let before_a_cursor = cursor(&screen, 0, 1);
+        let edge = u16::try_from(shared_width_columns(&screen, 0) - 1).unwrap();
+        screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
+        let resized_a = shared_width_columns(&screen, 0);
+        assert!(resized_a > 38);
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+        assert_eq!(cursor(&screen, 0, 1), before_a_cursor);
+        if create_second_after_resize {
+            shared_width_tab(&mut screen, 1, 38);
+        }
+        assert_eq!(shared_width_columns(&screen, 1), resized_a);
+        screen.tabs.get_mut(&1).unwrap().handle_pty_bytes(
+            2, b"\x1b[?25l\x1b[4;6HBPP".to_vec(),
+        ).unwrap();
+        let before_b_cursor = cursor(&screen, 1, 2);
+        screen.go_to_tab(1, 1).unwrap();
+        screen.go_to_tab(2, 1).unwrap();
+        let edge = u16::try_from(shared_width_columns(&screen, 1) - 1).unwrap();
+        screen.handle_mouse_event(MouseEvent::new_left_press_event(Position::new(10, edge)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_motion_event(Position::new(10, edge + 10)), 1);
+        screen.handle_mouse_event(MouseEvent::new_left_release_event(Position::new(10, edge + 10)), 1);
+        let resized_b = shared_width_columns(&screen, 1);
+        assert!(resized_b > resized_a, "the second tab must retain native gutter resizing");
+        assert_eq!(shared_width_columns(&screen, 0), resized_b);
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(2)));
+        assert_eq!(cursor(&screen, 0, 1), before_a_cursor);
+        assert_eq!(cursor(&screen, 1, 2), before_b_cursor);
+        screen.go_to_tab(1, 1).unwrap();
+        assert_eq!(shared_width_columns(&screen, 0), resized_b);
+        assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+        for tab in screen.tabs.values() {
+            let sidebar = tab.get_tiled_panes().find(|(id, _)| matches!(id, PaneId::Plugin(_)))
+                .unwrap().1;
+            assert_eq!(sidebar.get_content_columns() + 1, sidebar.cols());
+        }
     }
 }
 
@@ -1165,6 +1195,59 @@ fn shared_sidebar_fit_reference_departure_publishes_restored_width_immediately()
     let sidebar = panes.panes[&0].iter().find(|pane| pane.is_plugin).unwrap();
     assert_eq!(sidebar.pane_columns, 47);
     assert_eq!(sidebar.pane_content_columns, 46);
+}
+
+#[test]
+fn shared_sidebar_width_resizes_inactive_stack_list_members_and_their_ptys() {
+    use zellij_utils::data::ResizeStrategy;
+    let mut screen = create_new_screen(Size { cols: 200, rows: 30 }, true, true);
+    let terminal_sizes = TerminalSizes::default();
+    screen.bus.os_input = Some(Box::new(FakeInputOutput {
+        terminal_sizes: Some(terminal_sizes.clone()),
+        ..FakeInputOutput::default()
+    }));
+    *screen.stacked_pane_list.borrow_mut() = true;
+    shared_width_tab(&mut screen, 0, 38);
+    shared_width_tab(&mut screen, 1, 38);
+    screen.tabs.get_mut(&1).unwrap().new_pane(
+        PaneId::Terminal(3), None, None, false, true,
+        NewPanePlacement::Stacked {
+            pane_id_to_stack_under: Some(PaneId::Terminal(2)),
+            borderless: None,
+        },
+        Some(1), None,
+    ).unwrap();
+    screen.go_to_tab(1, 1).unwrap();
+    let assert_hidden_size = |screen: &Screen| {
+        let tab = &screen.tabs[&1];
+        let visible = tab.get_pane_with_id(PaneId::Terminal(3)).unwrap();
+        let hidden = tab.get_suppressed_panes()
+            .find(|(id, _)| **id == PaneId::Terminal(2))
+            .expect("the old stack member must remain suppressed").1;
+        assert_eq!(hidden.1.position_and_size(), visible.position_and_size());
+        assert_eq!(hidden.1.get_content_offset(), visible.get_content_offset());
+        assert_eq!(
+            terminal_sizes.lock().unwrap().get(&2).copied(),
+            Some((visible.get_content_columns() as u16, visible.get_content_rows() as u16)),
+        );
+    };
+    assert_hidden_size(&screen);
+    screen.tabs.get_mut(&0).unwrap().resize_pane_with_id(
+        ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
+        PaneId::Plugin(10),
+    ).unwrap();
+    screen.log_and_report_session_state().unwrap();
+    assert!(shared_width_columns(&screen, 0) > 38);
+    assert_eq!(shared_width_columns(&screen, 0), shared_width_columns(&screen, 1));
+    assert_hidden_size(&screen);
+    for columns in [80, 40, 200] {
+        for tab in screen.tabs.values_mut() {
+            tab.resize_whole_tab(Size { cols: columns, rows: 30 }).unwrap();
+        }
+        screen.log_and_report_session_state().unwrap();
+        assert_hidden_size(&screen);
+    }
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
 }
 
 fn tab_switch_mouse_fixture(
