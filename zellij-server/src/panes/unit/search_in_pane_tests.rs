@@ -56,7 +56,7 @@ fn create_pane() -> TerminalPane {
         None,
     ); // 0 is the pane index
     let content = read_fixture();
-    terminal_pane.handle_pty_bytes(content);
+    terminal_pane.handle_pty_bytes(content, &|| None);
     terminal_pane
 }
 
@@ -374,11 +374,9 @@ pub fn searching_whole_word() {
 #[test]
 pub fn searching_whole_word_across_line_wrap() {
     let mut terminal_pane = create_pane();
-    terminal_pane.handle_pty_bytes(
-        "a:--:aaaaaaaaa:--:--:--:aaaaaaaaaaa:--: :--: :--: aaa :--::--: aaa"
-            .as_bytes()
-            .to_vec(),
-    );
+    terminal_pane.handle_pty_bytes("a:--:aaaaaaaaa:--:--:--:aaaaaaaaaaa:--: :--: :--: aaa :--::--: aaa"
+        .as_bytes()
+        .to_vec(), &|| None);
     terminal_pane.grid.change_size(20, 5);
     terminal_pane.update_search_term(":--:");
     assert_snapshot!(

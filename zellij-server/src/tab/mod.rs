@@ -291,7 +291,7 @@ pub trait Pane {
     fn reset_size_and_position_override(&mut self);
     fn set_geom(&mut self, position_and_size: PaneGeom);
     fn set_geom_override(&mut self, pane_geom: PaneGeom);
-    fn handle_pty_bytes(&mut self, _bytes: VteBytes) {}
+    fn handle_pty_bytes(&mut self, _bytes: VteBytes, _read_foreground: &dyn Fn() -> Option<i32>) {}
     fn handle_plugin_bytes(&mut self, _client_id: ClientId, _bytes: VteBytes) {}
     fn show_cursor(&mut self, _client_id: ClientId, _cursor_position: Option<(usize, usize)>) {}
     /// Returns the cursor position and whether it is visible.
@@ -405,6 +405,12 @@ pub trait Pane {
     }
     fn program_status(&self) -> Vec<zellij_utils::data::ProgramStatus> {
         Vec::new()
+    }
+    fn drain_program_status(&mut self) -> Option<Vec<zellij_utils::data::ProgramStatus>> {
+        None
+    }
+    fn drain_title_changed(&mut self) -> bool {
+        false
     }
 
     fn right_boundary_x_coords(&self) -> usize {
@@ -4215,8 +4221,23 @@ impl Tab {
         }
         Ok(())
     }
+    fn publish_program_status(
+        &self,
+        pid: u32,
+        records: Option<&[zellij_utils::data::ProgramStatus]>,
+    ) -> Result<()> {
+        let Some(records) = records else {
+            return Ok(());
+        };
+        self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+            None,
+            None,
+            crate::panes::program_status::status_event(pid, records)?,
+        )]))
+    }
     fn process_pty_bytes(&mut self, pid: u32, bytes: VteBytes) -> Result<()> {
         let err_context = || format!("failed to process pty bytes from pid {pid}");
+        let os_api = self.os_api.as_ref();
 
         if let Some(terminal_output) = self
             .tiled_panes
@@ -4238,7 +4259,9 @@ impl Tab {
                 )
                 .with_context(err_context)?;
             }
-            terminal_output.handle_pty_bytes(bytes);
+            terminal_output.handle_pty_bytes(bytes, &|| os_api.foreground_process_group(pid));
+            let program_status = terminal_output.drain_program_status();
+            let title_changed = terminal_output.drain_title_changed();
             let messages_to_pty = terminal_output.drain_messages_to_pty();
             let forwarded_queries = terminal_output.drain_forwarded_queries();
             // If at least one forward was produced, the pane stopped
@@ -4258,6 +4281,12 @@ impl Tab {
             let clipboard_update = terminal_output.drain_clipboard_update();
             let desktop_notifications = terminal_output.drain_desktop_notifications();
             let osc7_cwd = terminal_output.drain_osc7_cwd();
+            self.publish_program_status(pid, program_status.as_deref())
+                .with_context(err_context)?;
+            if title_changed {
+                self.senders.send_to_screen(ScreenInstruction::PaneTitleChanged)
+                    .with_context(err_context)?;
+            }
             for message in messages_to_pty {
                 self.write_to_pane_id_without_preprocessing(message, PaneId::Terminal(pid))
                     .with_context(err_context)?;
@@ -5863,6 +5892,22 @@ impl Tab {
                 .hold_pane(id, exit_status, is_first_run, run_command);
         } else if let Some(pane) = self.suppressed_panes.values_mut().find(|p| p.1.pid() == id) {
             pane.1.hold(exit_status, is_first_run, run_command);
+        }
+        if let PaneId::Terminal(pid) = id {
+            let records = self
+                .floating_panes
+                .get_pane_mut(id)
+                .or_else(|| self.tiled_panes.get_pane_mut(id))
+                .or_else(|| {
+                    self.suppressed_panes
+                        .values_mut()
+                        .find(|(_, pane)| pane.pid() == id)
+                        .map(|(_, pane)| pane)
+                })
+                .and_then(|pane| pane.drain_program_status());
+            if let Some(records) = records {
+                self.publish_program_status(pid, Some(&records)).non_fatal();
+            }
         }
     }
     pub fn replace_pane_with_suppressed_pane(

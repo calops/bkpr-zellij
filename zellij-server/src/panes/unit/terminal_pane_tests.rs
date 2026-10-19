@@ -67,7 +67,7 @@ pub fn scrolling_inside_a_pane() {
     for i in 0..30 {
         writeln!(&mut text_to_fill_pane, "\rline {}", i + 1).unwrap();
     }
-    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes());
+    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes(), &|| None);
     terminal_pane.scroll_up(10, fake_client_id);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
     terminal_pane.scroll_down(3, fake_client_id);
@@ -124,7 +124,7 @@ pub fn sixel_image_inside_terminal_pane() {
         #1!14@
         \u{1b}\\";
 
-    terminal_pane.handle_pty_bytes(Vec::from(sixel_image_bytes.as_bytes()));
+    terminal_pane.handle_pty_bytes(Vec::from(sixel_image_bytes.as_bytes()), &|| None);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
 }
 
@@ -172,7 +172,7 @@ pub fn partial_sixel_image_inside_terminal_pane() {
         None,
     ); // 0 is the pane index
     let pane_content = read_fixture("sixel-image-500px.six");
-    terminal_pane.handle_pty_bytes(pane_content);
+    terminal_pane.handle_pty_bytes(pane_content, &|| None);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
 }
 
@@ -220,7 +220,7 @@ pub fn overflowing_sixel_image_inside_terminal_pane() {
         None,
     ); // 0 is the pane index
     let pane_content = read_fixture("sixel-image-500px.six");
-    terminal_pane.handle_pty_bytes(pane_content);
+    terminal_pane.handle_pty_bytes(pane_content, &|| None);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
 }
 
@@ -272,8 +272,8 @@ pub fn scrolling_through_a_sixel_image() {
     }
     writeln!(&mut text_to_fill_pane, "\r").unwrap();
     let pane_sixel_content = read_fixture("sixel-image-500px.six");
-    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes());
-    terminal_pane.handle_pty_bytes(pane_sixel_content);
+    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes(), &|| None);
+    terminal_pane.handle_pty_bytes(pane_sixel_content, &|| None);
     terminal_pane.scroll_up(10, fake_client_id);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
     terminal_pane.scroll_down(3, fake_client_id);
@@ -330,9 +330,9 @@ pub fn multiple_sixel_images_in_pane() {
     }
     writeln!(&mut text_to_fill_pane, "\r").unwrap();
     let pane_sixel_content = read_fixture("sixel-image-500px.six");
-    terminal_pane.handle_pty_bytes(pane_sixel_content.clone()); // one image above text
-    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes());
-    terminal_pane.handle_pty_bytes(pane_sixel_content); // one image below text
+    terminal_pane.handle_pty_bytes(pane_sixel_content.clone(), &|| None); // one image above text
+    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes(), &|| None);
+    terminal_pane.handle_pty_bytes(pane_sixel_content, &|| None); // one image below text
     terminal_pane.scroll_up(20, fake_client_id); // scroll up to see both images
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
 }
@@ -386,9 +386,9 @@ pub fn resizing_pane_with_sixel_images() {
     }
     writeln!(&mut text_to_fill_pane, "\r").unwrap();
     let pane_sixel_content = read_fixture("sixel-image-500px.six");
-    terminal_pane.handle_pty_bytes(pane_sixel_content.clone());
-    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes());
-    terminal_pane.handle_pty_bytes(pane_sixel_content);
+    terminal_pane.handle_pty_bytes(pane_sixel_content.clone(), &|| None);
+    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes(), &|| None);
+    terminal_pane.handle_pty_bytes(pane_sixel_content, &|| None);
     let mut new_win_size = PaneGeom::default();
     new_win_size.cols.set_inner(100);
     new_win_size.rows.set_inner(20);
@@ -445,9 +445,9 @@ pub fn changing_character_cell_size_with_sixel_images() {
     }
     writeln!(&mut text_to_fill_pane, "\r").unwrap();
     let pane_sixel_content = read_fixture("sixel-image-500px.six");
-    terminal_pane.handle_pty_bytes(pane_sixel_content.clone());
-    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes());
-    terminal_pane.handle_pty_bytes(pane_sixel_content);
+    terminal_pane.handle_pty_bytes(pane_sixel_content.clone(), &|| None);
+    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes(), &|| None);
+    terminal_pane.handle_pty_bytes(pane_sixel_content, &|| None);
     // here the new_win_size is the same as the old one, we just update the character_cell_size
     // which will be picked up upon resize (which is why we're doing set_geom below)
     let mut new_win_size = PaneGeom::default();
@@ -511,12 +511,12 @@ pub fn keep_working_after_corrupted_sixel_image() {
         #1!14@
         \u{1b}\\";
 
-    terminal_pane.handle_pty_bytes(Vec::from(sixel_image_bytes.as_bytes()));
+    terminal_pane.handle_pty_bytes(Vec::from(sixel_image_bytes.as_bytes()), &|| None);
     let mut text_to_fill_pane = String::new();
     for i in 0..5 {
         writeln!(&mut text_to_fill_pane, "\rline {}", i + 1).unwrap();
     }
-    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes());
+    terminal_pane.handle_pty_bytes(text_to_fill_pane.into_bytes(), &|| None);
     assert_snapshot!(format!("{:?}", terminal_pane.grid));
 }
 
@@ -777,7 +777,7 @@ pub fn has_bell_reflects_grid_ring_bell() {
         "Initially has_bell should be false"
     );
 
-    terminal_pane.handle_pty_bytes(vec![7u8]);
+    terminal_pane.handle_pty_bytes(vec![7u8], &|| None);
     assert!(
         terminal_pane.has_bell(),
         "has_bell should be true after pty bell byte"

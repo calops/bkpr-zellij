@@ -1329,27 +1329,31 @@ impl WasmBridge {
         &self,
         plugin_id: PluginId,
         client_id: ClientId,
-        events: HashSet<EventType>,
-    ) {
-        // Check if this plugin is a background plugin (tab_index == None)
-        let is_background = {
-            let mut plugin_map = self.plugin_map.lock().unwrap();
-            plugin_map
-                .running_plugins_and_subscriptions()
-                .iter()
-                .any(|(pid, cid, rp, _)| {
-                    *pid == plugin_id
-                        && *cid == client_id
-                        && rp.lock().unwrap().store.data().tab_index.is_none()
-                })
+    ) -> Result<()> {
+        let subscribed_events = {
+            let mut plugin_map = self.plugin_map.lock().to_anyhow()?;
+            let mut subscribed_events = None;
+            for (pid, cid, running_plugin, subscriptions) in
+                plugin_map.running_plugins_and_subscriptions()
+            {
+                if pid == plugin_id
+                    && cid == client_id
+                    && running_plugin.lock().to_anyhow()?.store.data().tab_index.is_none()
+                {
+                    subscribed_events = Some(subscriptions.lock().to_anyhow()?.clone());
+                    break;
+                }
+            }
+            subscribed_events
         };
-        if is_background {
-            let _ = self.senders.send_to_screen(
+        if let Some(events) = subscribed_events {
+            self.senders.send_to_screen(
                 ScreenInstruction::UpdateBackgroundPluginSubscriptions(
                     plugin_id, client_id, events,
                 ),
-            );
+            )?;
         }
+        Ok(())
     }
 
     pub fn send_initial_keybinds_to_plugin(&self, plugin_id: PluginId, client_id: ClientId) {
@@ -2102,6 +2106,9 @@ fn check_event_permission(
         | Event::HintText(..)
         | Event::ActivePaneScroll(..)
         | Event::InputReceived => PermissionType::ReadApplicationState,
+        Event::CustomMessage(name, _) if name == "program_status" => {
+            PermissionType::ReadApplicationState
+        },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
         Event::PaneRenderReport(..) => PermissionType::ReadPaneContents,
         Event::UserAction(..) => PermissionType::InterceptInput,
