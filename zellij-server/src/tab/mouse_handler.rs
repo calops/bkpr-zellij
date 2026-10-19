@@ -389,8 +389,49 @@ impl MouseHandler {
             return Ok(effect);
         }
         let context = Self::gather_mouse_event_context(tab, event, client_id, passthrough_pane_id)?;
-        let action = Self::determine_mouse_action(event, &context)?;
+        let action = match Self::tiled_gutter_behind_passive_popup(tab, event, &context) {
+            Some(action) => action,
+            None => Self::determine_mouse_action(event, &context)?,
+        };
         Self::execute_mouse_action(tab, action, event, client_id)
+    }
+
+    fn tiled_gutter_behind_passive_popup(
+        tab: &Tab,
+        event: &MouseEvent,
+        context: &MouseEventContext,
+    ) -> Option<MouseAction> {
+        if event.event_type != MouseEventType::Press || !event.left || event.ctrl || event.alt
+            || context.pane_being_resized || context.selecting_with_mouse || context.pane_being_moved
+            || tab.tiled_panes.fullscreen_is_active()
+        {
+            return None;
+        }
+        let popup_id = context.clicked_pane?.pane_id;
+        if !matches!(popup_id, PaneId::Plugin(_)) {
+            return None;
+        }
+        let popup = tab.floating_panes.get_pane(popup_id)?;
+        if popup.selectable() || !popup.borderless() || !popup.current_geom().is_pinned
+            || event.position.column() != popup.x()
+        {
+            return None;
+        }
+        // Passive details outlines may occupy the separator, but not own its
+        // resize gesture. Hover and every popup content cell keep normal routing.
+        tab.tiled_panes.get_panes().find_map(|(pane_id, pane)| {
+            if event.position.column() != pane.x() + pane.cols().saturating_sub(1)
+                || !pane.position_is_on_frame(&event.position)
+            {
+                return None;
+            }
+            Some(MouseAction::StartResize {
+                pane_id: *pane_id,
+                edge: pane.get_edge_at_position(&event.position)?,
+                is_floating: false,
+                position: event.position,
+            })
+        })
     }
 
     fn notify_passive_plugins_of_outside_press(
