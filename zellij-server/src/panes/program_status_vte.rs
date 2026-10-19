@@ -23,6 +23,11 @@ fn after_escape(byte: u8) -> Mode {
     }
 }
 
+// VTE dispatches a buffered OSC even when CAN cancels it. This performer
+// discards only our synthetic prefix cancellation, never actual pane input.
+struct DiscardInterceptedOscPrefix;
+impl Perform for DiscardInterceptedOscPrefix {}
+
 struct ProgramStatusPerformer<'a> {
     grid: &'a mut Grid,
     read_foreground: &'a dyn Fn() -> Option<i32>,
@@ -98,8 +103,8 @@ impl ProgramStatusVteParser {
                         self.mode = Mode::ClipboardPrefix(1);
                     } else if byte == b"7501;"[n] {
                         if n == 4 {
-                            // The already-forwarded prefix cannot dispatch anything; cancel it.
-                            self.parser.advance(&mut performer, b"\x18");
+                            // Cancel internal parser state without exposing a partial OSC.
+                            self.parser.advance(&mut DiscardInterceptedOscPrefix, b"\x18");
                             self.body.clear();
                             self.mode = Mode::Status { escape: false, discarded: false };
                             forward = false;
@@ -112,7 +117,7 @@ impl ProgramStatusVteParser {
                 Mode::ClipboardPrefix(n) => {
                     if byte == b"5522;"[n] {
                         if n == 4 {
-                            self.parser.advance(&mut performer, b"\x18");
+                            self.parser.advance(&mut DiscardInterceptedOscPrefix, b"\x18");
                             self.body.clear();
                             self.body.extend_from_slice(b"5522;");
                             self.mode = Mode::Clipboard { escape: false, discarded: false };
@@ -489,5 +494,30 @@ mod tests {
             assert_eq!(grid.pending_messages_to_pty,
                 vec![b"\x1b]5522;type=write:status=EINVAL:id=writer\x1b\\".to_vec()]);
         }
+    }
+
+    #[test]
+    fn kitty_clipboard_raw_multi_packet_write_never_dispatches_internal_cancelled_prefixes() {
+        let mut parser = ProgramStatusVteParser::new();
+        let mut grid = grid();
+        let packets: &[&[u8]] = &[
+            b"\x1b]5522;type=write:loc=primary:id=writer\x1b\\",
+            b"\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;iVBO\x1b\\",
+            b"\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;Rw0KGgo=\x07",
+            b"\x1b]5522;type=walias:mime=aW1hZ2UvcG5n;aW1hZ2UveC1wbmc=\x1b\\",
+            b"\x1b]5522;type=wdata\x1b\\",
+        ];
+        for (index, packet) in packets.iter().enumerate() {
+            for chunk in packet.chunks(3) {
+                assert_eq!(parser.advance_until_terminated(&mut grid, chunk, &|| None), chunk.len());
+            }
+            assert!(grid.pending_messages_to_pty.is_empty(), "valid packet {index} must not generate a write error");
+            if index + 1 < packets.len() {
+                assert!(grid.pending_forwarded_queries.is_empty(), "write must remain atomic until final wdata");
+            }
+        }
+        assert_eq!(grid.pending_forwarded_queries, vec![crate::host_query::HostQuery::KittyClipboard {
+            bytes: packets.concat(), write: true,
+        }]);
     }
 }

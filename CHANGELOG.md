@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * fix: preserve split clipboard terminators during idle discard and keep buffered reply failures bound to their original request.
 * fix: report oversized clipboard protocol packets as invalid without forwarding partial writes.
 * fix: keep oversized or abandoned OSC 52 replies out of keyboard input and stop inventing empty clipboard contents on timeout or cancellation.
+* fix: keep internal parser prefix cancellation from aborting valid multi-packet clipboard writes.
 
 ## [0.45.1] - 2026-08-28
 * fix: nested-session detection over SSH (https://github.com/zellij-org/zellij/pull/5522)
