@@ -1109,8 +1109,10 @@ impl WasmBridge {
         &mut self,
         messages: Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
         shutdown_sender: Sender<()>,
-        mut notification_end: Option<NotificationEnd>,
+        notification_end: Option<NotificationEnd>,
     ) -> Result<()> {
+        // A broadcast must not release the next key before every recipient has handled it.
+        let notification_end = notification_end.map(Arc::new);
         let plugins_to_update: Vec<(
             PluginId,
             ClientId,
@@ -1151,7 +1153,7 @@ impl WasmBridge {
                         let plugin_id = *plugin_id;
                         let client_id = *client_id;
                         let _s = shutdown_sender.clone();
-                        let notification_end = notification_end.take();
+                        let notification_end = notification_end.clone();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let mut running_plugin = running_plugin.lock().unwrap();
                             let mut plugin_render_assets = vec![];
