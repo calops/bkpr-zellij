@@ -2621,6 +2621,7 @@ pub(crate) fn route_thread_main(
                             tab_position_to_focus,
                             pane_to_focus: pane_id_to_focus,
                             is_web_client,
+                            detach_others,
                         } => {
                             let allow_web_connections = session_data
                                 .read()
@@ -2637,6 +2638,7 @@ pub(crate) fn route_thread_main(
                                     pane_id_to_focus.map(|p| (p.pane_id, p.is_plugin)),
                                     is_web_client,
                                     client_id,
+                                    detach_others,
                                 );
                                 to_server
                                     .send(attach_client_instruction)
@@ -2698,6 +2700,9 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::ConnStatus => {
                             let _ = to_server.send(ServerInstruction::ConnStatus(client_id));
                             should_break = true;
+                        },
+                        ClientToServerMsg::ConnStatusWithCapabilities => {
+                            let _ = to_server.send(ServerInstruction::ConnStatusWithCapabilities(client_id));
                         },
                         ClientToServerMsg::DetachSession { client_ids } => {
                             let _ =

@@ -104,9 +104,11 @@ pub enum ServerInstruction {
         Option<(u32, bool)>, // (pane_id, is_plugin) => pane_id to focus
         bool,                // is_web_client
         ClientId,
+        bool, // detach_others, scoped to this attachment only
     ),
     AttachWatcherClient(ClientId, Size, bool), // bool -> is_web_client
     ConnStatus(ClientId),
+    ConnStatusWithCapabilities(ClientId),
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
     SwitchSession(ConnectToSession, ClientId, Option<NotificationEnd>),
@@ -162,6 +164,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::AttachClient(..) => ServerContext::AttachClient,
             ServerInstruction::AttachWatcherClient(..) => ServerContext::AttachClient,
             ServerInstruction::ConnStatus(..) => ServerContext::ConnStatus,
+            ServerInstruction::ConnStatusWithCapabilities(..) => ServerContext::ConnStatus,
             ServerInstruction::Log(..) => ServerContext::Log,
             ServerInstruction::LogError(..) => ServerContext::LogError,
             ServerInstruction::SwitchSession(..) => ServerContext::SwitchSession,
@@ -631,6 +634,40 @@ macro_rules! send_to_client {
     };
 }
 
+fn disconnect_other_clients(
+    retained_client_id: ClientId,
+    os_input: &mut Box<dyn ServerOsApi>,
+    session_state: &Arc<RwLock<SessionState>>,
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+) {
+    let other_clients = session_state
+        .read()
+        .unwrap()
+        .other_attached_client_ids(retained_client_id);
+    for client_id in other_clients {
+        if let Some(session) = session_data.write().unwrap().as_mut() {
+            session.remove_key_passthrough_client(client_id);
+        }
+        let _ = os_input.send_to_client(
+            client_id,
+            ServerToClientMsg::Exit {
+                exit_reason: ExitReason::KickedByHost,
+            },
+        );
+        remove_client_and_flush_forwards(client_id, os_input, session_state, session_data);
+        // Release canvas constraints and plugin replicas even if the old
+        // client is dead or cannot acknowledge the exit notification.
+        if let Some(session) = session_data.read().unwrap().as_ref() {
+            let _ = session
+                .senders
+                .send_to_screen(ScreenInstruction::RemoveClient(client_id));
+            let _ = session
+                .senders
+                .send_to_plugin(PluginInstruction::RemoveClient(client_id));
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SessionState {
     clients: HashMap<ClientId, Option<(Size, bool)>>, // bool -> is_web_client
@@ -710,6 +747,19 @@ impl SessionState {
     }
     pub fn client_ids(&self) -> Vec<ClientId> {
         self.clients.keys().copied().collect()
+    }
+    fn other_attached_client_ids(&self, retained_client_id: ClientId) -> Vec<ClientId> {
+        // A delayed request from an exited plugin or transient CLI connection
+        // must never disconnect every real attachment.
+        if !matches!(self.clients.get(&retained_client_id), Some(Some(_))) {
+            return Vec::new();
+        }
+        self.clients
+            .iter()
+            .filter_map(|(&id, data)| {
+                (id != retained_client_id && data.is_some()).then_some(id)
+            })
+            .collect()
     }
     pub fn watcher_client_ids(&self) -> Vec<ClientId> {
         self.watchers.keys().copied().collect()
@@ -800,6 +850,30 @@ impl SessionState {
 #[cfg(test)]
 mod session_state_tests {
     use super::*;
+
+    #[test]
+    fn detach_others_retains_the_exact_attachment_not_the_last_active_client() {
+        let mut session = SessionState::new();
+        session.set_client_data(1, Size::default(), false);
+        session.set_client_data(2, Size::default(), false);
+        session.set_last_active_client(1);
+        session.clients.insert(3, None); // unrelated CLI connection
+        assert_eq!(session.other_attached_client_ids(2), vec![1]);
+        assert_eq!(session.other_attached_client_ids(1), vec![2]);
+    }
+
+    #[test]
+    fn stale_or_unattached_detach_request_cannot_disconnect_live_clients() {
+        let mut session = SessionState::new();
+        session.set_client_data(1, Size::default(), false);
+        session.set_client_data(2, Size::default(), false);
+        session.remove_client(2);
+        assert!(session.other_attached_client_ids(2).is_empty());
+        session.clients.insert(3, None);
+        assert!(session.other_attached_client_ids(3).is_empty());
+        assert!(session.other_attached_client_ids(99).is_empty());
+        assert!(session.other_attached_client_ids(1).is_empty());
+    }
 
     #[test]
     fn clipboard_reply_from_another_client_cannot_claim_or_cancel_the_owner() {
@@ -1214,10 +1288,11 @@ pub fn start_server_impl(
                 pane_id_to_focus,
                 is_web_client,
                 client_id,
+                detach_others,
             ) => {
                 let mut rlock = session_data.write().unwrap();
-                let session_data = rlock.as_mut().unwrap();
-                let config = session_data.session_configuration.saved_config.clone();
+                let session = rlock.as_mut().unwrap();
+                let config = session.session_configuration.saved_config.clone();
                 let host_terminal_env = cli_assets.host_terminal_env.clone();
                 let runtime_config_options = match cli_assets.configuration_options {
                     Some(configuration_options) => config.options.merge(configuration_options),
@@ -1237,12 +1312,12 @@ pub fn start_server_impl(
 
                 let mut runtime_configuration = config.clone();
                 runtime_configuration.options = runtime_config_options.clone();
-                session_data
+                session
                     .session_configuration
                     .set_client_runtime_configuration(client_id, runtime_configuration);
 
                 let default_input_mode = config.options.default_mode.unwrap_or_default();
-                session_data
+                session
                     .current_input_modes
                     .insert(client_id, default_input_mode);
 
@@ -1252,14 +1327,14 @@ pub fn start_server_impl(
                     is_web_client,
                 );
 
-                session_data
+                session
                     .senders
                     .send_to_screen(ScreenInstruction::SetClientHostTerminalEnv(
                         client_id,
                         host_terminal_env,
                     ))
                     .unwrap();
-                session_data
+                session
                     .senders
                     .send_to_screen(ScreenInstruction::AddClient(
                         client_id,
@@ -1269,14 +1344,14 @@ pub fn start_server_impl(
                         pane_id_to_focus,
                     ))
                     .unwrap();
-                session_data
+                session
                     .senders
                     .send_to_plugin(PluginInstruction::AddClient(client_id))
                     .unwrap();
                 let default_mode = config.options.default_mode.unwrap_or_default();
                 // ModeUpdate broadcast is handled by the screen thread via
                 // change_mode() -> update_input_modes()
-                session_data
+                session
                     .senders
                     .send_to_screen(ScreenInstruction::ChangeMode(
                         default_mode,
@@ -1285,6 +1360,17 @@ pub fn start_server_impl(
                         None,
                     ))
                     .unwrap();
+                // Complete the one-shot handoff synchronously, before this
+                // client ID can be removed and reused by another attachment.
+                drop(rlock);
+                if detach_others {
+                    disconnect_other_clients(
+                        client_id,
+                        &mut os_input,
+                        &session_state,
+                        &session_data,
+                    );
+                }
             },
             ServerInstruction::AttachWatcherClient(client_id, terminal_size, is_web_client) => {
                 // the client_id was inserted into clients upon ipc tunnel initialization
@@ -1521,26 +1607,12 @@ pub fn start_server_impl(
                 break;
             },
             ServerInstruction::DisconnectAllClientsExcept(client_id) => {
-                let client_ids: Vec<ClientId> = session_state
-                    .read()
-                    .unwrap()
-                    .client_ids()
-                    .iter()
-                    .copied()
-                    .filter(|c| c != &client_id)
-                    .collect();
-                for client_id in client_ids {
-                    if let Some(session_data) = session_data.write().unwrap().as_mut() {
-                        session_data.remove_key_passthrough_client(client_id);
-                    }
-                    let _ = os_input.send_to_client(
-                        client_id,
-                        ServerToClientMsg::Exit {
-                            exit_reason: ExitReason::KickedByHost,
-                        },
-                    );
-                    remove_client!(client_id, os_input, session_state, session_data);
-                }
+                disconnect_other_clients(
+                    client_id,
+                    &mut os_input,
+                    &session_state,
+                    &session_data,
+                );
             },
             ServerInstruction::DetachSession(client_ids, completion_tx) => {
                 for client_id in &client_ids {
@@ -1642,6 +1714,12 @@ pub fn start_server_impl(
             ServerInstruction::ConnStatus(client_id) => {
                 let _ = os_input.send_to_client(client_id, ServerToClientMsg::Connected);
                 remove_client!(client_id, os_input, session_state, session_data);
+            },
+            ServerInstruction::ConnStatusWithCapabilities(client_id) => {
+                let _ = os_input.send_to_client(
+                    client_id,
+                    ServerToClientMsg::ConnectedWithCapabilities { detach_others: true },
+                );
             },
             ServerInstruction::Log(
                 lines_to_log,

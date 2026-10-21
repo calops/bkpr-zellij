@@ -194,6 +194,7 @@ pub enum ClientToServerMsg {
         tab_position_to_focus: Option<usize>,
         pane_to_focus: Option<PaneReference>,
         is_web_client: bool,
+        detach_others: bool,
     },
     AttachWatcherClient {
         terminal_size: Size,
@@ -213,6 +214,8 @@ pub enum ClientToServerMsg {
     ClientExited,
     KillSession,
     ConnStatus,
+    /// Probe capabilities without releasing this connection's client identity.
+    ConnStatusWithCapabilities,
     WebServerStarted {
         base_url: String,
     },
@@ -271,6 +274,9 @@ pub enum ServerToClientMsg {
         exit_reason: ExitReason,
     },
     Connected,
+    ConnectedWithCapabilities {
+        detach_others: bool,
+    },
     Log {
         lines: Vec<String>,
     },

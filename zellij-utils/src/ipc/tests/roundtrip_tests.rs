@@ -59,6 +59,32 @@ fn tab_context_metadata_survives_native_layout_wire_transport() {
     assert_eq!(restored, layout);
 }
 
+#[test]
+fn legacy_status_reply_does_not_advertise_detach_others() {
+    use crate::client_server_contract::client_server_contract::{
+        self as wire, server_to_client_msg,
+    };
+    use prost::Message;
+
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyEmptyStatus {}
+
+    // Old servers can decode the extended status request without confusing
+    // it for an attach, detach, or kill message.
+    let request = wire::ConnStatusMsg { keep_connection: true };
+    let old_request = LegacyEmptyStatus::decode(request.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(old_request, LegacyEmptyStatus {});
+
+    // Their empty status reply remains ordinary Connected, not an affirmative
+    // capability. The client must reject it before sending its attach request.
+    let old_reply = LegacyEmptyStatus {}.encode_to_vec();
+    let reply = wire::ConnectedMsg::decode(old_reply.as_slice()).unwrap();
+    let message = wire::ServerToClientMsg {
+        message: Some(server_to_client_msg::Message::Connected(reply)),
+    };
+    let decoded: ServerToClientMsg = message.try_into().unwrap();
+    assert_eq!(decoded, ServerToClientMsg::Connected);
+}
 fn test_client_messages() {
     let empty_context = BTreeMap::new();
     let mut demo_context = BTreeMap::new();
@@ -786,12 +812,14 @@ fn test_client_messages() {
         tab_position_to_focus: None,
         pane_to_focus: None,
         is_web_client: false,
+        detach_others: false,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
         cli_assets: CliAssets::default(),
         tab_position_to_focus: Some(0),
         pane_to_focus: None,
         is_web_client: false,
+        detach_others: true,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
         cli_assets: CliAssets::default(),
@@ -801,6 +829,7 @@ fn test_client_messages() {
             is_plugin: false,
         }),
         is_web_client: false,
+        detach_others: false,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
         cli_assets: CliAssets::default(),
@@ -810,6 +839,7 @@ fn test_client_messages() {
             is_plugin: true,
         }),
         is_web_client: true,
+        detach_others: true,
     });
     test_client_roundtrip!(ClientToServerMsg::AttachClient {
         cli_assets: CliAssets {
@@ -822,6 +852,7 @@ fn test_client_messages() {
         tab_position_to_focus: None,
         pane_to_focus: None,
         is_web_client: false,
+        detach_others: false,
     });
     // TODO: Action
     test_client_roundtrip!(ClientToServerMsg::Action {
@@ -3460,6 +3491,7 @@ fn test_client_messages() {
     test_client_roundtrip!(ClientToServerMsg::ClientExited);
     test_client_roundtrip!(ClientToServerMsg::KillSession);
     test_client_roundtrip!(ClientToServerMsg::ConnStatus);
+    test_client_roundtrip!(ClientToServerMsg::ConnStatusWithCapabilities);
     test_client_roundtrip!(ClientToServerMsg::RequestSessionList);
     test_client_roundtrip!(ClientToServerMsg::SetMobileRenderPreferences {
         single_pane: true,
@@ -3832,6 +3864,8 @@ fn test_server_messages() {
     });
     test_server_roundtrip!(ServerToClientMsg::UnblockInputThread);
     test_server_roundtrip!(ServerToClientMsg::Connected);
+    test_server_roundtrip!(ServerToClientMsg::ConnectedWithCapabilities { detach_others: true });
+    test_server_roundtrip!(ServerToClientMsg::ConnectedWithCapabilities { detach_others: false });
     test_server_roundtrip!(ServerToClientMsg::QueryTerminalSize);
     test_server_roundtrip!(ServerToClientMsg::StartWebServer);
     test_server_roundtrip!(ServerToClientMsg::ConfigFileUpdated);

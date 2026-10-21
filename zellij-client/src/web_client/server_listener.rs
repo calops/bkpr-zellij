@@ -182,6 +182,7 @@ pub fn zellij_server_listener(
                         match msg.map(|m| m.0) {
                             Some(ServerToClientMsg::UnblockInputThread) => {},
                             Some(ServerToClientMsg::Connected) => {},
+                            Some(ServerToClientMsg::ConnectedWithCapabilities { .. }) => {},
                             Some(ServerToClientMsg::CliPipeOutput { .. } ) => {},
                             Some(ServerToClientMsg::UnblockCliPipeInput { .. } ) => {},
                             Some(ServerToClientMsg::StartWebServer { .. } ) => {},

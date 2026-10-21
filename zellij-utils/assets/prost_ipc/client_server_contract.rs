@@ -3205,6 +3205,8 @@ pub struct AttachClientMsg {
     pub pane_to_focus: ::core::option::Option<PaneReference>,
     #[prost(bool, tag="4")]
     pub is_web_client: bool,
+    #[prost(bool, tag="5")]
+    pub detach_others: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3246,10 +3248,11 @@ pub struct ClientExitedMsg {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct KillSessionMsg {
 }
-/// Empty message (just indicates connection status request)
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnStatusMsg {
+    #[prost(bool, tag="1")]
+    pub keep_connection: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3442,10 +3445,11 @@ pub struct ExitMsg {
     #[prost(string, optional, tag="2")]
     pub payload: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Empty message
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectedMsg {
+    #[prost(bool, optional, tag="1")]
+    pub detach_others: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

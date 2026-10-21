@@ -78,6 +78,7 @@ message AttachClientMsg {
   optional uint32 tab_position_to_focus = 2;
   optional PaneReference pane_to_focus = 3;
   bool is_web_client = 4;
+  bool detach_others = 5;
 }
 
 message AttachWatcherClientMsg {
@@ -107,7 +108,7 @@ message KillSessionMsg {
 }
 
 message ConnStatusMsg {
-  // Empty message (just indicates connection status request)
+  bool keep_connection = 1;
 }
 
 message WebServerStartedMsg {
