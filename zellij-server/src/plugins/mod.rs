@@ -1449,7 +1449,6 @@ fn load_background_plugin(
         Some(client_id),
     ) {
         Ok((plugin_id, client_id)) => {
-            crate::pane_context::owner_loaded(&run_plugin_or_alias, plugin_id);
             let should_float = None;
             let should_be_open_in_place = false;
             let pane_title = None;
