@@ -412,13 +412,14 @@ impl ServerOsApi for ServerOsInputOutput {
             .next_terminal_id()
             .context("no more terminal IDs left to allocate")?;
 
+        let environment = crate::pane_context::reserve_terminal(terminal_id)?;
         self.pty_backend.reserve_terminal_id(terminal_id);
 
         let (cmd, failover_cmd) = build_command(terminal_action, default_editor);
 
         let (async_reader, child_fd) = self
             .pty_backend
-            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id)
+            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id, environment)
             .with_context(err_context)?;
 
         Ok((terminal_id, async_reader, Some(child_fd as u32)))
@@ -428,6 +429,7 @@ impl ServerOsApi for ServerOsInputOutput {
             .pty_backend
             .next_terminal_id()
             .context("no more terminal IDs available")?;
+        crate::pane_context::reserve_held_terminal(terminal_id)?;
         self.pty_backend.reserve_terminal_id(terminal_id);
         Ok(terminal_id)
     }
@@ -677,12 +679,14 @@ impl ServerOsApi for ServerOsInputOutput {
         run_command: RunCommand,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     ) -> Result<(Box<dyn AsyncReader>, Option<u32>)> {
+        let environment = crate::pane_context::rerun_environment(terminal_id)?;
         let (async_reader, child_fd) =
             self.pty_backend
-                .spawn_terminal(run_command, None, quit_cb, terminal_id)?;
+                .spawn_terminal(run_command, None, quit_cb, terminal_id, environment)?;
         Ok((async_reader, Some(child_fd as u32)))
     }
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()> {
+        crate::pane_context::close_terminal(terminal_id);
         self.pty_backend.clear_terminal_id(terminal_id);
         Ok(())
     }
@@ -774,9 +778,9 @@ fn run_command_hook(
     original_command: &str,
     hook_script: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("sh")
+    let output = crate::pane_context::clear_environment(Command::new("sh")
         .arg("-c")
-        .arg(hook_script)
+        .arg(hook_script))
         .env("RESURRECT_COMMAND", original_command)
         .output()?;
 
@@ -791,9 +795,9 @@ fn run_command_hook(
     original_command: &str,
     hook_script: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("cmd")
+    let output = crate::pane_context::clear_environment(Command::new("cmd")
         .arg("/C")
-        .arg(hook_script)
+        .arg(hook_script))
         .env("RESURRECT_COMMAND", original_command)
         .output()?;
     if !output.status.success() {

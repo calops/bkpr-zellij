@@ -509,6 +509,7 @@ impl WindowsPtyBackend {
         failover_cmd: Option<RunCommand>,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         terminal_id: u32,
+        _environment: Option<crate::pane_context::TerminalEnvironment>,
     ) -> Result<(Box<dyn AsyncReader>, u32)> {
         if let Some(resolved) = resolve_command(&cmd) {
             cmd.command = resolved;

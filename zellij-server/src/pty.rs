@@ -555,6 +555,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     ) {
                         Ok(tab_result) => all_tab_results.push(tab_result),
                         Err(e) => {
+                            crate::pane_context::discard_pending_tab(tab_layout_info.tab_index);
                             log::error!(
                                 "Failed to spawn terminals for tab {}: {:?}",
                                 tab_layout_info.tab_index,
@@ -1024,6 +1025,7 @@ impl Pty {
     ) -> Result<(u32, bool)> {
         // bool is starts_held
         let err_context = || format!("failed to spawn terminal for {:?}", client_or_tab_index);
+        let _context_scope = crate::pane_context::spawn_scope(client_or_tab_index);
 
         // returns the terminal id
         let terminal_action = match client_or_tab_index {
@@ -1173,6 +1175,7 @@ impl Pty {
         completion_tx: Option<NotificationEnd>,
     ) -> Result<()> {
         let err_context = || format!("failed to spawn terminals for layout for");
+        let _context_scope = crate::pane_context::layout_scope(tab_index, &layout);
 
         let mut default_shell =
             default_shell.unwrap_or_else(|| self.get_default_terminal(cwd, None));
@@ -1400,6 +1403,7 @@ impl Pty {
         _retain_existing_plugin_panes: bool,
     ) -> Result<TabOverrideResult> {
         let err_context = || format!("failed to spawn terminals for layout for");
+        let _context_scope = crate::pane_context::layout_scope(tab_index, &layout);
 
         let mut default_shell =
             default_shell.unwrap_or_else(|| self.get_default_terminal(cwd, None));

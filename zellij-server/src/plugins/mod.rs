@@ -334,7 +334,9 @@ pub(crate) fn plugin_thread_main(
         default_keybinds,
     );
 
-    for run_plugin_or_alias in background_plugins {
+    for mut run_plugin_or_alias in background_plugins {
+        run_plugin_or_alias.populate_run_plugin_if_needed(&plugin_aliases);
+        crate::pane_context::register_startup_owner(&run_plugin_or_alias);
         load_background_plugin(
             run_plugin_or_alias,
             &mut wasm_bridge,
@@ -748,7 +750,7 @@ pub(crate) fn plugin_thread_main(
             PluginInstruction::PostMessageToPlugin(plugin_id, client_id, message, payload) => {
                 // This name is reserved for permission-gated host metadata.
                 // A plugin worker must not impersonate a terminal response.
-                if message == "bkpr_terminal_colors" {
+                if matches!(message.as_str(), "bkpr_terminal_colors" | "bkpr_context") {
                     continue;
                 }
                 let updates = vec![(
@@ -1470,6 +1472,7 @@ fn load_background_plugin(
             )));
         },
         Err(e) => {
+            crate::pane_context::owner_load_failed(&run_plugin_or_alias);
             log::error!("Failed to load plugin: {e}");
         },
     }

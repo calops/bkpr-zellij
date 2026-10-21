@@ -4182,3 +4182,20 @@ fn terminal_palette_extension_remains_a_legacy_color_register_message() {
         else { panic!("legacy message changed kind") };
     assert!(terminal_colors.is_none());
 }
+
+#[test]
+fn tab_context_metadata_survives_native_layout_wire_transport() {
+    use prost::Message;
+    type WireLayout = crate::client_server_contract::client_server_contract::TiledPaneLayout;
+    let layout = TiledPaneLayout {
+        context_metadata: BTreeMap::from([
+            ("bkpr_workspace_id".into(), "group".into()),
+            ("bkpr_workspace_name".into(), "Workspace".into()),
+        ]),
+        ..Default::default()
+    };
+    let wire: WireLayout = layout.clone().into();
+    let decoded = WireLayout::decode(wire.encode_to_vec().as_slice()).unwrap();
+    let restored: TiledPaneLayout = decoded.try_into().unwrap();
+    assert_eq!(restored, layout);
+}

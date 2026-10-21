@@ -337,6 +337,8 @@ impl WasmBridge {
                         return Ok((plugin_id, client_id));
                     },
                 };
+                // Establish authority before asynchronous plugin load can publish or fail.
+                crate::pane_context::owner_loaded(run, plugin_id);
                 let plugin_name = run.location.to_string();
 
                 self.cached_events_for_pending_plugins
@@ -504,6 +506,7 @@ impl WasmBridge {
         Ok((plugin_id, client_id))
     }
     pub fn unload_plugin(&mut self, pid: PluginId) -> Result<()> {
+        crate::pane_context::owner_unloaded(pid);
         info!("Bye from plugin {}", &pid);
 
         // Remove from plugin_map on main thread
@@ -2051,6 +2054,7 @@ fn handle_plugin_loading_failure(
     error: impl std::fmt::Debug,
     client_id: Option<ClientId>,
 ) {
+    crate::pane_context::owner_unloaded(plugin_id);
     log::error!("{:?}", error);
     let _ = senders.send_to_background_jobs(BackgroundJob::StopPluginLoadingAnimation(plugin_id));
     loading_indication.indicate_loading_error(format!("{:?}", error));
@@ -2102,7 +2106,7 @@ fn check_event_permission(
         | Event::InputReceived
         | Event::InitialKeybinds(..) => PermissionType::ReadApplicationState,
         Event::CustomMessage(name, _)
-            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors") => {
+            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors" | "bkpr_context") => {
             PermissionType::ReadApplicationState
         },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
@@ -2238,6 +2242,7 @@ pub fn apply_event_to_plugin(
 }
 
 pub fn handle_plugin_crash(plugin_id: PluginId, message: String, senders: ThreadSenders) {
+    crate::pane_context::owner_unloaded(plugin_id);
     let mut loading_indication = LoadingIndication::new("Panic!".to_owned());
     loading_indication.indicate_loading_error(message);
     let _ = senders.send_to_screen(ScreenInstruction::UpdatePluginLoadingStage(

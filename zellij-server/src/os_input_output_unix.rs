@@ -188,6 +188,7 @@ fn handle_openpty(
     cmd: RunCommand,
     quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     terminal_id: u32,
+    environment: Option<&crate::pane_context::TerminalEnvironment>,
 ) -> Result<(RawFd, RawFd)> {
     let err_context = |cmd: &RunCommand| {
         format!(
@@ -221,6 +222,7 @@ fn handle_openpty(
                 );
             }
         }
+        crate::pane_context::apply_environment(command, environment);
         command
             .args(&cmd.args)
             .env("ZELLIJ_PANE_ID", &format!("{}", terminal_id))
@@ -236,6 +238,7 @@ fn handle_openpty(
     };
 
     let child_id = child.id();
+    crate::pane_context::set_root_pid(terminal_id, child_id);
     thread::spawn(move || {
         child.wait().with_context(|| err_context(&cmd)).fatal();
         let exit_status = handle_command_exit(child)
@@ -256,16 +259,17 @@ fn handle_terminal(
     orig_termios: Option<termios::Termios>,
     quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     terminal_id: u32,
+    environment: Option<&crate::pane_context::TerminalEnvironment>,
 ) -> Result<(RawFd, RawFd)> {
     let err_context = || "failed to spawn child terminal".to_string();
 
     // Create a pipe to allow the child the communicate the shell's pid to its
     // parent.
     match openpty(None, &orig_termios) {
-        Ok(open_pty_res) => handle_openpty(open_pty_res, cmd, quit_cb, terminal_id),
+        Ok(open_pty_res) => handle_openpty(open_pty_res, cmd, quit_cb, terminal_id, environment),
         Err(e) => match failover_cmd {
             Some(failover_cmd) => {
-                handle_terminal(failover_cmd, None, orig_termios, quit_cb, terminal_id)
+                handle_terminal(failover_cmd, None, orig_termios, quit_cb, terminal_id, environment)
                     .with_context(err_context)
             },
             None => Err::<(i32, i32), _>(e)
@@ -323,6 +327,7 @@ impl UnixPtyBackend {
         failover_cmd: Option<RunCommand>,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         terminal_id: u32,
+        environment: Option<crate::pane_context::TerminalEnvironment>,
     ) -> Result<(Box<dyn AsyncReader>, RawFd)> {
         let orig_termios = self
             .orig_termios
@@ -335,6 +340,7 @@ impl UnixPtyBackend {
             orig_termios.clone(),
             quit_cb,
             terminal_id,
+            environment.as_ref(),
         )?;
         self.terminal_id_to_raw_fd
             .lock()

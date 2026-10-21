@@ -18,6 +18,7 @@ mod mobile_web;
 pub mod nested_guest;
 pub mod notifications;
 mod pane_groups;
+mod pane_context;
 mod plugins;
 mod pty;
 mod pty_writer;
@@ -2313,7 +2314,9 @@ fn init_session(
         .unwrap();
 
     let zellij_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let session_env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let session_env_vars: std::collections::BTreeMap<String, String> = std::env::vars()
+        .filter(|(name, _)| !matches!(name.as_str(), "BKPR_CONTEXT_OWNER" | "BKPR_NATIVE_CONTEXT"))
+        .collect();
 
     let (available_layouts, available_layout_errors) = get_available_layouts(&config_options);
 

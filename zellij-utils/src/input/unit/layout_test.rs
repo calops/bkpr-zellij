@@ -709,6 +709,30 @@ fn layout_with_tab_names() {
 }
 
 #[test]
+fn bkpr_tab_context_metadata_prebinds_grouped_tabs() {
+    let layout = Layout::from_kdl(r#"layout {
+        tab name="one" bkpr_workspace_id="group" bkpr_workspace_name="Workspace" { pane; }
+        tab name="two" bkpr_workspace_id="group" bkpr_workspace_name="Workspace" { pane command="env"; }
+    }"#, None, None, None).unwrap();
+    for (_, tiled, _) in layout.tabs {
+        assert_eq!(tiled.context_metadata["bkpr_workspace_id"], "group");
+        assert_eq!(tiled.context_metadata["bkpr_workspace_name"], "Workspace");
+    }
+}
+
+#[test]
+fn bkpr_tab_context_metadata_requires_both_nonempty_values() {
+    for properties in [
+        "bkpr_workspace_id=\"group\"",
+        "bkpr_workspace_name=\"Workspace\"",
+        "bkpr_workspace_id=\"\" bkpr_workspace_name=\"Workspace\"",
+    ] {
+        let layout = format!("layout {{ tab {properties} {{ pane; }} }}");
+        assert!(Layout::from_kdl(&layout, None, None, None).is_err());
+    }
+}
+
+#[test]
 fn layout_with_focused_tab() {
     let kdl_layout = r#"
         layout {

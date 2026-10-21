@@ -4513,6 +4513,7 @@ impl Screen {
     }
 
     pub fn render(&mut self, plugin_render_assets: Option<Vec<PluginRenderAsset>>) -> Result<()> {
+        crate::pane_context::set_clients(&self.active_tab_ids);
         // here we schedule the RenderToClients background job which debounces renders every 10ms
         // rather than actually rendering
         //
@@ -5238,6 +5239,7 @@ impl Screen {
             tab.update_sixel_host_support(aggregate);
         }
         tab.update_selection_options(self.osc133_command_selection, self.word_separators.clone());
+        crate::pane_context::ensure_tab(tab_id, &tab.name);
         self.tabs.insert(tab_id, tab);
         Ok(())
     }
@@ -5887,6 +5889,23 @@ impl Screen {
         }
     }
 
+    fn synchronize_pane_context(&self) {
+        crate::pane_context::synchronize(self.tabs.values().map(|tab| {
+            let panes = tab.get_tiled_panes().map(|(id, _)| *id)
+                .chain(tab.get_floating_panes().map(|(id, _)| *id))
+                .chain(tab.get_suppressed_panes().map(|(id, _)| *id)).collect();
+            (tab.id, tab.name.as_str(), panes)
+        }), &self.active_tab_ids);
+    }
+
+    fn report_pane_context(&self) -> Result<()> {
+        self.synchronize_pane_context();
+        if let Some(event) = crate::pane_context::event() {
+            self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(None, None, event)]))?;
+        }
+        Ok(())
+    }
+
     fn log_and_report_session_state(&mut self) -> Result<()> {
         let err_context = || format!("Failed to log and report session state");
 
@@ -5897,6 +5916,7 @@ impl Screen {
         // All state-changing native controls already publish here. Synchronize before
         // PaneUpdate/TabUpdate so plugins and popup geometry see one coherent result.
         self.synchronize_shared_tiled_widths();
+        self.report_pane_context()?;
         // generate own session info
         let pane_manifest = self.generate_and_report_pane_state()?;
         let tab_infos = self.generate_and_report_tab_state()?;
@@ -6919,6 +6939,7 @@ impl Screen {
                 .get(&client_id)
                 .copied()
                 .unwrap_or(false);
+            self.report_pane_context()?;
             self.bus.senders.send_to_plugin(PluginInstruction::NewTab(
                 None,
                 default_shell,
@@ -7000,6 +7021,7 @@ impl Screen {
             .get(&client_id)
             .copied()
             .unwrap_or(false);
+        self.report_pane_context()?;
         self.bus.senders.send_to_plugin(PluginInstruction::NewTab(
             None,
             default_shell,
@@ -8202,6 +8224,12 @@ impl Screen {
         subscriptions: &HashSet<EventType>,
     ) -> Result<()> {
         if subscriptions.contains(&EventType::CustomMessage) {
+            self.synchronize_pane_context();
+            if let Some(event) = crate::pane_context::event() {
+                self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                    Some(plugin_id), Some(client_id), event,
+                )]))?;
+            }
             let colors = self.terminal_colors.get(&client_id).cloned().unwrap_or_default();
             self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
                 Some(plugin_id), Some(client_id), colors.event(),
@@ -10985,6 +11013,8 @@ pub(crate) fn screen_thread_main(
                             Some(t) => t,
                             None => {
                                 // no corresponding tab exists, we'll create it
+                                crate::pane_context::prepare_layout(
+                                    tab_layout_info.tab_index, &tab_layout_info.tiled_layout);
                                 processed_tab_layouts.push(tab_layout_info);
                                 continue;
                             },
