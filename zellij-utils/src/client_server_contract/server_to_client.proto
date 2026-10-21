@@ -42,7 +42,7 @@ message ExitMsg {
 }
 
 message ConnectedMsg {
-  // Empty message
+  optional bool detach_others = 1;
 }
 
 message LogMsg {

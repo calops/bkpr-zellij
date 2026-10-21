@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+* feat: add opt-in `zellij attach -d, --detach-others` to detach other clients after attaching while preserving panes and running programs.
+* fix: check attachment capabilities on the same IPC connection and reject `--detach-others` against older servers with an upgrade message, without changing normal attachments or the IPC contract version.
+* fix: release disconnected clients' screen and plugin state immediately, including their canvas-size constraints, without waiting for a client exit acknowledgement.
 * chore: use `main` for Bkpr integration and propose stable upstream releases through human-validated PRs, with SHA-bound Nix verification and no automatic merging.
 * chore: restrict CI builds to upstream-update PRs and remove inherited push, platform-matrix, and release-publication workflows.
 * feat: bridge Kitty OSC 5522 MIME clipboard reads, atomic writes and paste notifications with per-pane mode negotiation, client-bound paste tokens and isolated replies.

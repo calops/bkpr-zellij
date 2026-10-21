@@ -330,6 +330,10 @@ pub enum Sessions {
         #[clap(value_parser)]
         session_name: Option<String>,
 
+        /// Detach other clients after attaching; keep their panes and programs running.
+        #[clap(short('d'), long)]
+        detach_others: bool,
+
         /// Create a session if one does not exist.
         #[clap(short, long, value_parser)]
         create: bool,
@@ -1592,6 +1596,26 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn detach_others_is_explicit_and_accepts_both_spellings() {
+        for arguments in [
+            vec!["zellij", "attach", "work", "-d"],
+            vec!["zellij", "attach", "work", "--detach-others"],
+            vec!["zellij", "attach", "--create", "work", "--detach-others"],
+        ] {
+            let cli = CliArgs::try_parse_from(arguments).unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Command::Sessions(Sessions::Attach { detach_others: true, .. }))
+            ));
+        }
+        let normal = CliArgs::try_parse_from(["zellij", "attach", "work"]).unwrap();
+        assert!(matches!(
+            normal.command,
+            Some(Command::Sessions(Sessions::Attach { detach_others: false, .. }))
+        ));
+    }
 
     fn parse_subscribe(args: &[&str]) -> SubscribeCli {
         let mut full_args = vec!["zellij"];

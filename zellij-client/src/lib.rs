@@ -212,7 +212,8 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::Exit { exit_reason } => ClientInstruction::Exit(exit_reason),
             ServerToClientMsg::Render { content } => ClientInstruction::Render(content),
             ServerToClientMsg::UnblockInputThread => ClientInstruction::UnblockInputThread,
-            ServerToClientMsg::Connected => ClientInstruction::Connected,
+            ServerToClientMsg::Connected
+            | ServerToClientMsg::ConnectedWithCapabilities { .. } => ClientInstruction::Connected,
             ServerToClientMsg::Log { lines } => ClientInstruction::Log(lines),
             ServerToClientMsg::LogError { lines } => ClientInstruction::LogError(lines),
             ServerToClientMsg::SwitchSession { connect_to_session } => {
@@ -1067,6 +1068,12 @@ pub fn start_client(
                         zellij_utils::ipc::PaneReference { pane_id, is_plugin }
                     }),
                     is_web_client,
+                    detach_others: matches!(
+                        &cli_args.command,
+                        Some(zellij_utils::cli::Command::Sessions(
+                            zellij_utils::cli::Sessions::Attach { detach_others: true, .. }
+                        ))
+                    ),
                 },
                 ipc_pipe,
             )
@@ -1190,6 +1197,20 @@ pub fn start_client(
     };
 
     os_input.connect_to_server(&*ipc_pipe);
+    if matches!(&first_msg, ClientToServerMsg::AttachClient { detach_others: true, .. }) {
+        // Probe on the very connection that will attach: another server cannot
+        // replace a successful probe before receiving this attachment request.
+        os_input.send_to_server(ClientToServerMsg::ConnStatusWithCapabilities);
+        if !matches!(
+            os_input.recv_from_server(),
+            Some((ServerToClientMsg::ConnectedWithCapabilities { detach_others: true }, _))
+        ) {
+            exit_after_startup_error(
+                Some(terminal_teardown),
+                "This session's server does not support --detach-others. Upgrade the server or create a new session; no other clients were detached.".to_owned(),
+            );
+        }
+    }
     os_input.send_to_server(first_msg);
 
     let mut command_is_executing = CommandIsExecuting::new();
