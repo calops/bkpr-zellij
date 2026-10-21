@@ -140,6 +140,8 @@ impl<'a> KdlLayoutParser<'a> {
             || property_name == "min_panes"
             || property_name == "exact_panes"
             || property_name == "hide_floating_panes"
+            || property_name == "bkpr_workspace_id"
+            || property_name == "bkpr_workspace_name"
     }
     pub fn is_a_reserved_plugin_property(property_name: &str) -> bool {
         property_name == "location"
@@ -1171,6 +1173,23 @@ impl<'a> KdlLayoutParser<'a> {
 
         Ok(())
     }
+    fn parse_context_metadata(&self, node: &KdlNode, layout: &mut TiledPaneLayout) -> Result<(), ConfigError> {
+        let id = kdl_get_string_property_or_child_value_with_error!(node, "bkpr_workspace_id");
+        let name = kdl_get_string_property_or_child_value_with_error!(node, "bkpr_workspace_name");
+        match (id, name) {
+            (Some(id), Some(name)) if !id.is_empty() && !name.is_empty() => {
+                layout.context_metadata.insert("bkpr_workspace_id".into(), id.into());
+                layout.context_metadata.insert("bkpr_workspace_name".into(), name.into());
+            },
+            (None, None) => {},
+            _ => return Err(ConfigError::new_layout_kdl_error(
+                "bkpr_workspace_id and bkpr_workspace_name must both be nonempty strings".into(),
+                node.span().offset(), node.span().len(),
+            )),
+        }
+        Ok(())
+    }
+
     fn parse_tab_node(
         &mut self,
         kdl_node: &KdlNode,
@@ -1210,6 +1229,7 @@ impl<'a> KdlLayoutParser<'a> {
             hide_floating_panes,
             ..Default::default()
         };
+        self.parse_context_metadata(kdl_node, &mut pane_layout)?;
         if let Some(cwd_prefix) = &self.cwd_prefix(tab_cwd.as_ref())? {
             pane_layout.add_cwd_to_layout(&cwd_prefix);
             for floating_pane in child_floating_panes.iter_mut() {
@@ -1625,6 +1645,7 @@ impl<'a> KdlLayoutParser<'a> {
                 floating_pane.add_cwd_to_layout(&cwd_prefix);
             }
         }
+        self.parse_context_metadata(kdl_node, &mut tab_layout)?;
         tab_layout.external_children_index = None;
         Ok((
             is_focused,

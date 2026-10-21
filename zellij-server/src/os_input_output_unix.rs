@@ -221,6 +221,7 @@ fn handle_openpty(
                 );
             }
         }
+        crate::pane_context::apply_environment(command, terminal_id);
         command
             .args(&cmd.args)
             .env("ZELLIJ_PANE_ID", &format!("{}", terminal_id))
@@ -236,6 +237,7 @@ fn handle_openpty(
     };
 
     let child_id = child.id();
+    crate::pane_context::set_root_pid(terminal_id, child_id);
     thread::spawn(move || {
         child.wait().with_context(|| err_context(&cmd)).fatal();
         let exit_status = handle_command_exit(child)

@@ -504,6 +504,7 @@ impl WasmBridge {
         Ok((plugin_id, client_id))
     }
     pub fn unload_plugin(&mut self, pid: PluginId) -> Result<()> {
+        crate::pane_context::owner_unloaded(pid);
         info!("Bye from plugin {}", &pid);
 
         // Remove from plugin_map on main thread
@@ -2102,7 +2103,7 @@ fn check_event_permission(
         | Event::InputReceived
         | Event::InitialKeybinds(..) => PermissionType::ReadApplicationState,
         Event::CustomMessage(name, _)
-            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors") => {
+            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors" | "bkpr_context") => {
             PermissionType::ReadApplicationState
         },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,

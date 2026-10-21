@@ -843,7 +843,7 @@ impl From<&TiledPaneLayout> for FloatingPaneLayout {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct TiledPaneLayout {
     pub children_split_direction: SplitDirection,
     pub name: Option<String>,
@@ -861,6 +861,35 @@ pub struct TiledPaneLayout {
     pub pane_initial_contents: Option<String>,
     pub default_fg: Option<String>,
     pub default_bg: Option<String>,
+    /// Namespaced host-only tab metadata; never serialized through the plugin SDK.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub context_metadata: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for TiledPaneLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut layout = f.debug_struct("TiledPaneLayout");
+        layout.field("children_split_direction", &self.children_split_direction)
+            .field("name", &self.name)
+            .field("children", &self.children)
+            .field("split_size", &self.split_size)
+            .field("run", &self.run)
+            .field("borderless", &self.borderless)
+            .field("focus", &self.focus)
+            .field("external_children_index", &self.external_children_index)
+            .field("children_are_stacked", &self.children_are_stacked)
+            .field("is_expanded_in_stack", &self.is_expanded_in_stack)
+            .field("exclude_from_sync", &self.exclude_from_sync)
+            .field("run_instructions_to_ignore", &self.run_instructions_to_ignore)
+            .field("hide_floating_panes", &self.hide_floating_panes)
+            .field("pane_initial_contents", &self.pane_initial_contents)
+            .field("default_fg", &self.default_fg)
+            .field("default_bg", &self.default_bg);
+        if !self.context_metadata.is_empty() {
+            layout.field("context_metadata", &self.context_metadata);
+        }
+        layout.finish()
+    }
 }
 
 impl TiledPaneLayout {

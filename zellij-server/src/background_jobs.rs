@@ -316,9 +316,10 @@ pub(crate) fn background_jobs_main(
                 runtime.spawn({
                     let senders = bus.senders.clone();
                     async move {
-                        let output = tokio::process::Command::new(&command)
-                            .args(&args)
-                            .envs(env_variables)
+                        let mut child = tokio::process::Command::new(&command);
+                        child.args(&args).envs(env_variables);
+                        crate::pane_context::clear_environment(child.as_std_mut());
+                        let output = child
                             .current_dir(cwd)
                             .stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::piped())

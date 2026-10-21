@@ -3159,6 +3159,7 @@ impl TryFrom<ProtobufTiledPaneLayout> for TiledPaneLayout {
             pane_initial_contents: protobuf.pane_initial_contents,
             default_fg: None,
             default_bg: None,
+            context_metadata: Default::default(),
         })
     }
 }

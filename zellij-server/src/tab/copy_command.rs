@@ -19,8 +19,8 @@ impl CopyCommand {
         }
     }
     pub fn set(&self, value: String) -> Result<()> {
-        let mut process = Command::new(self.command.clone())
-            .args(self.args.clone())
+        let mut process = crate::pane_context::clear_environment(Command::new(self.command.clone())
+            .args(self.args.clone()))
             .stdin(Stdio::piped())
             .spawn()
             .with_context(|| format!("couldn't spawn {}", self.command))?;

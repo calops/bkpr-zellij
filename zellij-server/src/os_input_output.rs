@@ -413,6 +413,7 @@ impl ServerOsApi for ServerOsInputOutput {
             .context("no more terminal IDs left to allocate")?;
 
         self.pty_backend.reserve_terminal_id(terminal_id);
+        crate::pane_context::reserve_terminal(terminal_id);
 
         let (cmd, failover_cmd) = build_command(terminal_action, default_editor);
 
@@ -429,6 +430,7 @@ impl ServerOsApi for ServerOsInputOutput {
             .next_terminal_id()
             .context("no more terminal IDs available")?;
         self.pty_backend.reserve_terminal_id(terminal_id);
+        crate::pane_context::reserve_terminal(terminal_id);
         Ok(terminal_id)
     }
     fn write_to_tty_stdin(&self, terminal_id: u32, buf: &[u8]) -> Result<usize> {
@@ -683,6 +685,7 @@ impl ServerOsApi for ServerOsInputOutput {
         Ok((async_reader, Some(child_fd as u32)))
     }
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()> {
+        crate::pane_context::close_terminal(terminal_id);
         self.pty_backend.clear_terminal_id(terminal_id);
         Ok(())
     }
@@ -774,9 +777,9 @@ fn run_command_hook(
     original_command: &str,
     hook_script: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("sh")
+    let output = crate::pane_context::clear_environment(Command::new("sh")
         .arg("-c")
-        .arg(hook_script)
+        .arg(hook_script))
         .env("RESURRECT_COMMAND", original_command)
         .output()?;
 
@@ -791,9 +794,9 @@ fn run_command_hook(
     original_command: &str,
     hook_script: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("cmd")
+    let output = crate::pane_context::clear_environment(Command::new("cmd")
         .arg("/C")
-        .arg(hook_script)
+        .arg(hook_script))
         .env("RESURRECT_COMMAND", original_command)
         .output()?;
     if !output.status.success() {
