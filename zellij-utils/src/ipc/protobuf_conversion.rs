@@ -84,11 +84,13 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 tab_position_to_focus,
                 pane_to_focus,
                 is_web_client,
+                detach_others,
             } => client_to_server_msg::Message::AttachClient(AttachClientMsg {
                 cli_assets: Some(cli_assets.into()),
                 tab_position_to_focus: tab_position_to_focus.map(|pos| pos as u32),
                 pane_to_focus: pane_to_focus.map(|p| p.into()),
                 is_web_client,
+                detach_others,
             }),
             ClientToServerMsg::AttachWatcherClient {
                 terminal_size,
@@ -124,7 +126,10 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 client_to_server_msg::Message::KillSession(KillSessionMsg {})
             },
             ClientToServerMsg::ConnStatus => {
-                client_to_server_msg::Message::ConnStatus(ConnStatusMsg {})
+                client_to_server_msg::Message::ConnStatus(ConnStatusMsg { keep_connection: false })
+            },
+            ClientToServerMsg::ConnStatusWithCapabilities => {
+                client_to_server_msg::Message::ConnStatus(ConnStatusMsg { keep_connection: true })
             },
             ClientToServerMsg::WebServerStarted { base_url } => {
                 client_to_server_msg::Message::WebServerStarted(WebServerStartedMsg { base_url })
@@ -273,6 +278,7 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                         .try_into()?,
                     tab_position_to_focus: attach.tab_position_to_focus.map(|pos| pos as usize),
                     pane_to_focus: attach.pane_to_focus.map(|p| p.try_into()).transpose()?,
+                    detach_others: attach.detach_others,
                     is_web_client: attach.is_web_client,
                 })
             },
@@ -305,7 +311,13 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
             Some(client_to_server_msg::Message::KillSession(_)) => {
                 Ok(ClientToServerMsg::KillSession)
             },
-            Some(client_to_server_msg::Message::ConnStatus(_)) => Ok(ClientToServerMsg::ConnStatus),
+            Some(client_to_server_msg::Message::ConnStatus(status)) => {
+                Ok(if status.keep_connection {
+                    ClientToServerMsg::ConnStatusWithCapabilities
+                } else {
+                    ClientToServerMsg::ConnStatus
+                })
+            },
             Some(client_to_server_msg::Message::WebServerStarted(web_server)) => {
                 Ok(ClientToServerMsg::WebServerStarted {
                     base_url: web_server.base_url,
@@ -413,7 +425,12 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
                 })
             },
             ServerToClientMsg::Connected => {
-                server_to_client_msg::Message::Connected(ConnectedMsg {})
+                server_to_client_msg::Message::Connected(ConnectedMsg { detach_others: None })
+            },
+            ServerToClientMsg::ConnectedWithCapabilities { detach_others } => {
+                server_to_client_msg::Message::Connected(ConnectedMsg {
+                    detach_others: Some(detach_others),
+                })
             },
             ServerToClientMsg::Log { lines } => {
                 server_to_client_msg::Message::Log(LogMsg { lines })
@@ -650,7 +667,12 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
 
                 Ok(ServerToClientMsg::Exit { exit_reason })
             },
-            Some(server_to_client_msg::Message::Connected(_)) => Ok(ServerToClientMsg::Connected),
+            Some(server_to_client_msg::Message::Connected(connected)) => {
+                Ok(match connected.detach_others {
+                    Some(detach_others) => ServerToClientMsg::ConnectedWithCapabilities { detach_others },
+                    None => ServerToClientMsg::Connected,
+                })
+            },
             Some(server_to_client_msg::Message::Log(log)) => {
                 Ok(ServerToClientMsg::Log { lines: log.lines })
             },

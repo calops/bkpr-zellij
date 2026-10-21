@@ -645,6 +645,7 @@ pub(crate) fn start_client(opts: CliArgs) {
             if reconnect_to_session.name.is_some() {
                 opts.command = Some(Command::Sessions(Sessions::Attach {
                     session_name: reconnect_to_session.name.clone(),
+                    detach_others: false,
                     create: true,
                     create_background: false,
                     force_run_commands: false,
@@ -683,6 +684,7 @@ pub(crate) fn start_client(opts: CliArgs) {
         #[cfg_attr(not(feature = "web_server_capability"), allow(unused_variables))]
         if let Some(Command::Sessions(Sessions::Attach {
             session_name,
+            detach_others,
             create,
             create_background,
             force_run_commands,
@@ -710,7 +712,7 @@ pub(crate) fn start_client(opts: CliArgs) {
                     std::process::exit(2);
                 }
 
-                if options.is_some() || create || create_background || force_run_commands {
+                if options.is_some() || create || create_background || force_run_commands || detach_others {
                     eprintln!("Cannot attach to remote session with options.");
                     std::process::exit(2);
                 }
