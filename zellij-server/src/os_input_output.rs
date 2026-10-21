@@ -412,14 +412,14 @@ impl ServerOsApi for ServerOsInputOutput {
             .next_terminal_id()
             .context("no more terminal IDs left to allocate")?;
 
+        let environment = crate::pane_context::reserve_terminal(terminal_id)?;
         self.pty_backend.reserve_terminal_id(terminal_id);
-        crate::pane_context::reserve_terminal(terminal_id);
 
         let (cmd, failover_cmd) = build_command(terminal_action, default_editor);
 
         let (async_reader, child_fd) = self
             .pty_backend
-            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id)
+            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id, environment)
             .with_context(err_context)?;
 
         Ok((terminal_id, async_reader, Some(child_fd as u32)))
@@ -429,8 +429,8 @@ impl ServerOsApi for ServerOsInputOutput {
             .pty_backend
             .next_terminal_id()
             .context("no more terminal IDs available")?;
+        crate::pane_context::reserve_held_terminal(terminal_id)?;
         self.pty_backend.reserve_terminal_id(terminal_id);
-        crate::pane_context::reserve_terminal(terminal_id);
         Ok(terminal_id)
     }
     fn write_to_tty_stdin(&self, terminal_id: u32, buf: &[u8]) -> Result<usize> {
@@ -679,9 +679,10 @@ impl ServerOsApi for ServerOsInputOutput {
         run_command: RunCommand,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     ) -> Result<(Box<dyn AsyncReader>, Option<u32>)> {
+        let environment = crate::pane_context::rerun_environment(terminal_id)?;
         let (async_reader, child_fd) =
             self.pty_backend
-                .spawn_terminal(run_command, None, quit_cb, terminal_id)?;
+                .spawn_terminal(run_command, None, quit_cb, terminal_id, environment)?;
         Ok((async_reader, Some(child_fd as u32)))
     }
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()> {

@@ -11013,6 +11013,8 @@ pub(crate) fn screen_thread_main(
                             Some(t) => t,
                             None => {
                                 // no corresponding tab exists, we'll create it
+                                crate::pane_context::prepare_layout(
+                                    tab_layout_info.tab_index, &tab_layout_info.tiled_layout);
                                 processed_tab_layouts.push(tab_layout_info);
                                 continue;
                             },
