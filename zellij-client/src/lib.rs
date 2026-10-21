@@ -1197,18 +1197,32 @@ pub fn start_client(
     };
 
     os_input.connect_to_server(&*ipc_pipe);
-    if matches!(&first_msg, ClientToServerMsg::AttachClient { detach_others: true, .. }) {
+    if matches!(
+        &first_msg,
+        ClientToServerMsg::AttachClient {
+            detach_others: true,
+            ..
+        }
+    ) {
         // Probe on the very connection that will attach: another server cannot
         // replace a successful probe before receiving this attachment request.
         os_input.send_to_server(ClientToServerMsg::ConnStatusWithCapabilities);
-        if !matches!(
-            os_input.recv_from_server(),
-            Some((ServerToClientMsg::ConnectedWithCapabilities { detach_others: true }, _))
-        ) {
-            exit_after_startup_error(
-                Some(terminal_teardown),
-                "This session's server does not support --detach-others. Upgrade the server or create a new session; no other clients were detached.".to_owned(),
-            );
+        loop {
+            match os_input.recv_from_server() {
+                // Flow-control acknowledgements can precede the capability
+                // reply and do not answer the probe.
+                Some((ServerToClientMsg::UnblockInputThread, _)) => continue,
+                Some((
+                    ServerToClientMsg::ConnectedWithCapabilities {
+                        detach_others: true,
+                    },
+                    _,
+                )) => break,
+                _ => exit_after_startup_error(
+                    Some(terminal_teardown),
+                    "This session's server does not support --detach-others. Upgrade the server or create a new session; no other clients were detached.".to_owned(),
+                ),
+            }
         }
     }
     os_input.send_to_server(first_msg);
