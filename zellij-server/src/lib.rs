@@ -1316,7 +1316,7 @@ pub fn start_server_impl(
                     .session_configuration
                     .set_client_runtime_configuration(client_id, runtime_configuration);
 
-                let default_input_mode = config.options.default_mode.unwrap_or_default();
+                let default_input_mode = runtime_config_options.default_mode.unwrap_or_default();
                 session
                     .current_input_modes
                     .insert(client_id, default_input_mode);
@@ -1348,14 +1348,13 @@ pub fn start_server_impl(
                     .senders
                     .send_to_plugin(PluginInstruction::AddClient(client_id))
                     .unwrap();
-                let default_mode = config.options.default_mode.unwrap_or_default();
                 // ModeUpdate broadcast is handled by the screen thread via
                 // change_mode() -> update_input_modes()
                 session
                     .senders
                     .send_to_screen(ScreenInstruction::ChangeMode(
-                        default_mode,
-                        Some(default_mode),
+                        default_input_mode,
+                        Some(default_input_mode),
                         client_id,
                         None,
                     ))

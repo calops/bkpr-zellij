@@ -159,11 +159,13 @@ use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
     consts::{set_permissions, ZELLIJ_SOCK_DIR},
     data::{
-        ClientId, CommandOrPlugin, ConnectToSession, KeyWithModifier, LayoutInfo, LayoutMetadata,
+        ClientId, CommandOrPlugin, ConnectToSession, InputMode, KeyWithModifier, LayoutInfo,
+        LayoutMetadata,
     },
     envs,
     errors::{ClientContext, ContextType, ErrorInstruction},
     input::{
+        actions::Action,
         cli_assets::{host_terminal_env, CliAssets},
         config::Config,
         options::Options,
@@ -949,6 +951,18 @@ pub fn start_remote_client(
     Ok(reconnect_to_session)
 }
 
+fn explicit_attach_default_mode(cli_args: &CliArgs) -> Option<InputMode> {
+    match &cli_args.command {
+        Some(zellij_utils::cli::Command::Sessions(zellij_utils::cli::Sessions::Attach {
+            options: Some(options),
+            ..
+        })) => match options.as_ref() {
+            zellij_utils::cli::SessionCommand::Options(options) => options.default_mode,
+        },
+        _ => None,
+    }
+}
+
 pub fn start_client(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
@@ -1225,7 +1239,23 @@ pub fn start_client(
             }
         }
     }
+    let attachment_default_mode = if matches!(&first_msg, ClientToServerMsg::AttachClient { .. }) {
+        explicit_attach_default_mode(&cli_args)
+    } else {
+        None
+    };
     os_input.send_to_server(first_msg);
+    // LEGACY_COMPAT(next-major): older servers ignore the attachment's default_mode.
+    // Send the override on this attachment's own connection before starting input.
+    // The server completes this action before routing any subsequent key messages.
+    if let Some(input_mode) = attachment_default_mode {
+        os_input.send_to_server(ClientToServerMsg::Action {
+            action: Action::SwitchToMode { input_mode },
+            terminal_id: None,
+            client_id: None,
+            is_cli_client: false,
+        });
+    }
 
     let mut command_is_executing = CommandIsExecuting::new();
 
