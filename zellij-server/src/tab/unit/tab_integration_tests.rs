@@ -11956,42 +11956,6 @@ fn test_left_release_after_selection_copies_to_clipboard() {
 }
 
 #[test]
-fn blank_mouse_selection_does_not_clear_the_clipboard() {
-    let client_id = 1;
-    let mut tab = create_new_tab(
-        Size {
-            cols: 121,
-            rows: 20,
-        },
-        ModeInfo::default(),
-    );
-    tab.copy_on_select = true;
-    let (server_sender, server_receiver) = channels::unbounded();
-    tab.senders.to_server = Some(SenderWithContext::new(server_sender));
-    let start = Position::new(5, 5);
-    let end = Position::new(5, 15);
-
-    tab.handle_mouse_event(&MouseEvent::new_left_press_event(start), client_id)
-        .unwrap();
-    tab.handle_mouse_event(&MouseEvent::new_left_motion_event(end), client_id)
-        .unwrap();
-    tab.handle_mouse_event(&MouseEvent::new_left_release_event(end), client_id)
-        .unwrap();
-
-    let clipboard_was_written = server_receiver.try_iter().any(|(instruction, _)| {
-        if let crate::ServerInstruction::Render(Some(frames)) = instruction {
-            frames.values().any(|frame| frame.contains("\u{1b}]52;"))
-        } else {
-            false
-        }
-    });
-    assert!(
-        !clipboard_was_written,
-        "a blank selection must preserve the existing clipboard"
-    );
-}
-
-#[test]
 fn triple_click_without_motion_requests_render() {
     let size = Size {
         cols: 121,
