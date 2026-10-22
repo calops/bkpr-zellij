@@ -1223,7 +1223,9 @@ impl MouseHandler {
                 pane_with_selection.end_selection(&relative_position, client_id);
                 if pane_with_selection.supports_mouse_selection() {
                     if copy_on_release {
-                        let selected_text = pane_with_selection.get_selected_text(client_id);
+                        let selected_text = pane_with_selection
+                            .get_selected_text(client_id)
+                            .filter(|text| !text.is_empty());
                         if let Some(selected_text) = selected_text {
                             leave_clipboard_message = true;
                             tab.write_selection_to_clipboard(&selected_text)
