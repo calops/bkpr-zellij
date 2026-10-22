@@ -68,7 +68,6 @@ fn legacy_status_reply_does_not_advertise_detach_others() {
     let decoded: ServerToClientMsg = message.try_into().unwrap();
     assert_eq!(decoded, ServerToClientMsg::Connected);
 }
-
 fn test_client_messages() {
     let empty_context = BTreeMap::new();
     let mut demo_context = BTreeMap::new();

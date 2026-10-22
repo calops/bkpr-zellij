@@ -4,3 +4,6 @@ mod terminal_loop_tests;
 
 #[cfg(test)]
 mod teardown_tests;
+
+#[cfg(test)]
+mod attachment_tests;

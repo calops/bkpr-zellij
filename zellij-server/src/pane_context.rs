@@ -41,7 +41,6 @@ impl TerminalEnvironment {
             .env("BKPR_PANE_ID", &self.pane_id);
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TabContext {
     pub tab_id: usize,
@@ -302,6 +301,7 @@ impl Registry {
         for pane in panes.keys() {
             self.pending_panes.remove(pane);
         }
+
         for (pane, tab_id) in &self.panes {
             if self.pending_panes.contains(pane) && self.tabs.contains_key(tab_id) {
                 panes.insert(pane.clone(), *tab_id);
@@ -361,7 +361,6 @@ impl Registry {
             self.owner_lease.take();
         }
     }
-
     fn event(&self) -> Event {
         let panes = self
             .panes
@@ -803,7 +802,6 @@ fn acquire_owner_lease_in(
         "Bkpr native owner leases require Unix",
     ))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
