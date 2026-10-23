@@ -156,7 +156,10 @@ pub enum Command {
     Subscribe(SubscribeCli),
 
     /// Exchange one bounded JSON control request with an explicitly named native session
-    #[clap(name = "bkpr-control", override_usage("zellij --session <SESSION NAME> bkpr-control"))]
+    #[clap(
+        name = "bkpr-control",
+        override_usage("zellij --session <SESSION NAME> bkpr-control")
+    )]
     BkprControl,
 }
 
@@ -1603,14 +1606,17 @@ mod tests {
 
     #[test]
     fn bkpr_control_is_a_unit_command_with_an_explicit_session_target() {
-        let cli = CliArgs::try_parse_from([
-            "zellij", "--session", "work", "bkpr-control",
-        ]).unwrap();
+        let cli = CliArgs::try_parse_from(["zellij", "--session", "work", "bkpr-control"]).unwrap();
         assert_eq!(cli.session.as_deref(), Some("work"));
         assert!(matches!(cli.command, Some(Command::BkprControl)));
         assert!(CliArgs::try_parse_from([
-            "zellij", "--session", "work", "bkpr-control", "snapshot",
-        ]).is_err());
+            "zellij",
+            "--session",
+            "work",
+            "bkpr-control",
+            "snapshot",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -1623,13 +1629,19 @@ mod tests {
             let cli = CliArgs::try_parse_from(arguments).unwrap();
             assert!(matches!(
                 cli.command,
-                Some(Command::Sessions(Sessions::Attach { detach_others: true, .. }))
+                Some(Command::Sessions(Sessions::Attach {
+                    detach_others: true,
+                    ..
+                }))
             ));
         }
         let normal = CliArgs::try_parse_from(["zellij", "attach", "work"]).unwrap();
         assert!(matches!(
             normal.command,
-            Some(Command::Sessions(Sessions::Attach { detach_others: false, .. }))
+            Some(Command::Sessions(Sessions::Attach {
+                detach_others: false,
+                ..
+            }))
         ));
     }
 

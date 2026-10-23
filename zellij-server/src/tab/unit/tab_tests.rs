@@ -1567,10 +1567,14 @@ fn control_floating_focus_and_fullscreen_preserve_other_client_active_ids() {
     assert_eq!(tab.get_active_pane_id(1), first_client_pane);
     assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(2)));
     for enabled in [true, true, false, false] {
-        tab.control_set_fullscreen(PaneId::Terminal(2), enabled, false).unwrap();
+        tab.control_set_fullscreen(PaneId::Terminal(2), enabled, false)
+            .unwrap();
         assert_eq!(tab.get_active_pane_id(1), first_client_pane);
         assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(2)));
-        assert_eq!(tab.fullscreen_pane_id() == Some(PaneId::Terminal(2)), enabled);
+        assert_eq!(
+            tab.fullscreen_pane_id() == Some(PaneId::Terminal(2)),
+            enabled
+        );
     }
 }
 
@@ -1581,10 +1585,20 @@ fn control_stacked_focus_changes_only_the_requested_clients_active_id() {
         children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
         ..Default::default()
     };
-    let mut tab = create_new_tab_with_layout(Size { cols: 121, rows: 20 }, layout);
+    let mut tab = create_new_tab_with_layout(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        layout,
+    );
     let first_client_pane = tab.get_active_pane_id(1).unwrap();
     tab.control_add_client(2, ModeInfo::default()).unwrap();
-    let target = tab.get_tiled_pane_ids().into_iter().find(|id| *id != first_client_pane).unwrap();
+    let target = tab
+        .get_tiled_pane_ids()
+        .into_iter()
+        .find(|id| *id != first_client_pane)
+        .unwrap();
     tab.control_focus_pane(target, 2).unwrap();
     assert_eq!(tab.get_active_pane_id(1), Some(first_client_pane));
     assert_eq!(tab.get_active_pane_id(2), Some(target));
@@ -1595,18 +1609,27 @@ fn control_state_is_idempotent_for_an_unfocused_floating_pane() {
     let mut tab = create_tab_with_two_floating_panes();
     let focused = tab.get_active_pane_id(1);
     for _ in 0..2 {
-        tab.control_set_pane_state(PaneId::Terminal(2), Some(true), Some(true), None, Some(true)).unwrap();
+        tab.control_set_pane_state(
+            PaneId::Terminal(2),
+            Some(true),
+            Some(true),
+            None,
+            Some(true),
+        )
+        .unwrap();
     }
     let pane = tab.get_pane_with_id(PaneId::Terminal(2)).unwrap();
     assert!(pane.current_geom().is_pinned);
     assert!(pane.borderless());
     assert_eq!(tab.get_active_pane_id(1), focused);
     for _ in 0..2 {
-        tab.control_set_pane_state(PaneId::Terminal(2), None, None, Some(true), None).unwrap();
+        tab.control_set_pane_state(PaneId::Terminal(2), None, None, Some(true), None)
+            .unwrap();
         assert_eq!(tab.fullscreen_pane_id(), Some(PaneId::Terminal(2)));
     }
     for _ in 0..2 {
-        tab.control_set_pane_state(PaneId::Terminal(2), None, None, Some(false), None).unwrap();
+        tab.control_set_pane_state(PaneId::Terminal(2), None, None, Some(false), None)
+            .unwrap();
         assert_ne!(tab.fullscreen_pane_id(), Some(PaneId::Terminal(2)));
     }
 }
@@ -1615,21 +1638,40 @@ fn control_state_is_idempotent_for_an_unfocused_floating_pane() {
 fn control_float_does_not_focus_the_target_as_an_implementation_shortcut() {
     let mut tab = create_tab_with_four_panes();
     let focused = tab.get_active_pane_id(1);
-    tab.control_set_pane_state(PaneId::Terminal(2), Some(true), None, None, None).unwrap();
+    tab.control_set_pane_state(PaneId::Terminal(2), Some(true), None, None, None)
+        .unwrap();
     assert!(tab.pane_id_is_floating(&PaneId::Terminal(2)));
     assert_eq!(tab.get_active_pane_id(1), focused);
-    assert!(tab.control_set_pane_state(PaneId::Terminal(900), Some(true), None, None, None).is_err());
+    assert!(tab
+        .control_set_pane_state(PaneId::Terminal(900), Some(true), None, None, None)
+        .is_err());
 }
 
 #[test]
 fn control_move_keeps_pane_identity_and_destination_focus() {
     let mut source = create_tab_with_four_panes();
-    let mut destination = create_new_tab(Size { cols: 121, rows: 20 }, false);
+    let mut destination = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        false,
+    );
     let destination_focus = destination.get_active_pane_id(1);
-    source.rename_pane_by_pane_id(PaneId::Terminal(2), b"retained-process".to_vec()).unwrap();
-    source.control_transfer_pane(&mut destination, PaneId::Terminal(2)).unwrap();
+    source
+        .rename_pane_by_pane_id(PaneId::Terminal(2), b"retained-process".to_vec())
+        .unwrap();
+    source
+        .control_transfer_pane(&mut destination, PaneId::Terminal(2))
+        .unwrap();
     assert!(!source.has_pane_with_pid(&PaneId::Terminal(2)));
-    assert_eq!(destination.get_pane_with_id(PaneId::Terminal(2)).unwrap().current_title(), "retained-process");
+    assert_eq!(
+        destination
+            .get_pane_with_id(PaneId::Terminal(2))
+            .unwrap()
+            .current_title(),
+        "retained-process"
+    );
     assert_eq!(destination.get_active_pane_id(1), destination_focus);
 }
 
@@ -1640,29 +1682,54 @@ fn control_layout_retains_native_panes_without_following_layout_focus() {
     let pane_ids = tab.get_tiled_pane_ids();
     let layout = TiledPaneLayout {
         children_split_direction: SplitDirection::Vertical,
-        children: (0..4).map(|_| TiledPaneLayout { focus: Some(true), ..Default::default() }).collect(),
+        children: (0..4)
+            .map(|_| TiledPaneLayout {
+                focus: Some(true),
+                ..Default::default()
+            })
+            .collect(),
         ..Default::default()
     };
-    tab.control_override_layout(crate::screen::TabOverrideResult {
-        tab_index: tab.id, tab_name: None, tiled_layout: layout,
-        floating_layouts: vec![], swap_tiled_layouts: None, swap_floating_layouts: None,
-        new_terminal_pids: vec![], new_floating_pane_pids: vec![], plugin_ids: HashMap::new(),
-    }, 1).unwrap();
+    tab.control_override_layout(
+        crate::screen::TabOverrideResult {
+            tab_index: tab.id,
+            tab_name: None,
+            tiled_layout: layout,
+            floating_layouts: vec![],
+            swap_tiled_layouts: None,
+            swap_floating_layouts: None,
+            new_terminal_pids: vec![],
+            new_floating_pane_pids: vec![],
+            plugin_ids: HashMap::new(),
+        },
+        1,
+    )
+    .unwrap();
     assert_eq!(tab.get_tiled_pane_ids(), pane_ids);
     assert_eq!(tab.get_active_pane_id(1), focused);
 }
 
 #[test]
 fn control_input_queues_paste_and_submit_as_one_native_write() {
-    let mut tab = create_new_tab(Size { cols: 121, rows: 20 }, false);
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 20,
+        },
+        false,
+    );
     let rx = install_pty_writer_capture(&mut tab);
     tab.handle_pty_bytes(1, b"\x1b[?2004h".to_vec()).unwrap();
-    tab.control_input(PaneId::Terminal(1), vec![
-        (None, b"\x1b[200~".to_vec(), false),
-        (None, b"literal text".to_vec(), false),
-        (None, b"\x1b[201~".to_vec(), false),
-        (Some("Enter".parse().unwrap()), vec![13], false),
-    ]).unwrap();
+    tab.control_input(
+        PaneId::Terminal(1),
+        vec![
+            (None, b"\x1b[200~".to_vec(), false),
+            (None, b"literal text".to_vec(), false),
+            (None, b"\x1b[201~".to_vec(), false),
+            (Some("Enter".parse().unwrap()), vec![13], false),
+        ],
+    )
+    .unwrap();
     let writes = drain_pty_writer(&rx);
     assert_eq!(writes.len(), 1);
     match &writes[0] {
@@ -18027,4 +18094,481 @@ fn floating_plugin_panes_are_not_shown_again_when_their_tab_returns_with_the_sur
         !drain_visible_events(&plugin_receiver).contains(&(Some(1), true)),
         "a plugin whose floating surface is hidden should not be told it is visible when its tab returns"
     );
+}
+
+fn create_pane_with_receipt(
+    tab: &mut Tab,
+    pane_id: PaneId,
+    placement: NewPanePlacement,
+    relative_to: Option<PaneId>,
+) -> crate::route::ActionCompletionResult {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tab.new_pane_with_completion(
+        pane_id,
+        None,
+        None,
+        false,
+        false,
+        placement,
+        None,
+        relative_to,
+        Some(crate::route::NotificationEnd::new(sender)),
+        false,
+    )
+    .unwrap();
+    receiver.blocking_recv().unwrap()
+}
+
+fn receive_creation_cleanup(tab: &mut Tab) -> Receiver<(crate::pty::PtyInstruction, ErrorContext)> {
+    let (sender, receiver): ChannelWithContext<crate::pty::PtyInstruction> = unbounded();
+    tab.senders.replace_to_pty(SenderWithContext::new(sender));
+    receiver
+}
+
+fn assert_rejected_creation(
+    tab: &Tab,
+    pane_id: PaneId,
+    result: crate::route::ActionCompletionResult,
+    cleanup: Receiver<(crate::pty::PtyInstruction, ErrorContext)>,
+) {
+    assert!(result.completed);
+    assert_eq!(result.exit_status, Some(1));
+    assert!(result.error_message.is_some());
+    assert_eq!(result.affected_pane_id, None);
+    assert_eq!(result.affected_tab_id, None);
+    assert!(tab.get_pane_with_id(pane_id).is_none());
+    let closed_panes: Vec<_> = cleanup
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            crate::pty::PtyInstruction::ClosePane(id, _) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        closed_panes,
+        vec![pane_id],
+        "the uninstalled spawn must be closed exactly once"
+    );
+}
+
+#[test]
+fn native_relative_split_installs_at_exact_source_without_following_client_focus() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    tab.vertical_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+    let source_geom = tab
+        .get_pane_with_id(PaneId::Terminal(1))
+        .unwrap()
+        .position_and_size();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+    let cleanup = receive_creation_cleanup(&mut tab);
+
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Terminal(3),
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Right),
+            borderless: None,
+        },
+        Some(PaneId::Terminal(1)),
+    );
+
+    let installed = tab
+        .get_pane_with_id(PaneId::Terminal(3))
+        .unwrap()
+        .position_and_size();
+    let source = tab
+        .get_pane_with_id(PaneId::Terminal(1))
+        .unwrap()
+        .position_and_size();
+    let neighbor = tab
+        .get_pane_with_id(PaneId::Terminal(2))
+        .unwrap()
+        .position_and_size();
+    assert_eq!(source.x, source_geom.x);
+    assert_eq!(source.x + source.cols.as_usize(), installed.x);
+    assert_eq!(installed.x + installed.cols.as_usize(), neighbor.x);
+    assert_eq!(
+        (source.y, source.rows.as_usize()),
+        (installed.y, installed.rows.as_usize())
+    );
+    assert_eq!(
+        (installed.y, installed.rows.as_usize()),
+        (neighbor.y, neighbor.rows.as_usize())
+    );
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(2)));
+    assert!(result.completed);
+    assert_eq!(result.exit_status, None);
+    assert_eq!(result.error_message, None);
+    assert_eq!(result.affected_pane_id, Some(PaneId::Terminal(3)));
+    assert!(cleanup
+        .try_iter()
+        .all(|(instruction, _)| !matches!(instruction, crate::pty::PtyInstruction::ClosePane(..))));
+}
+
+#[test]
+fn native_relative_split_with_floating_surface_visible_rejects_and_closes_spawn() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+        .unwrap();
+    let focused = tab.get_active_pane_id(1);
+    let cleanup = receive_creation_cleanup(&mut tab);
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Terminal(3),
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Right),
+            borderless: None,
+        },
+        Some(PaneId::Terminal(1)),
+    );
+    assert_rejected_creation(&tab, PaneId::Terminal(3), result, cleanup);
+    assert_eq!(tab.get_active_pane_id(1), focused);
+    assert!(tab.floating_panes.panes_are_visible());
+}
+
+#[test]
+fn native_relative_split_without_room_rejects_both_axes_and_closes_spawn() {
+    for direction in [Direction::Right, Direction::Down] {
+        let mut tab = create_new_tab(Size { cols: 8, rows: 4 }, false);
+        let cleanup = receive_creation_cleanup(&mut tab);
+        let result = create_pane_with_receipt(
+            &mut tab,
+            PaneId::Terminal(2),
+            NewPanePlacement::Tiled {
+                direction: Some(direction),
+                borderless: None,
+            },
+            Some(PaneId::Terminal(1)),
+        );
+        assert_rejected_creation(&tab, PaneId::Terminal(2), result, cleanup);
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+    }
+}
+
+#[test]
+fn native_relative_split_after_destination_closes_does_not_fall_back_to_focused_pane() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    tab.vertical_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+    tab.close_pane(PaneId::Terminal(1), false, None);
+    let focused_geom = tab
+        .get_pane_with_id(PaneId::Terminal(2))
+        .unwrap()
+        .position_and_size();
+    let cleanup = receive_creation_cleanup(&mut tab);
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Terminal(3),
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Right),
+            borderless: None,
+        },
+        Some(PaneId::Terminal(1)),
+    );
+    assert_rejected_creation(&tab, PaneId::Terminal(3), result, cleanup);
+    assert_eq!(
+        tab.get_pane_with_id(PaneId::Terminal(2))
+            .unwrap()
+            .position_and_size(),
+        focused_geom
+    );
+}
+
+#[test]
+fn native_relative_split_cannot_install_at_a_hidden_floating_destination() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, false, None, None)
+        .unwrap();
+    let cleanup = receive_creation_cleanup(&mut tab);
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Terminal(3),
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Down),
+            borderless: None,
+        },
+        Some(PaneId::Terminal(2)),
+    );
+    assert_rejected_creation(&tab, PaneId::Terminal(3), result, cleanup);
+    assert!(tab.get_pane_with_id(PaneId::Terminal(2)).is_some());
+}
+
+#[test]
+fn native_unsupported_plugin_split_closes_plugin_without_claiming_its_id() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    let cleanup = receive_creation_cleanup(&mut tab);
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Plugin(2),
+        NewPanePlacement::Tiled {
+            direction: Some(Direction::Right),
+            borderless: None,
+        },
+        Some(PaneId::Terminal(1)),
+    );
+    assert_rejected_creation(&tab, PaneId::Plugin(2), result, cleanup);
+}
+
+#[test]
+fn native_tiled_creation_without_room_closes_spawn_without_claiming_its_id() {
+    let mut tab = create_new_tab(Size { cols: 8, rows: 4 }, false);
+    let cleanup = receive_creation_cleanup(&mut tab);
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Terminal(2),
+        NewPanePlacement::Tiled {
+            direction: None,
+            borderless: None,
+        },
+        None,
+    );
+    assert_rejected_creation(&tab, PaneId::Terminal(2), result, cleanup);
+}
+
+#[test]
+fn native_plugin_creation_receipt_names_the_installed_plugin() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    let result = create_pane_with_receipt(
+        &mut tab,
+        PaneId::Plugin(2),
+        NewPanePlacement::Tiled {
+            direction: None,
+            borderless: None,
+        },
+        None,
+    );
+    assert!(tab.get_pane_with_id(PaneId::Plugin(2)).is_some());
+    assert_eq!(result.affected_pane_id, Some(PaneId::Plugin(2)));
+    assert_eq!(result.exit_status, None);
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Terminal(1)));
+}
+
+#[test]
+fn native_plugin_setup_error_closes_spawn_and_fails_the_original_receipt() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    let cleanup = receive_creation_cleanup(&mut tab);
+    tab.senders.to_plugin = None;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let installation = tab.new_pane_with_completion(
+        PaneId::Plugin(2),
+        None,
+        None,
+        false,
+        false,
+        NewPanePlacement::Tiled {
+            direction: None,
+            borderless: None,
+        },
+        None,
+        None,
+        Some(crate::route::NotificationEnd::new(sender)),
+        false,
+    );
+    assert!(installation.is_err());
+    assert_rejected_creation(
+        &tab,
+        PaneId::Plugin(2),
+        receiver.blocking_recv().unwrap(),
+        cleanup,
+    );
+}
+
+#[test]
+fn initial_layout_installation_returns_native_applier_failure_instead_of_success() {
+    let mut tab = create_new_tab(
+        Size {
+            cols: 121,
+            rows: 30,
+        },
+        false,
+    );
+    let plugin = zellij_utils::input::layout::RunPluginOrAlias::from_url(
+        "zellij:tab-bar",
+        &None,
+        None,
+        None,
+    )
+    .unwrap();
+    let layout = TiledPaneLayout {
+        run: Some(zellij_utils::input::layout::Run::Plugin(plugin)),
+        ..Default::default()
+    };
+
+    let result = tab.apply_layout(
+        layout,
+        vec![],
+        vec![(2, None)],
+        vec![],
+        HashMap::new(),
+        1,
+        None,
+    );
+
+    assert!(
+        result.is_err(),
+        "a missing prepared plugin ID must reach the native completion"
+    );
+    assert!(tab.get_pane_with_id(PaneId::Terminal(2)).is_none());
+}
+
+#[test]
+fn headless_permission_dialog_resizes_and_restores_suppressed_owner_after_explicit_consent() {
+    use zellij_utils::data::{PermissionStatus, PermissionType, PluginPermission};
+    use zellij_utils::pane_size::{Dimension, Offset};
+
+    for (key, expected_status) in [
+        (b'y', PermissionStatus::Granted),
+        (b'n', PermissionStatus::Denied),
+    ] {
+        let (mut tab, plugin_events) =
+            create_new_tab_with_plugin_receiver(Size { cols: 12, rows: 40 }, false);
+        tab.auto_layout = false;
+        let owner = PaneId::Plugin(2);
+        create_pane_with_receipt(&mut tab, owner, NewPanePlacement::Floating(None), None);
+        let original = PaneGeom {
+            x: 0,
+            y: 0,
+            cols: Dimension::fixed(1),
+            rows: Dimension::fixed(1),
+            is_pinned: true,
+            ..Default::default()
+        };
+        {
+            let pane = tab.get_pane_with_id_mut(owner).unwrap();
+            pane.set_content_offset(Offset::frame(0));
+            pane.set_borderless(true);
+            pane.set_pinned(true);
+            pane.set_geom(original);
+        }
+        tab.suppress_pane(owner, None);
+        tab.request_plugin_permissions(
+            2,
+            Some(PluginPermission::new(
+                "file:/native-owner.wasm".into(),
+                vec![PermissionType::ReadApplicationState],
+            )),
+        );
+        assert!(
+            tab.get_pane_with_id(owner)
+                .unwrap()
+                .position_and_size()
+                .cols
+                .as_usize()
+                < 10
+        );
+        let focus = tab.get_active_pane_id(1);
+        tab.resize_whole_tab(Size {
+            cols: 120,
+            rows: 40,
+        })
+        .unwrap();
+        assert_eq!(
+            tab.get_pane_with_id(owner)
+                .unwrap()
+                .position_and_size()
+                .cols
+                .as_usize(),
+            60
+        );
+        assert!(tab
+            .get_pane_with_id(owner)
+            .unwrap()
+            .pane_contents(Some(1), false, None)
+            .viewport
+            .join("\n")
+            .contains("Allow? (y/n)"));
+        assert_eq!(tab.get_active_pane_id(1), focus);
+        create_pane_with_receipt(
+            &mut tab,
+            PaneId::Terminal(3),
+            NewPanePlacement::Floating(None),
+            None,
+        );
+        let ordinary = tab
+            .get_pane_with_id(PaneId::Terminal(3))
+            .unwrap()
+            .position_and_size();
+        tab.resize_whole_tab(Size {
+            cols: 144,
+            rows: 48,
+        })
+        .unwrap();
+        assert_eq!(
+            tab.get_pane_with_id(owner)
+                .unwrap()
+                .position_and_size()
+                .cols
+                .as_usize(),
+            72
+        );
+        assert_eq!(
+            tab.get_pane_with_id(PaneId::Terminal(3))
+                .unwrap()
+                .position_and_size(),
+            ordinary
+        );
+        assert_eq!(tab.get_active_pane_id(1), focus);
+        assert!(
+            !plugin_events
+                .try_iter()
+                .any(|(event, _)| matches!(event, PluginInstruction::PermissionRequestResult(..))),
+            "viewport changes must not approve or deny permissions"
+        );
+        tab.write_to_pane_id(&None, vec![key], false, owner, Some(1), None)
+            .unwrap();
+        assert!(!tab.floating_panes.panes_contain(&owner));
+        let restored = &tab.suppressed_panes.get(&owner).unwrap().1;
+        assert_eq!(restored.position_and_size(), original);
+        assert_eq!(restored.get_content_offset(), Offset::frame(0));
+        assert!(restored.borderless());
+        assert!(!restored.query_should_be_suppressed());
+        assert!(plugin_events.try_iter().any(|(event, _)| matches!(
+            event, PluginInstruction::PermissionRequestResult(
+                2, Some(1), permissions, status, None
+            ) if permissions == vec![PermissionType::ReadApplicationState] && status == expected_status
+        )));
+    }
 }

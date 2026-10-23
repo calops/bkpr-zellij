@@ -36,13 +36,41 @@ pub struct ControlResponse {
 
 impl ControlResponse {
     pub fn completed(request: &ControlRequest, result: Value) -> Self {
-        Self { protocol: PROTOCOL, request_id: request.request_id.clone(), outcome: "completed".into(), result: Some(result), error: None }
+        Self {
+            protocol: PROTOCOL,
+            request_id: request.request_id.clone(),
+            outcome: "completed".into(),
+            result: Some(result),
+            error: None,
+        }
     }
-    pub fn failed(request: &ControlRequest, code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { protocol: PROTOCOL, request_id: request.request_id.clone(), outcome: "failed".into(), result: None, error: Some(ControlError { code: code.into(), message: message.into() }) }
+    pub fn failed(
+        request: &ControlRequest,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol: PROTOCOL,
+            request_id: request.request_id.clone(),
+            outcome: "failed".into(),
+            result: None,
+            error: Some(ControlError {
+                code: code.into(),
+                message: message.into(),
+            }),
+        }
     }
     pub fn unknown(request: &ControlRequest, message: impl Into<String>) -> Self {
-        Self { protocol: PROTOCOL, request_id: request.request_id.clone(), outcome: "unknown".into(), result: None, error: Some(ControlError { code: "completion_unknown".into(), message: message.into() }) }
+        Self {
+            protocol: PROTOCOL,
+            request_id: request.request_id.clone(),
+            outcome: "unknown".into(),
+            result: None,
+            error: Some(ControlError {
+                code: "completion_unknown".into(),
+                message: message.into(),
+            }),
+        }
     }
 }
 
@@ -54,8 +82,11 @@ pub fn parse_action(argv: &[String]) -> Result<crate::cli::CliAction, String> {
         return Err("action argv must contain between 1 and 4096 arguments".into());
     }
     let command = crate::cli::CliArgs::try_parse_from(
-        ["zellij".to_owned(), "action".to_owned()].into_iter().chain(argv.iter().cloned()),
-    ).map_err(|error| error.to_string())?;
+        ["zellij".to_owned(), "action".to_owned()]
+            .into_iter()
+            .chain(argv.iter().cloned()),
+    )
+    .map_err(|error| error.to_string())?;
     match command.command {
         Some(crate::cli::Command::Action(action)) => Ok(*action),
         _ => Err("expected a native CLI action".into()),

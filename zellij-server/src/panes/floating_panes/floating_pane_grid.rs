@@ -102,7 +102,7 @@ impl<'a> FloatingPaneGrid<'a> {
         };
 
         let mut panes = self.panes.borrow_mut();
-        let desired_pane_positions = self.desired_pane_positions.borrow();
+        let mut desired_pane_positions = self.desired_pane_positions.borrow_mut();
 
         // account for the difference between the viewport (including non-ui pane items which we
         // do not want to override) and the display_area, which is the area we can go over
@@ -122,6 +122,16 @@ impl<'a> FloatingPaneGrid<'a> {
                 space,
                 new_viewport,
             );
+            if pane.query_should_be_suppressed() {
+                // A suppressed plugin can request permissions before any real
+                // attachment supplies its viewport. These temporary native
+                // dialogs use normal floating-dialog sizing, not the tiny
+                // fixed geometry chosen during headless startup.
+                let permission_geom = half_size_middle_geom(&new_viewport, 0);
+                pane.set_geom(permission_geom);
+                desired_pane_positions.insert(*pane_id, permission_geom);
+                continue;
+            }
             let desired_pane_geom = desired_pane_positions
                 .get(pane_id)
                 .with_context(|| {

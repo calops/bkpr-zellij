@@ -1812,16 +1812,13 @@ pub(crate) fn route_action(
             show_all,
             output_json,
         } => {
-            let maybe_panes =
-                request_panes_from_screen(&senders, show_all).with_context(err_context)?;
-
-            if let Some(mut pane_entries) = maybe_panes {
+            let result = (|| -> Result<Vec<String>> {
+                let mut pane_entries = request_panes_from_screen(&senders, show_all)?
+                    .ok_or_else(|| anyhow!("Timeout listing panes"))?;
                 if show_command || show_all || output_json {
-                    enrich_panes_with_pty_data(&mut pane_entries, &senders)
-                        .with_context(err_context)?;
+                    enrich_panes_with_pty_data(&mut pane_entries, &senders)?;
                 }
-
-                let output_lines = if output_json {
+                Ok(if output_json {
                     format_panes_as_json(&pane_entries)
                 } else {
                     format_panes_table(
@@ -1831,13 +1828,14 @@ pub(crate) fn route_action(
                         show_state || show_all,
                         show_geometry || show_all,
                     )
-                };
-
-                send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
-            } else {
-                send_error_to_client(cli_client_id, os_input.as_ref(), "Timeout listing panes");
-            }
-            drop(NotificationEnd::new(completion_tx));
+                })
+            })();
+            complete_query_output(
+                result.map_err(|error| error.to_string()),
+                NotificationEnd::new(completion_tx),
+                cli_client_id,
+                os_input.as_ref(),
+            );
         },
         Action::ListTabs {
             show_state,
@@ -1847,27 +1845,27 @@ pub(crate) fn route_action(
             show_all,
             output_json,
         } => {
-            let maybe_tabs =
-                request_tabs_from_screen(&senders, client_id).with_context(err_context)?;
-
-            if let Some(tab_infos) = maybe_tabs {
-                let output_lines = if output_json {
-                    format_tabs_as_json(&tab_infos)
-                } else {
-                    format_tabs_table(
-                        &tab_infos,
-                        show_state || show_all,
-                        show_dimensions || show_all,
-                        show_panes || show_all,
-                        show_layout || show_all,
-                    )
-                };
-
-                send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
-            } else {
-                send_error_to_client(cli_client_id, os_input.as_ref(), "Timeout listing tabs");
-            }
-            drop(NotificationEnd::new(completion_tx));
+            let result = request_tabs_from_screen(&senders, client_id)
+                .and_then(|tabs| tabs.ok_or_else(|| anyhow!("Timeout listing tabs")))
+                .map(|tab_infos| {
+                    if output_json {
+                        format_tabs_as_json(&tab_infos)
+                    } else {
+                        format_tabs_table(
+                            &tab_infos,
+                            show_state || show_all,
+                            show_dimensions || show_all,
+                            show_panes || show_all,
+                            show_layout || show_all,
+                        )
+                    }
+                });
+            complete_query_output(
+                result.map_err(|error| error.to_string()),
+                NotificationEnd::new(completion_tx),
+                cli_client_id,
+                os_input.as_ref(),
+            );
         },
         Action::CurrentTabInfo { output_json } => {
             let maybe_tab_info = request_current_tab_info_from_screen(&senders, client_id)
@@ -3465,6 +3463,28 @@ fn format_current_tab_info_plain(tab_info: &TabInfo) -> Vec<String> {
     ]
 }
 
+fn complete_query_output(
+    result: std::result::Result<Vec<String>, String>,
+    mut completion: NotificationEnd,
+    cli_client_id: Option<ClientId>,
+    os_input: Option<&Box<dyn ServerOsApi>>,
+) {
+    if completion.capture_output() {
+        match result {
+            Ok(lines) => completion.set_stdout_message(lines.join("\n")),
+            Err(error) => {
+                completion.set_exit_status(1);
+                completion.set_error_message(error);
+            },
+        }
+    } else {
+        match result {
+            Ok(lines) => send_output_to_client(cli_client_id, os_input, lines),
+            Err(error) => send_error_to_client(cli_client_id, os_input, &error),
+        }
+    }
+}
+
 fn send_error_to_client(
     cli_client_id: Option<ClientId>,
     os_input: Option<&Box<dyn ServerOsApi>>,
@@ -3568,5 +3588,137 @@ mod tests {
         assert_eq!(cloned.affected_tab_id, Some(99));
         // But channel should be None (as per the Clone implementation comment)
         assert!(cloned.channel.is_none());
+    }
+}
+
+#[cfg(test)]
+mod control_query_tests {
+    use super::*;
+    use serde_json::Value;
+    use zellij_utils::data::PaneInfo;
+
+    fn execute_query(
+        action: Action,
+        respond: impl FnOnce(ScreenInstruction) + Send + 'static,
+    ) -> ActionCompletionResult {
+        let (tx, rx) = crossbeam::channel::unbounded::<(
+            ScreenInstruction,
+            zellij_utils::errors::ErrorContext,
+        )>();
+        let screen = std::thread::spawn(move || respond(rx.recv().unwrap().0));
+        let senders = ThreadSenders {
+            to_screen: Some(SenderWithContext::new(tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        };
+        let _scope = capture_control_output();
+        let (_, result) = route_action(
+            action,
+            0,
+            None,
+            None,
+            senders,
+            None,
+            None,
+            InputMode::Normal,
+            None,
+        )
+        .unwrap();
+        screen.join().unwrap();
+        result.unwrap()
+    }
+
+    fn panes_action() -> Action {
+        Action::ListPanes {
+            show_tab: false,
+            show_command: false,
+            show_state: false,
+            show_geometry: false,
+            show_all: false,
+            output_json: true,
+        }
+    }
+
+    fn tabs_action() -> Action {
+        Action::ListTabs {
+            show_state: false,
+            show_dimensions: false,
+            show_panes: false,
+            show_layout: false,
+            show_all: false,
+            output_json: true,
+        }
+    }
+
+    #[test]
+    fn pane_query_completion_contains_native_identity_and_metadata_without_cli_client() {
+        let result = execute_query(panes_action(), |instruction| {
+            let ScreenInstruction::ListPanes {
+                response_channel, ..
+            } = instruction
+            else {
+                panic!("wrong query");
+            };
+            response_channel
+                .send(vec![PaneListEntry {
+                    pane_info: PaneInfo {
+                        id: 17,
+                        is_plugin: true,
+                        title: "sidebar title".into(),
+                        ..Default::default()
+                    },
+                    tab_id: 8,
+                    tab_position: 3,
+                    tab_name: "workspace".into(),
+                    pane_command: None,
+                    pane_cwd: None,
+                    program_status: vec![],
+                }])
+                .unwrap();
+        });
+        assert!(result.completed);
+        assert!(result.error_message.is_none());
+        let panes: Value = serde_json::from_str(result.stdout_message.as_deref().unwrap()).unwrap();
+        assert_eq!(panes[0]["id"], 17);
+        assert_eq!(panes[0]["tab_id"], 8);
+        assert_eq!(panes[0]["title"], "sidebar title");
+        assert_eq!(panes[0]["tab_name"], "workspace");
+    }
+
+    #[test]
+    fn tab_query_completion_preserves_stable_id_not_display_position() {
+        let result = execute_query(tabs_action(), |instruction| {
+            let ScreenInstruction::ListTabs {
+                response_channel, ..
+            } = instruction
+            else {
+                panic!("wrong query");
+            };
+            response_channel
+                .send(vec![TabInfo {
+                    tab_id: 41,
+                    position: 5,
+                    name: "other tab".into(),
+                    ..Default::default()
+                }])
+                .unwrap();
+        });
+        let tabs: Value = serde_json::from_str(result.stdout_message.as_deref().unwrap()).unwrap();
+        assert!(result.completed);
+        assert!(result.error_message.is_none());
+        assert_eq!(tabs[0]["tab_id"], 41);
+        assert_eq!(tabs[0]["position"], 5);
+        assert_eq!(tabs[0]["name"], "other tab");
+    }
+
+    #[test]
+    fn lost_list_responses_fail_instead_of_acknowledging_empty_success() {
+        for action in [panes_action(), tabs_action()] {
+            let result = execute_query(action, drop);
+            assert!(result.completed);
+            assert_eq!(result.exit_status, Some(1));
+            assert!(result.error_message.is_some());
+            assert!(result.stdout_message.is_none());
+        }
     }
 }

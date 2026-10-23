@@ -716,7 +716,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                     std::process::exit(2);
                 }
 
-                if options.is_some() || create || create_background || force_run_commands || detach_others {
+                if options.is_some()
+                    || create
+                    || create_background
+                    || force_run_commands
+                    || detach_others
+                {
                     eprintln!("Cannot attach to remote session with options.");
                     std::process::exit(2);
                 }

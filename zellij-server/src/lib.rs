@@ -12,14 +12,14 @@ pub mod panes;
 pub mod tab;
 
 pub mod background_jobs;
-mod global_async_runtime;
 mod control;
+mod global_async_runtime;
 mod logging_pipe;
 mod mobile_web;
 pub mod nested_guest;
 pub mod notifications;
-mod pane_groups;
 mod pane_context;
+mod pane_groups;
 mod plugins;
 mod pty;
 mod pty_writer;
@@ -757,9 +757,7 @@ impl SessionState {
         }
         self.clients
             .iter()
-            .filter_map(|(&id, data)| {
-                (id != retained_client_id && data.is_some()).then_some(id)
-            })
+            .filter_map(|(&id, data)| (id != retained_client_id && data.is_some()).then_some(id))
             .collect()
     }
     pub fn watcher_client_ids(&self) -> Vec<ClientId> {
@@ -1066,6 +1064,10 @@ pub fn start_server_impl(
                             let to_server = to_server.clone();
                             thread::Builder::new()
                                 .name("server_router".to_string())
+                                // Native control builds the existing Clap action grammar here.
+                                // Its debug-build frame alone is nearly 2 MiB, before the
+                                // router and parser callers on this same thread.
+                                .stack_size(16 * 1024 * 1024)
                                 .spawn(move || {
                                     route_thread_main(
                                         session_data,
@@ -1607,12 +1609,7 @@ pub fn start_server_impl(
                 break;
             },
             ServerInstruction::DisconnectAllClientsExcept(client_id) => {
-                disconnect_other_clients(
-                    client_id,
-                    &mut os_input,
-                    &session_state,
-                    &session_data,
-                );
+                disconnect_other_clients(client_id, &mut os_input, &session_state, &session_data);
             },
             ServerInstruction::DetachSession(client_ids, completion_tx) => {
                 for client_id in &client_ids {
@@ -1718,15 +1715,16 @@ pub fn start_server_impl(
             ServerInstruction::ConnStatusWithCapabilities(client_id) => {
                 let _ = os_input.send_to_client(
                     client_id,
-                    ServerToClientMsg::ConnectedWithCapabilities { detach_others: true },
+                    ServerToClientMsg::ConnectedWithCapabilities {
+                        detach_others: true,
+                    },
                 );
             },
-            ServerInstruction::Log(
-                lines_to_log,
-                client_id,
-                mut completion,
-            ) => {
-                if let Some(completion) = completion.as_mut().filter(|completion| completion.capture_output()) {
+            ServerInstruction::Log(lines_to_log, client_id, mut completion) => {
+                if let Some(completion) = completion
+                    .as_mut()
+                    .filter(|completion| completion.capture_output())
+                {
                     completion.set_stdout_message(lines_to_log.join("\n"));
                     continue;
                 }
@@ -1740,12 +1738,11 @@ pub fn start_server_impl(
                     session_data
                 );
             },
-            ServerInstruction::LogError(
-                lines_to_log,
-                client_id,
-                mut completion,
-            ) => {
-                if let Some(completion) = completion.as_mut().filter(|completion| completion.capture_output()) {
+            ServerInstruction::LogError(lines_to_log, client_id, mut completion) => {
+                if let Some(completion) = completion
+                    .as_mut()
+                    .filter(|completion| completion.capture_output())
+                {
                     completion.set_error_message(lines_to_log.join("\n"));
                     continue;
                 }
@@ -2049,7 +2046,12 @@ pub fn start_server_impl(
                     .unwrap();
             },
             ServerInstruction::SetClipboardPasteMode(client_id, context) => {
-                if session_state.read().unwrap().clients.contains_key(&client_id) {
+                if session_state
+                    .read()
+                    .unwrap()
+                    .clients
+                    .contains_key(&client_id)
+                {
                     send_to_client!(
                         client_id,
                         os_input,

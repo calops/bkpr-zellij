@@ -108,6 +108,7 @@ pub(crate) struct PluginPane {
     arrow_fonts: bool,
     styled_underlines: bool,
     should_be_suppressed: bool,
+    permission_original_presentation: Option<(PaneGeom, Offset, bool)>,
     text_being_pasted: Option<Vec<u8>>,
     supports_mouse_selection: bool,
 }
@@ -167,6 +168,7 @@ impl PluginPane {
             arrow_fonts,
             styled_underlines,
             should_be_suppressed: false,
+            permission_original_presentation: None,
             text_being_pasted: None,
             supports_mouse_selection: false,
         };
@@ -431,6 +433,7 @@ impl Pane for PluginPane {
             return Ok(None);
         }
         if let Some(client_id) = client_id {
+            self.ensure_pending_permission_grid(client_id);
             if self.should_render.get(&client_id).copied().unwrap_or(false) {
                 let content_x = self.get_content_x();
                 let content_y = self.get_content_y();
@@ -464,6 +467,7 @@ impl Pane for PluginPane {
         let frame_geom = frame_params
             .frame_geom_override
             .unwrap_or_else(|| self.current_geom());
+        self.ensure_pending_permission_grid(client_id);
         let grid = get_or_create_grid!(self, client_id);
         let err_context = || format!("failed to render frame for client {client_id}");
         let pane_title = if frame_params.blank_title {
@@ -871,6 +875,17 @@ impl Pane for PluginPane {
         self.frame.clear();
     }
     fn set_should_be_suppressed(&mut self, should_be_suppressed: bool) {
+        if should_be_suppressed && !self.should_be_suppressed {
+            self.permission_original_presentation =
+                Some((self.geom, self.content_offset, self.borderless));
+        } else if !should_be_suppressed {
+            if let Some((geom, offset, borderless)) = self.permission_original_presentation.take() {
+                self.content_offset = offset;
+                self.borderless = borderless;
+                self.geom.is_pinned = geom.is_pinned;
+                self.set_geom(geom);
+            }
+        }
         self.should_be_suppressed = should_be_suppressed;
     }
     fn query_should_be_suppressed(&self) -> bool {
@@ -972,10 +987,20 @@ impl PluginPane {
         for grid in self.grids.values_mut() {
             grid.change_size(content_rows, content_columns);
         }
+        if self.requesting_permissions.is_some() {
+            self.handle_plugin_bytes_for_all_clients(Vec::new());
+        }
         self.set_should_render(true);
     }
     fn set_client_should_render(&mut self, client_id: ClientId, should_render: bool) {
         self.should_render.insert(client_id, should_render);
+    }
+    fn ensure_pending_permission_grid(&mut self, client_id: ClientId) {
+        if self.requesting_permissions.is_some() && !self.grids.contains_key(&client_id) {
+            // The request may predate the first real attachment. Paint the
+            // retained native prompt without waiting for privileged WASM updates.
+            self.handle_plugin_bytes(client_id, Vec::new());
+        }
     }
     fn handle_plugin_bytes_for_all_clients(&mut self, bytes: VteBytes) {
         let client_ids: Vec<ClientId> = self.grids.keys().copied().collect();
@@ -1032,5 +1057,103 @@ impl PluginPane {
         }
 
         messages
+    }
+}
+
+#[cfg(test)]
+mod pending_permission_tests {
+    use super::*;
+    use zellij_utils::pane_size::Dimension;
+
+    fn plugin(
+        clients: Vec<ClientId>,
+    ) -> (
+        PluginPane,
+        crossbeam::channel::Receiver<(PluginInstruction, zellij_utils::errors::ErrorContext)>,
+    ) {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let pane = PluginPane::new(
+            7,
+            PaneGeom {
+                rows: Dimension::fixed(12),
+                cols: Dimension::fixed(80),
+                ..Default::default()
+            },
+            SenderWithContext::new(sender),
+            "permission fixture".into(),
+            String::new(),
+            Rc::new(RefCell::new(SixelImageStore::default())),
+            Rc::new(RefCell::new(KittyImageStore::default())),
+            Rc::new(RefCell::new(Palette::default())),
+            Rc::new(RefCell::new(HashMap::new())),
+            Rc::new(RefCell::new(LinkHandler::new())),
+            Rc::new(RefCell::new(None)),
+            clients,
+            Style::default(),
+            None,
+            false,
+            true,
+            true,
+        );
+        (pane, receiver)
+    }
+
+    #[test]
+    fn pending_headless_permission_is_visible_to_first_real_client_without_granting_it() {
+        let (mut pane, commands) = plugin(vec![]);
+        pane.request_permissions_from_user(Some(PluginPermission::new(
+            "file:/permission-fixture.wasm".into(),
+            vec![PermissionType::ReadApplicationState],
+        )));
+        assert!(pane.grids.is_empty());
+        assert!(pane.render(Some(17)).unwrap().is_some());
+        let prompt = pane
+            .pane_contents(Some(17), false, None)
+            .viewport
+            .join("\n");
+        assert!(prompt.contains("Allow?"));
+        assert!(prompt.contains("(y/n)"));
+        assert!(pane.requesting_permissions.is_some());
+        assert!(
+            commands.try_recv().is_err(),
+            "displaying the native prompt must not approve it"
+        );
+        assert!(pane
+            .adjust_input_to_terminal(&None, vec![b'x'], false, Some(17))
+            .is_none());
+        assert!(matches!(
+            pane.adjust_input_to_terminal(&None, vec![b'y'], false, Some(17)),
+            Some(AdjustedInput::PermissionRequestResult(permissions, PermissionStatus::Granted))
+                if permissions == vec![PermissionType::ReadApplicationState]
+        ));
+    }
+
+    #[test]
+    fn later_client_gets_same_pending_prompt_without_changing_other_client_projection() {
+        let (mut pane, commands) = plugin(vec![3]);
+        pane.request_permissions_from_user(Some(PluginPermission::new(
+            "file:/permission-fixture.wasm".into(),
+            vec![PermissionType::ReadApplicationState],
+        )));
+        let original = pane.pane_contents(Some(3), false, None).viewport;
+        pane.render(Some(17)).unwrap();
+        assert_eq!(pane.pane_contents(Some(3), false, None).viewport, original);
+        assert!(pane
+            .pane_contents(Some(17), false, None)
+            .viewport
+            .join("\n")
+            .contains("Allow?"));
+        assert!(pane.requesting_permissions.is_some());
+        assert!(commands.try_recv().is_err());
+        pane.request_permissions_from_user(None);
+        assert!(!pane
+            .pane_contents(Some(17), false, None)
+            .viewport
+            .join("\n")
+            .contains("Allow?"));
+        assert!(!matches!(
+            pane.adjust_input_to_terminal(&None, vec![b'y'], false, Some(17)),
+            Some(AdjustedInput::PermissionRequestResult(..))
+        ));
     }
 }

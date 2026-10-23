@@ -3070,7 +3070,7 @@ impl ThemeHue {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -3134,6 +3134,8 @@ pub mod client_to_server_msg {
         HostTerminalFocusChanged(super::HostTerminalFocusChangedMsg),
         #[prost(message, tag="28")]
         ClipboardPaste(super::ClipboardPasteMsg),
+        #[prost(message, tag="29")]
+        BkprControl(super::BkprControlRequestMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3347,6 +3349,13 @@ pub struct SetMobileRenderPreferencesMsg {
     #[prost(bool, tag="2")]
     pub fit: bool,
 }
+/// JSON is bounded and typed by the additive control protocol at ingress.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BkprControlRequestMsg {
+    #[prost(string, tag="1")]
+    pub json: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum HostTerminalThemeIndication {
@@ -3376,7 +3385,7 @@ impl HostTerminalThemeIndication {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -3424,6 +3433,8 @@ pub mod server_to_client_msg {
         MobileState(super::MobileStateMsg),
         #[prost(message, tag="20")]
         SetClipboardPasteMode(super::SetClipboardPasteModeMsg),
+        #[prost(message, tag="21")]
+        BkprControl(super::BkprControlResponseMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3645,4 +3656,10 @@ pub struct MobileStateMsg {
     pub sessions: ::prost::alloc::vec::Vec<MobileSessionMsg>,
     #[prost(message, optional, tag="10")]
     pub render_prefs: ::core::option::Option<MobileRenderPrefsMsg>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BkprControlResponseMsg {
+    #[prost(string, tag="1")]
+    pub json: ::prost::alloc::string::String,
 }

@@ -3,14 +3,13 @@ use std::str::FromStr;
 use crate::{
     client_server_contract::client_server_contract::{
         client_to_server_msg, server_to_client_msg, ActionMsg, AttachClientMsg,
-        AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg, ClientExitedMsg,
-        ClipboardPasteMsg, SetClipboardPasteModeMsg,
-        ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg, ConfigFileUpdatedMsg,
-        ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg,
-        EmitNestedSessionFrameMsg, ExitMsg, ExitReason as ProtoExitReason,
-        FailedToStartWebServerMsg, FirstClientConnectedMsg, ForegroundColorMsg,
-        ForwardQueryToHostMsg, ForwardedReplyFromHostMsg, HostTerminalFocusChangedMsg,
-        HostTerminalThemeChangedMsg,
+        AttachWatcherClientMsg, BackgroundColorMsg, BkprControlRequestMsg, BkprControlResponseMsg,
+        CliPipeOutputMsg, ClientExitedMsg, ClientToServerMsg as ProtoClientToServerMsg,
+        ClipboardPasteMsg, ColorRegistersMsg, ConfigFileUpdatedMsg, ConnStatusMsg, ConnectedMsg,
+        DesktopNotificationResponseMsg, DetachSessionMsg, EmitNestedSessionFrameMsg, ExitMsg,
+        ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
+        ForegroundColorMsg, ForwardQueryToHostMsg, ForwardedReplyFromHostMsg,
+        HostTerminalFocusChangedMsg, HostTerminalThemeChangedMsg,
         HostTerminalThemeIndication as ProtoHostTerminalThemeIndication,
         InputMode as ProtoInputMode, KeyMsg, KillSessionMsg, KittyGraphicsSupportMsg,
         LayoutMetadata as ProtoLayoutMetadata, LogErrorMsg, LogMsg, MobileActivePaneMsg,
@@ -18,13 +17,12 @@ use crate::{
         MobileTabMsg, NestedSessionFrameFromHostMsg, PaneMetadata as ProtoPaneMetadata,
         PaneRenderUpdateMsg, QueryTerminalSizeMsg, RenamedSessionMsg, RenderMsg,
         RequestSessionListMsg, ServerToClientMsg as ProtoServerToClientMsg,
-        SetMobileRenderPreferencesMsg, SetSoftKeyboardMsg, SixelSupportMsg,
-        SoftKeyboardVisibilityChangedMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
-        SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
+        SetClipboardPasteModeMsg, SetMobileRenderPreferencesMsg, SetSoftKeyboardMsg,
+        SixelSupportMsg, SoftKeyboardVisibilityChangedMsg, StartWebServerMsg,
+        SubscribeToPaneRendersMsg, SubscribedPaneClosedMsg, SwitchSessionMsg,
+        TabMetadata as ProtoTabMetadata, TerminalColorsUpdate as ProtoTerminalColorsUpdate,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
-        TerminalColorsUpdate as ProtoTerminalColorsUpdate,
         UnblockInputThreadMsg, WebServerStartedMsg,
-        BkprControlRequestMsg, BkprControlResponseMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
@@ -57,17 +55,18 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
             ClientToServerMsg::ForegroundColor { color } => {
                 client_to_server_msg::Message::ForegroundColor(ForegroundColorMsg { color })
             },
-            ClientToServerMsg::ColorRegisters { color_registers, terminal_colors } => {
-                client_to_server_msg::Message::ColorRegisters(ColorRegistersMsg {
-                    color_registers: color_registers.into_iter().map(|cr| cr.into()).collect(),
-                    terminal_colors: terminal_colors.map(|colors| ProtoTerminalColorsUpdate {
-                        foreground: colors.foreground,
-                        background: colors.background,
-                        truecolor: colors.truecolor,
-                        reset: colors.reset,
-                    }),
-                })
-            },
+            ClientToServerMsg::ColorRegisters {
+                color_registers,
+                terminal_colors,
+            } => client_to_server_msg::Message::ColorRegisters(ColorRegistersMsg {
+                color_registers: color_registers.into_iter().map(|cr| cr.into()).collect(),
+                terminal_colors: terminal_colors.map(|colors| ProtoTerminalColorsUpdate {
+                    foreground: colors.foreground,
+                    background: colors.background,
+                    truecolor: colors.truecolor,
+                    reset: colors.reset,
+                }),
+            }),
             ClientToServerMsg::TerminalResize { new_size } => {
                 client_to_server_msg::Message::TerminalResize(TerminalResizeMsg {
                     new_size: Some(new_size.into()),
@@ -127,10 +126,14 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 client_to_server_msg::Message::KillSession(KillSessionMsg {})
             },
             ClientToServerMsg::ConnStatus => {
-                client_to_server_msg::Message::ConnStatus(ConnStatusMsg { keep_connection: false })
+                client_to_server_msg::Message::ConnStatus(ConnStatusMsg {
+                    keep_connection: false,
+                })
             },
             ClientToServerMsg::ConnStatusWithCapabilities => {
-                client_to_server_msg::Message::ConnStatus(ConnStatusMsg { keep_connection: true })
+                client_to_server_msg::Message::ConnStatus(ConnStatusMsg {
+                    keep_connection: true,
+                })
             },
             ClientToServerMsg::WebServerStarted { base_url } => {
                 client_to_server_msg::Message::WebServerStarted(WebServerStartedMsg { base_url })
@@ -251,11 +254,13 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                         .into_iter()
                         .map(|cr| cr.try_into())
                         .collect::<Result<Vec<_>>>()?,
-                    terminal_colors: color_regs.terminal_colors.map(|colors| crate::ipc::TerminalColorsUpdate {
-                        foreground: colors.foreground,
-                        background: colors.background,
-                        truecolor: colors.truecolor,
-                        reset: colors.reset,
+                    terminal_colors: color_regs.terminal_colors.map(|colors| {
+                        crate::ipc::TerminalColorsUpdate {
+                            foreground: colors.foreground,
+                            background: colors.background,
+                            truecolor: colors.truecolor,
+                            reset: colors.reset,
+                        }
                     }),
                 })
             },
@@ -406,7 +411,9 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                 if msg.json.len() > crate::control::MAX_REQUEST_BYTES {
                     return Err(anyhow!("control request exceeds 1 MiB"));
                 }
-                Ok(ClientToServerMsg::BkprControl { request: serde_json::from_str(&msg.json)? })
+                Ok(ClientToServerMsg::BkprControl {
+                    request: serde_json::from_str(&msg.json)?,
+                })
             },
             None => Err(anyhow!("Empty ClientToServerMsg message")),
         }
@@ -437,7 +444,9 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
                 })
             },
             ServerToClientMsg::Connected => {
-                server_to_client_msg::Message::Connected(ConnectedMsg { detach_others: None })
+                server_to_client_msg::Message::Connected(ConnectedMsg {
+                    detach_others: None,
+                })
             },
             ServerToClientMsg::ConnectedWithCapabilities { detach_others } => {
                 server_to_client_msg::Message::Connected(ConnectedMsg {
@@ -519,7 +528,8 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             },
             ServerToClientMsg::BkprControl { response } => {
                 server_to_client_msg::Message::BkprControl(BkprControlResponseMsg {
-                    json: serde_json::to_string(&response).expect("control response is serializable"),
+                    json: serde_json::to_string(&response)
+                        .expect("control response is serializable"),
                 })
             },
         };
@@ -686,7 +696,9 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
             },
             Some(server_to_client_msg::Message::Connected(connected)) => {
                 Ok(match connected.detach_others {
-                    Some(detach_others) => ServerToClientMsg::ConnectedWithCapabilities { detach_others },
+                    Some(detach_others) => {
+                        ServerToClientMsg::ConnectedWithCapabilities { detach_others }
+                    },
                     None => ServerToClientMsg::Connected,
                 })
             },
@@ -779,7 +791,9 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
                 })
             },
             Some(server_to_client_msg::Message::BkprControl(msg)) => {
-                Ok(ServerToClientMsg::BkprControl { response: serde_json::from_str(&msg.json)? })
+                Ok(ServerToClientMsg::BkprControl {
+                    response: serde_json::from_str(&msg.json)?,
+                })
             },
             None => Err(anyhow!("Empty ServerToClientMsg message")),
         }

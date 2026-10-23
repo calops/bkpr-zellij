@@ -214,8 +214,9 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::Exit { exit_reason } => ClientInstruction::Exit(exit_reason),
             ServerToClientMsg::Render { content } => ClientInstruction::Render(content),
             ServerToClientMsg::UnblockInputThread => ClientInstruction::UnblockInputThread,
-            ServerToClientMsg::Connected
-            | ServerToClientMsg::ConnectedWithCapabilities { .. } => ClientInstruction::Connected,
+            ServerToClientMsg::Connected | ServerToClientMsg::ConnectedWithCapabilities { .. } => {
+                ClientInstruction::Connected
+            },
             ServerToClientMsg::Log { lines } => ClientInstruction::Log(lines),
             ServerToClientMsg::LogError { lines } => ClientInstruction::LogError(lines),
             ServerToClientMsg::SwitchSession { connect_to_session } => {
@@ -1086,7 +1087,10 @@ pub fn start_client(
                     detach_others: matches!(
                         &cli_args.command,
                         Some(zellij_utils::cli::Command::Sessions(
-                            zellij_utils::cli::Sessions::Attach { detach_others: true, .. }
+                            zellij_utils::cli::Sessions::Attach {
+                                detach_others: true,
+                                ..
+                            }
                         ))
                     ),
                 },

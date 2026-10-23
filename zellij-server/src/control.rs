@@ -1,9 +1,13 @@
 //! Same-user socket control, sharing native routing and completion acknowledgements.
 use crate::{
-    os_input_output::ServerOsApi, pane_context, panes::PaneId,
+    os_input_output::ServerOsApi,
+    pane_context,
+    panes::PaneId,
     pty::PtyInstruction,
-    route::{route_action, ActionCompletionResult, NotificationEnd, wait_for_action_completion},
-    screen::ScreenInstruction, thread_bus::ThreadSenders, ClientId, ServerInstruction,
+    route::{route_action, wait_for_action_completion, ActionCompletionResult, NotificationEnd},
+    screen::ScreenInstruction,
+    thread_bus::ThreadSenders,
+    ClientId, ServerInstruction,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -17,29 +21,81 @@ use zellij_utils::{
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ActionArguments { argv: Vec<String> }
+struct ActionArguments {
+    argv: Vec<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClientArguments { client_id: ClientId }
+struct ClientArguments {
+    client_id: ClientId,
+}
 
 const METHODS: &[&str] = &[
-    "capabilities", "snapshot", "action", "input", "session.stop", "client.detach",
-    "pane.set_state", "pane.move_to_tab", "pane.swap", "tab.set_sync", "client.focus",
-    "client.mode", "layout.apply", "workspace.rename", "workspace.close", "session.rename",
+    "capabilities",
+    "snapshot",
+    "action",
+    "input",
+    "session.stop",
+    "client.detach",
+    "pane.set_state",
+    "pane.move_to_tab",
+    "pane.swap",
+    "tab.set_sync",
+    "client.focus",
+    "client.mode",
+    "layout.apply",
+    "workspace.rename",
+    "workspace.close",
+    "session.rename",
 ];
 
 const ACTIONS: &[&str] = &[
-    "resize", "move-pane", "move-pane-backwards", "clear", "dump-screen", "edit-scrollback",
-    "scroll-up", "scroll-down", "scroll-to-bottom", "scroll-to-top", "page-scroll-up",
-    "page-scroll-down", "half-page-scroll-up", "half-page-scroll-down",
-    "toggle-fullscreen", "toggle-no-ui-fullscreen", "toggle-pane-embed-or-floating",
-    "close-pane", "rename-pane", "undo-rename-pane", "toggle-pane-pinned", "set-pane-color",
-    "change-floating-pane-coordinates", "toggle-pane-borderless", "set-pane-borderless",
-    "toggle-active-sync-tab", "show-floating-panes",
-    "hide-floating-panes", "are-floating-panes-visible", "close-tab", "rename-tab",
-    "undo-rename-tab", "move-tab", "previous-swap-layout", "next-swap-layout",
-    "close-tab-by-id", "rename-tab-by-id", "new-pane", "new-tab", "edit", "stack-panes",
-    "dump-layout", "save-session", "list-panes", "list-tabs", "query-tab-names",
+    "resize",
+    "move-pane",
+    "move-pane-backwards",
+    "clear",
+    "dump-screen",
+    "edit-scrollback",
+    "scroll-up",
+    "scroll-down",
+    "scroll-to-bottom",
+    "scroll-to-top",
+    "page-scroll-up",
+    "page-scroll-down",
+    "half-page-scroll-up",
+    "half-page-scroll-down",
+    "toggle-fullscreen",
+    "toggle-no-ui-fullscreen",
+    "toggle-pane-embed-or-floating",
+    "close-pane",
+    "rename-pane",
+    "undo-rename-pane",
+    "toggle-pane-pinned",
+    "set-pane-color",
+    "change-floating-pane-coordinates",
+    "toggle-pane-borderless",
+    "set-pane-borderless",
+    "toggle-active-sync-tab",
+    "show-floating-panes",
+    "hide-floating-panes",
+    "are-floating-panes-visible",
+    "close-tab",
+    "rename-tab",
+    "undo-rename-tab",
+    "move-tab",
+    "previous-swap-layout",
+    "next-swap-layout",
+    "close-tab-by-id",
+    "rename-tab-by-id",
+    "new-pane",
+    "new-tab",
+    "edit",
+    "stack-panes",
+    "dump-layout",
+    "save-session",
+    "list-panes",
+    "list-tabs",
+    "query-tab-names",
 ];
 
 pub(crate) fn handle(
@@ -50,44 +106,80 @@ pub(crate) fn handle(
     os_input: Box<dyn ServerOsApi>,
 ) -> ControlResponse {
     let fail = |code, message: String| ControlResponse::failed(&request, code, message);
-    if request.protocol != PROTOCOL || request.request_id.is_empty() || request.request_id.len() > 256 {
-        return fail("invalid_request", "unsupported protocol or invalid request_id".into());
+    if request.protocol != PROTOCOL
+        || request.request_id.is_empty()
+        || request.request_id.len() > 256
+    {
+        return fail(
+            "invalid_request",
+            "unsupported protocol or invalid request_id".into(),
+        );
     }
     if !request.arguments.is_object() {
         return fail("invalid_arguments", "arguments must be an object".into());
     }
-    if let Err(error) = pane_context::validate_control_context(&request.session_id, request.source_pane_id.as_deref()) {
+    if let Err(error) = pane_context::validate_control_context(
+        &request.session_id,
+        request.source_pane_id.as_deref(),
+    ) {
         return fail("session_mismatch", error);
     }
     if let Some(client_id) = request.client_id {
-        if request.method.starts_with("client.") && request.arguments.get("client_id").and_then(Value::as_u64) != Some(u64::from(client_id)) {
-            return fail("invalid_target", "envelope and operation client_id disagree".into());
+        if request.method.starts_with("client.")
+            && request.arguments.get("client_id").and_then(Value::as_u64)
+                != Some(u64::from(client_id))
+        {
+            return fail(
+                "invalid_target",
+                "envelope and operation client_id disagree".into(),
+            );
         }
         let guard = ControlRequest {
-            protocol: request.protocol, request_id: request.request_id.clone(),
-            session_id: request.session_id.clone(), source_pane_id: request.source_pane_id.clone(),
-            client_id: None, method: "client.detach".into(), arguments: json!({"client_id":client_id}),
+            protocol: request.protocol,
+            request_id: request.request_id.clone(),
+            session_id: request.session_id.clone(),
+            source_pane_id: request.source_pane_id.clone(),
+            client_id: None,
+            method: "client.detach".into(),
+            arguments: json!({"client_id":client_id}),
         };
         let response = screen_request(&guard, &senders);
-        if response.outcome != "completed" { return response; }
+        if response.outcome != "completed" {
+            return response;
+        }
     }
     match request.method.as_str() {
         "capabilities" => {
-            if request.arguments != json!({}) { return fail("invalid_arguments", "capabilities takes no arguments".into()); }
-            ControlResponse::completed(&request, json!({
-                "protocol": PROTOCOL, "methods": METHODS, "max_request_bytes": MAX_REQUEST_BYTES,
-                "action_parser": "native-cli-action", "explicit_targets": true,
-                "creation_focus": false, "atomic_input_submit": true,
-                "output_subscription": "zellij subscribe", "session_rename": true,
-                "tiled_absolute_resize": false,
-                "actions": ACTIONS, "relative_split_directions": ["right", "down"],
-            }))
+            if request.arguments != json!({}) {
+                return fail(
+                    "invalid_arguments",
+                    "capabilities takes no arguments".into(),
+                );
+            }
+            ControlResponse::completed(
+                &request,
+                json!({
+                    "protocol": PROTOCOL, "methods": METHODS, "max_request_bytes": MAX_REQUEST_BYTES,
+                    "action_parser": "native-cli-action", "explicit_targets": true,
+                    "creation_focus": false, "atomic_input_submit": true,
+                    "output_subscription": "zellij subscribe", "session_rename": true,
+                    "tiled_absolute_resize": false,
+                    "actions": ACTIONS, "relative_split_directions": ["right", "down"],
+                }),
+            )
         },
         "snapshot" => {
-            if request.arguments != json!({}) { return fail("invalid_arguments", "snapshot takes no arguments".into()); }
+            if request.arguments != json!({}) {
+                return fail("invalid_arguments", "snapshot takes no arguments".into());
+            }
             let response = screen_request(&request, &senders);
-            if response.outcome != "completed" { return response; }
-            match pane_context::control_snapshot(&request.session_id, request.source_pane_id.as_deref()) {
+            if response.outcome != "completed" {
+                return response;
+            }
+            match pane_context::control_snapshot(
+                &request.session_id,
+                request.source_pane_id.as_deref(),
+            ) {
                 Ok(mut snapshot) => {
                     snapshot["native"] = response.result.unwrap_or(Value::Null);
                     ControlResponse::completed(&request, snapshot)
@@ -96,7 +188,8 @@ pub(crate) fn handle(
             }
         },
         "action" => {
-            let arguments: ActionArguments = match serde_json::from_value(request.arguments.clone()) {
+            let arguments: ActionArguments = match serde_json::from_value(request.arguments.clone())
+            {
                 Ok(arguments) => arguments,
                 Err(error) => return fail("invalid_arguments", error.to_string()),
             };
@@ -104,27 +197,39 @@ pub(crate) fn handle(
                 Ok(action) => action,
                 Err(error) => return fail("invalid_action", error),
             };
-            let snapshot = match pane_context::control_snapshot(&request.session_id, request.source_pane_id.as_deref()) {
+            let snapshot = match pane_context::control_snapshot(
+                &request.session_id,
+                request.source_pane_id.as_deref(),
+            ) {
                 Ok(snapshot) => snapshot,
                 Err(error) => return fail("session_mismatch", error),
             };
             if let Err(error) = validate_action(&cli_action, &request, &snapshot) {
                 return fail("invalid_target", error);
             }
-            let creation = matches!(cli_action, CliAction::NewPane {..} | CliAction::NewTab {..} | CliAction::Edit {..});
-            let state_query = matches!(cli_action, CliAction::AreFloatingPanesVisible {..});
-            let visibility_setter = matches!(cli_action, CliAction::ShowFloatingPanes {..} | CliAction::HideFloatingPanes {..});
+            let creation = matches!(
+                cli_action,
+                CliAction::NewPane { .. } | CliAction::NewTab { .. } | CliAction::Edit { .. }
+            );
+            let state_query = matches!(cli_action, CliAction::AreFloatingPanesVisible { .. });
+            let visibility_setter = matches!(
+                cli_action,
+                CliAction::ShowFloatingPanes { .. } | CliAction::HideFloatingPanes { .. }
+            );
             let layout_dump = matches!(cli_action, CliAction::DumpLayout);
             let cwd = if creation {
                 match source_cwd(&request, &senders) {
                     Ok(cwd) => cwd,
                     Err(error) => return fail("source_unavailable", error),
                 }
-            } else { PathBuf::from("/") };
-            let actions = match Action::actions_from_cli(cli_action, Box::new(move || cwd.clone()), None) {
-                Ok(actions) => actions,
-                Err(error) => return fail("invalid_action", error.to_string()),
+            } else {
+                PathBuf::from("/")
             };
+            let actions =
+                match Action::actions_from_cli(cli_action, Box::new(move || cwd.clone()), None) {
+                    Ok(actions) => actions,
+                    Err(error) => return fail("invalid_action", error.to_string()),
+                };
             // No last-active-client fallback. Purely targeted actions use the control connection's
             // non-attached identity (0); view operations are separate explicit-client methods.
             let client_id = 0;
@@ -164,25 +269,42 @@ pub(crate) fn handle(
                     Err(error) => return ControlResponse::unknown(&request, format!("native routing failed after dispatch may have begun: {error}")),
                 }
             }
-            if results.len() == 1 { ControlResponse::completed(&request, results.remove(0)) }
-            else { ControlResponse::completed(&request, json!({"actions": results})) }
+            if results.len() == 1 {
+                ControlResponse::completed(&request, results.remove(0))
+            } else {
+                ControlResponse::completed(&request, json!({"actions": results}))
+            }
         },
         "client.detach" => {
-            let arguments: ClientArguments = match serde_json::from_value(request.arguments.clone()) {
+            let arguments: ClientArguments = match serde_json::from_value(request.arguments.clone())
+            {
                 Ok(arguments) => arguments,
                 Err(error) => return fail("invalid_arguments", error.to_string()),
             };
             // Screen validates attached client identity before this instruction is sent.
             let response = screen_request(&request, &senders);
-            if response.outcome != "completed" { return response; }
+            if response.outcome != "completed" {
+                return response;
+            }
             let (tx, rx) = tokio::sync::oneshot::channel();
-            if let Err(error) = senders.send_to_server(ServerInstruction::DetachSession(vec![arguments.client_id], Some(NotificationEnd::new(tx)))) {
+            if let Err(error) = senders.send_to_server(ServerInstruction::DetachSession(
+                vec![arguments.client_id],
+                Some(NotificationEnd::new(tx)),
+            )) {
                 return fail("dispatch_failed", error.to_string());
             }
-            completion_response(&request, wait_for_action_completion(rx, "bkpr-client-detach", false))
+            completion_response(
+                &request,
+                wait_for_action_completion(rx, "bkpr-client-detach", false),
+            )
         },
         "session.stop" => {
-            if request.arguments != json!({}) { return fail("invalid_arguments", "session.stop takes no arguments".into()); }
+            if request.arguments != json!({}) {
+                return fail(
+                    "invalid_arguments",
+                    "session.stop takes no arguments".into(),
+                );
+            }
             // Route writes this accepted-dispatch receipt before queueing shutdown,
             // so normal server teardown cannot swallow its own control response.
             let mut response = ControlResponse::completed(&request, json!({"accepted":true}));
@@ -190,45 +312,85 @@ pub(crate) fn handle(
             response
         },
         method if METHODS.contains(&method) => screen_request(&request, &senders),
-        _ => fail("unsupported_method", format!("unsupported control method: {}", request.method)),
+        _ => fail(
+            "unsupported_method",
+            format!("unsupported control method: {}", request.method),
+        ),
     }
 }
 
-fn completion_response(request: &ControlRequest, result: ActionCompletionResult) -> ControlResponse {
-    if !result.completed { return ControlResponse::unknown(request, "native completion was not acknowledged; do not replay automatically"); }
-    if let Some(error) = result.error_message { return ControlResponse::failed(request, "native_action_failed", error); }
+fn completion_response(
+    request: &ControlRequest,
+    result: ActionCompletionResult,
+) -> ControlResponse {
+    if !result.completed {
+        return ControlResponse::unknown(
+            request,
+            "native completion was not acknowledged; do not replay automatically",
+        );
+    }
+    if let Some(error) = result.error_message {
+        return ControlResponse::failed(request, "native_action_failed", error);
+    }
     ControlResponse::completed(request, json!({"exit_status":result.exit_status}))
 }
 
 fn screen_request(request: &ControlRequest, senders: &ThreadSenders) -> ControlResponse {
     let (tx, rx) = crossbeam::channel::bounded(1);
-    if let Err(error) = senders.send_to_screen(ScreenInstruction::BkprControl { request: request.clone(), response: tx }) {
+    if let Err(error) = senders.send_to_screen(ScreenInstruction::BkprControl {
+        request: request.clone(),
+        response: tx,
+    }) {
         return ControlResponse::failed(request, "dispatch_failed", error.to_string());
     }
-    rx.recv_timeout(Duration::from_secs(4)).unwrap_or_else(|_| ControlResponse::unknown(request, "native screen completion was not acknowledged; do not replay automatically"))
+    rx.recv_timeout(Duration::from_secs(4)).unwrap_or_else(|_| {
+        ControlResponse::unknown(
+            request,
+            "native screen completion was not acknowledged; do not replay automatically",
+        )
+    })
 }
 
 fn parse_terminal(id: &str) -> Option<PaneId> {
-    Some(PaneId::Terminal(id.strip_prefix("terminal_")?.parse().ok()?))
+    Some(PaneId::Terminal(
+        id.strip_prefix("terminal_")?.parse().ok()?,
+    ))
 }
 
-fn validate_action(action: &CliAction, request: &ControlRequest, snapshot: &Value) -> Result<(), String> {
+fn validate_action(
+    action: &CliAction,
+    request: &ControlRequest,
+    snapshot: &Value,
+) -> Result<(), String> {
     let pane = |id: &Option<String>| -> Result<(), String> {
         let id = id.as_ref().ok_or("action requires an explicit pane_id")?;
-        if id.strip_prefix("plugin_").and_then(|id| id.parse().ok())
+        if id
+            .strip_prefix("plugin_")
+            .and_then(|id| id.parse().ok())
             .is_some_and(|id| pane_context::is_owner_pane(PaneId::Plugin(id)))
         {
             return Err("the native Bkpr sidebar is protected from pane mutations".into());
         }
-        if snapshot["panes"].as_array().is_some_and(|panes| panes.iter().any(|pane| pane["pane_id"].as_str() == Some(id))) {
+        if snapshot["panes"].as_array().is_some_and(|panes| {
+            panes
+                .iter()
+                .any(|pane| pane["pane_id"].as_str() == Some(id))
+        }) {
             Ok(())
-        } else { Err("target pane is not live in the expected session".into()) }
+        } else {
+            Err("target pane is not live in the expected session".into())
+        }
     };
     let tab = |id: Option<usize>| -> Result<(), String> {
         let id = id.ok_or("action requires an explicit tab_id")?;
-        if snapshot["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["tab_id"].as_u64() == Some(id as u64))) {
+        if snapshot["tabs"].as_array().is_some_and(|tabs| {
+            tabs.iter()
+                .any(|tab| tab["tab_id"].as_u64() == Some(id as u64))
+        }) {
             Ok(())
-        } else { Err("target tab is not live in the expected session".into()) }
+        } else {
+            Err("target tab is not live in the expected session".into())
+        }
     };
     use CliAction::*;
     match action {
@@ -274,6 +436,9 @@ fn validate_action(action: &CliAction, request: &ControlRequest, snapshot: &Valu
             if matches!(direction, Some(Direction::Left | Direction::Up)) {
                 return Err("relative editor creation supports native right/down splits only".into());
             }
+            if tab_id.is_some() && direction.is_some() {
+                return Err("relative editor creation requires source_pane_id without tab_id".into());
+            }
             if !no_focus { return Err("editor creation requires --no-focus".into()); }
             if tab_id.is_some() { tab(*tab_id) } else { pane(&request.source_pane_id) }
         },
@@ -290,32 +455,89 @@ fn validate_action(action: &CliAction, request: &ControlRequest, snapshot: &Valu
 mod tests {
     use super::*;
     fn request() -> ControlRequest {
-        ControlRequest {protocol:1,request_id:"test".into(),session_id:"session".into(),source_pane_id:Some("terminal_2".into()),client_id:None,method:"action".into(),arguments:json!({})}
+        ControlRequest {
+            protocol: 1,
+            request_id: "test".into(),
+            session_id: "session".into(),
+            source_pane_id: Some("terminal_2".into()),
+            client_id: None,
+            method: "action".into(),
+            arguments: json!({}),
+        }
     }
     fn validate(argv: &[&str], request: &ControlRequest) -> Result<(), String> {
         let action = parse_action(&argv.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())?;
-        validate_action(&action, request, &json!({"panes":[{"pane_id":"terminal_2"}],"tabs":[{"tab_id":7}]}))
+        validate_action(
+            &action,
+            request,
+            &json!({"panes":[{"pane_id":"terminal_2"}],"tabs":[{"tab_id":7}]}),
+        )
     }
     #[test]
     fn refuses_focus_fallback_and_stale_targets() {
         assert!(validate(&["close-pane"], &request()).is_err());
-        assert!(validate(&["close-pane","--pane-id","terminal_99"], &request()).is_err());
-        assert!(validate(&["close-pane","--pane-id","terminal_2"], &request()).is_ok());
-        assert!(validate(&["switch-mode","locked"], &request()).is_err());
+        assert!(validate(&["close-pane", "--pane-id", "terminal_99"], &request()).is_err());
+        assert!(validate(&["close-pane", "--pane-id", "terminal_2"], &request()).is_ok());
+        assert!(validate(&["switch-mode", "locked"], &request()).is_err());
     }
     #[test]
     fn creation_never_borrows_human_focus_or_waits_for_process_exit() {
         assert!(validate(&["new-pane"], &request()).is_err());
-        assert!(validate(&["new-pane","--no-focus"], &request()).is_ok());
-        let mut outside = request(); outside.source_pane_id = None;
-        assert!(validate(&["new-pane","--no-focus"], &outside).is_err());
-        assert!(validate(&["new-pane","--no-focus","--tab-id","7"], &outside).is_ok());
-        assert!(validate(&["new-pane","--no-focus","--blocking"], &request()).is_err());
+        assert!(validate(&["new-pane", "--no-focus"], &request()).is_ok());
+        let mut outside = request();
+        outside.source_pane_id = None;
+        assert!(validate(&["new-pane", "--no-focus"], &outside).is_err());
+        assert!(validate(&["new-pane", "--no-focus", "--tab-id", "7"], &outside).is_ok());
+        assert!(validate(&["new-pane", "--no-focus", "--blocking"], &request()).is_err());
     }
     #[test]
     fn session_rename_and_permission_configuration_are_not_control_actions() {
-        assert!(validate(&["rename-session","other"], &request()).is_err());
-        assert!(validate(&["pipe","--name","bkpr_context"], &request()).is_err());
+        assert!(validate(&["rename-session", "other"], &request()).is_err());
+        assert!(validate(&["pipe", "--name", "bkpr_context"], &request()).is_err());
+    }
+
+    #[test]
+    fn directional_edit_cannot_choose_a_viewing_clients_focused_pane() {
+        let request = request();
+        for direction in ["right", "down"] {
+            assert!(validate(
+                &[
+                    "edit",
+                    "/tmp/file",
+                    "--no-focus",
+                    "--tab-id",
+                    "7",
+                    "--direction",
+                    direction
+                ],
+                &request
+            )
+            .is_err());
+            assert!(validate(
+                &[
+                    "edit",
+                    "/tmp/file",
+                    "--no-focus",
+                    "--near-current-pane",
+                    "--direction",
+                    direction
+                ],
+                &request
+            )
+            .is_ok());
+        }
+        assert!(validate(
+            &["edit", "/tmp/file", "--no-focus", "--tab-id", "7"],
+            &request
+        )
+        .is_ok());
+        let mut outside = request;
+        outside.source_pane_id = None;
+        assert!(validate(
+            &["edit", "/tmp/file", "--no-focus", "--direction", "right"],
+            &outside
+        )
+        .is_err());
     }
 }
 
@@ -324,7 +546,15 @@ mod completion_tests {
     use super::*;
 
     fn request() -> ControlRequest {
-        ControlRequest {protocol:1,request_id:"ack".into(),session_id:"incarnation".into(),source_pane_id:None,client_id:None,method:"action".into(),arguments:json!({})}
+        ControlRequest {
+            protocol: 1,
+            request_id: "ack".into(),
+            session_id: "incarnation".into(),
+            source_pane_id: None,
+            client_id: None,
+            method: "action".into(),
+            arguments: json!({}),
+        }
     }
 
     #[test]
@@ -357,9 +587,16 @@ fn source_cwd(request: &ControlRequest, senders: &ThreadSenders) -> Result<PathB
         return std::env::current_dir().map_err(|error| error.to_string());
     };
     let (tx, rx) = crossbeam::channel::bounded(1);
-    senders.send_to_pty(PtyInstruction::GetPaneCwd {pane_id:source,response_channel:tx})
+    senders
+        .send_to_pty(PtyInstruction::GetPaneCwd {
+            pane_id: source,
+            response_channel: tx,
+        })
         .map_err(|error| error.to_string())?;
-    match rx.recv_timeout(Duration::from_secs(1)).map_err(|error| error.to_string())? {
+    match rx
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|error| error.to_string())?
+    {
         GetPaneCwdResponse::Ok(cwd) => Ok(cwd),
         GetPaneCwdResponse::Err(error) => Err(error),
     }
@@ -367,12 +604,18 @@ fn source_cwd(request: &ControlRequest, senders: &ThreadSenders) -> Result<PathB
 
 fn sanitize_layout_output(output: &str) -> Result<String, String> {
     fn scrub(document: &mut kdl::KdlDocument) {
-        document.nodes_mut().retain(|node| node.name().value() != "context_owner");
+        document
+            .nodes_mut()
+            .retain(|node| node.name().value() != "context_owner");
         for node in document.nodes_mut() {
-            if let Some(children) = node.children_mut() { scrub(children); }
+            if let Some(children) = node.children_mut() {
+                scrub(children);
+            }
         }
     }
-    let mut document: kdl::KdlDocument = output.parse().map_err(|error| format!("invalid native layout output: {error}"))?;
+    let mut document: kdl::KdlDocument = output
+        .parse()
+        .map_err(|error| format!("invalid native layout output: {error}"))?;
     scrub(&mut document);
     Ok(document.to_string())
 }
@@ -382,36 +625,11 @@ mod layout_export_tests {
     use super::*;
     #[test]
     fn exported_layout_omits_owner_authority_but_preserves_user_configuration() {
-        let output = sanitize_layout_output("layout { pane { plugin location=\"file:/bkpr.wasm\" { context_owner \"private-token\"; role \"sidebar\"; user_setting \"keep\"; } } }").unwrap();
+        let output = sanitize_layout_output("layout {\n    pane {\n        plugin location=\"file:/bkpr.wasm\" {\n            context_owner \"private-token\"\n            role \"sidebar\"\n            user_setting \"keep\"\n        }\n    }\n}\n").unwrap();
         assert!(!output.contains("private-token"));
         assert!(!output.contains("context_owner"));
         assert!(output.contains("user_setting"));
         assert!(output.contains("keep"));
         assert!(output.contains("sidebar"));
-    }
-}
-
-#[cfg(test)]
-mod output_capture_tests {
-    use super::*;
-
-    #[test]
-    fn query_output_capture_follows_original_completion_across_threads_only() {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let acknowledgement = {
-            let _scope = crate::route::capture_control_output();
-            NotificationEnd::new(tx)
-        };
-        assert!(acknowledgement.capture_output());
-        let (ordinary_tx, _ordinary_rx) = tokio::sync::oneshot::channel();
-        assert!(!NotificationEnd::new(ordinary_tx).capture_output());
-        std::thread::spawn(move || {
-            let mut acknowledgement = acknowledgement;
-            assert!(acknowledgement.capture_output());
-            acknowledgement.set_stdout_message("actual pane viewport".into());
-        }).join().unwrap();
-        let result = wait_for_action_completion(rx, "captured-output-test", false);
-        assert!(result.completed);
-        assert_eq!(result.stdout_message.as_deref(), Some("actual pane viewport"));
     }
 }

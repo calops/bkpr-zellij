@@ -140,6 +140,7 @@
               pkgs.pkg-config
               pkgs.cmake
               pkgs.perl
+              pkgs.protobuf
               (pkgs.lib.getDev pkgs.curl)
               (rustPlatformFor pkgs).bindgenHook
             ];

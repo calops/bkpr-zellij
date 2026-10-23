@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
 use std::process;
 use std::str::FromStr;
-use std::{fs, path::PathBuf};
 use std::time::{Duration, Instant};
+use std::{fs, path::PathBuf};
 
 use interprocess::{local_socket::prelude::*, TryClone};
-use zellij_utils::control::{ControlError, ControlRequest, ControlResponse, MAX_REQUEST_BYTES, PROTOCOL};
+use zellij_utils::control::{
+    ControlError, ControlRequest, ControlResponse, MAX_REQUEST_BYTES, PROTOCOL,
+};
 
 use crate::os_input_output::ClientOsApi;
 use uuid::Uuid;
@@ -78,10 +80,7 @@ fn read_bkpr_control_request(reader: impl Read) -> io::Result<ControlRequest> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn exchange_bkpr_control_request(
-    session_name: &str,
-    request: &ControlRequest,
-) -> ControlResponse {
+fn exchange_bkpr_control_request(session_name: &str, request: &ControlRequest) -> ControlResponse {
     use zellij_utils::ipc::{IpcReceiverWithContext, IpcSenderWithContext};
 
     // ClientOsApi has neither bounded connection attempts nor socket timeouts.
@@ -130,7 +129,9 @@ fn exchange_bkpr_control_request(
     match receive_bkpr_control_response(&socket, &mut receiver, &probe) {
         Ok(response) if response.outcome == "completed" => {},
         Ok(response) => {
-            let detail = response.error.map(|error| error.message)
+            let detail = response
+                .error
+                .map(|error| error.message)
                 .unwrap_or_else(|| response.outcome);
             return ControlResponse::failed(
                 request,
@@ -174,7 +175,9 @@ fn receive_bkpr_control_response(
         if remaining.is_zero() {
             return Err("five-second response deadline expired".to_owned());
         }
-        socket.set_recv_timeout(Some(remaining)).map_err(|error| error.to_string())?;
+        socket
+            .set_recv_timeout(Some(remaining))
+            .map_err(|error| error.to_string())?;
         match receiver.try_recv_server_msg().map_err(|error| {
             format!("{error} (connection closed, timed out, or response unreadable)")
         })? {
@@ -212,7 +215,12 @@ mod bkpr_control_tests {
     fn accepts_exact_limit_including_trailing_whitespace() {
         let mut bytes = valid_request();
         bytes.resize(MAX_REQUEST_BYTES, b' ');
-        assert_eq!(read_bkpr_control_request(bytes.as_slice()).unwrap().protocol, PROTOCOL);
+        assert_eq!(
+            read_bkpr_control_request(bytes.as_slice())
+                .unwrap()
+                .protocol,
+            PROTOCOL
+        );
     }
 
     #[test]
@@ -254,7 +262,10 @@ mod bkpr_control_tests {
         struct BrokenInput;
         impl Read for BrokenInput {
             fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-                Err(io::Error::new(io::ErrorKind::PermissionDenied, "fixture input error"))
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "fixture input error",
+                ))
             }
         }
         let error = read_bkpr_control_request(BrokenInput).unwrap_err();

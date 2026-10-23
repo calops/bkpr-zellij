@@ -1,6 +1,6 @@
 use crate::plugins::plugin_worker::MessageToWorker;
-use crate::plugins::PluginId;
 use crate::plugins::wasm_bridge::PluginRenderAsset;
+use crate::plugins::PluginId;
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::{
@@ -213,6 +213,12 @@ impl PluginMap {
     }
     pub fn contains(&self, plugin_id: PluginId, client_id: ClientId) -> bool {
         self.plugin_assets.contains_key(&(plugin_id, client_id))
+    }
+    pub fn client_ids_for_plugin(&self, plugin_id: PluginId) -> Vec<ClientId> {
+        self.plugin_assets
+            .keys()
+            .filter_map(|(id, client_id)| (*id == plugin_id).then_some(*client_id))
+            .collect()
     }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
         self.plugin_assets

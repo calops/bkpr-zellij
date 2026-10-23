@@ -1763,6 +1763,7 @@ impl Tab {
     ) -> Result<()> {
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
+        let mut layout_error = None;
         match LayoutApplier::new(
             &self.senders,
             &self.sixel_image_store,
@@ -1815,6 +1816,7 @@ impl Tab {
                 self.tiled_panes.reapply_pane_frames();
                 self.is_pending = false;
                 self.apply_buffered_instructions().non_fatal();
+                layout_error = Some(e);
             },
         }
         if let Some(supported) = self.kitty_host_support {
@@ -1827,7 +1829,10 @@ impl Tab {
             self.floating_panes
                 .update_pane_sixel_host_support(supported);
         }
-        Ok(())
+        match layout_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
     pub fn override_layout(
         &mut self,
@@ -2498,6 +2503,87 @@ impl Tab {
             invoked_with
         }
     }
+    /// Keep the creation receipt until a pane is actually owned by this tab.
+    /// Blocking notifications still belong to the terminal's lifetime.
+    pub(crate) fn new_pane_with_completion(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        placement: NewPanePlacement,
+        client_id: Option<ClientId>,
+        relative_to: Option<PaneId>,
+        mut completion: Option<NotificationEnd>,
+        set_blocking: bool,
+    ) -> Result<()> {
+        let blocking_notification = if set_blocking {
+            completion.take()
+        } else {
+            None
+        };
+        let result = match (relative_to, &placement) {
+            (
+                Some(target),
+                NewPanePlacement::Tiled {
+                    direction: Some(direction),
+                    borderless,
+                },
+            ) => {
+                let split_direction = if matches!(direction, Direction::Left | Direction::Right) {
+                    SplitDirection::Vertical
+                } else {
+                    SplitDirection::Horizontal
+                };
+                let result = self.split_of_pane_id(
+                    pid,
+                    initial_pane_title,
+                    invoked_with,
+                    target,
+                    split_direction,
+                    blocking_notification,
+                    *borderless,
+                );
+                if !self
+                    .get_pane_with_id(pid)
+                    .is_some_and(|pane| pane.pid() == pid)
+                {
+                    self.senders
+                        .send_to_pty(PtyInstruction::ClosePane(pid, None))
+                        .non_fatal();
+                }
+                result
+            },
+            _ => self.new_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                start_suppressed,
+                should_focus_pane,
+                placement,
+                client_id,
+                blocking_notification,
+            ),
+        };
+        if let Some(completion) = completion.as_mut() {
+            if result.is_ok()
+                && self
+                    .get_pane_with_id(pid)
+                    .is_some_and(|pane| pane.pid() == pid)
+            {
+                completion.set_affected_pane_id(pid);
+            } else {
+                completion.set_exit_status(1);
+                completion.set_error_message(match &result {
+                    Err(error) => format!("Pane installation failed: {error:#}"),
+                    Ok(()) => "Destination pane cannot accept the requested pane".into(),
+                });
+            }
+        }
+        result
+    }
+
     pub fn new_pane(
         &mut self,
         pid: PaneId,
@@ -2510,7 +2596,16 @@ impl Tab {
         blocking_notification: Option<NotificationEnd>,
     ) -> Result<()> {
         let invoked_with = self.normalize_invoked_with_for_default_shell(invoked_with);
-        match new_pane_placement {
+        let uses_client_split = should_focus_pane
+            && client_id.is_some()
+            && matches!(
+                new_pane_placement,
+                NewPanePlacement::Tiled {
+                    direction: Some(_),
+                    ..
+                }
+            );
+        let result = (|| match new_pane_placement {
             NewPanePlacement::NoPreference { borderless } => self.new_no_preference_pane(
                 pid,
                 initial_pane_title,
@@ -2566,21 +2661,23 @@ impl Tab {
                             .or_else(|| self.tiled_panes.first_selectable_pane_id());
                         match target_pane_id {
                             Some(target_pane_id) if is_vertical => {
-                                self.vertical_split_of_pane_id(
+                                self.split_of_pane_id(
                                     pid,
                                     initial_pane_title,
                                     invoked_with,
                                     target_pane_id,
+                                    SplitDirection::Vertical,
                                     blocking_notification,
                                     borderless,
                                 )?;
                             },
                             Some(target_pane_id) => {
-                                self.horizontal_split_of_pane_id(
+                                self.split_of_pane_id(
                                     pid,
                                     initial_pane_title,
                                     invoked_with,
                                     target_pane_id,
+                                    SplitDirection::Horizontal,
                                     blocking_notification,
                                     borderless,
                                 )?;
@@ -2639,7 +2736,17 @@ impl Tab {
                 blocking_notification,
                 borderless,
             ),
+        })();
+        if (!uses_client_split || result.is_err())
+            && !self
+                .get_pane_with_id(pid)
+                .is_some_and(|pane| pane.pid() == pid)
+        {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, None))
+                .non_fatal();
         }
+        result
     }
     pub fn new_no_preference_pane(
         &mut self,
@@ -3474,7 +3581,10 @@ impl Tab {
     ) -> Result<()> {
         let err_context =
             || format!("failed to split pane {pid:?} horizontally for client {client_id}");
-        if self.floating_panes.panes_are_visible() {
+        if self.floating_panes.panes_are_visible() || !matches!(pid, PaneId::Terminal(_)) {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .non_fatal();
             return Ok(());
         }
         self.close_down_to_max_terminals()
@@ -3549,7 +3659,10 @@ impl Tab {
     ) -> Result<()> {
         let err_context =
             || format!("failed to split pane {pid:?} vertically for client {client_id}");
-        if self.floating_panes.panes_are_visible() {
+        if self.floating_panes.panes_are_visible() || !matches!(pid, PaneId::Terminal(_)) {
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
+                .non_fatal();
             return Ok(());
         }
         self.close_down_to_max_terminals()
@@ -3615,44 +3728,6 @@ impl Tab {
         Ok(())
     }
 
-    pub fn horizontal_split_of_pane_id(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        target_pane_id: PaneId,
-        completion_tx: Option<NotificationEnd>,
-        borderless: Option<bool>,
-    ) -> Result<()> {
-        self.split_of_pane_id(
-            pid,
-            initial_pane_title,
-            invoked_with,
-            target_pane_id,
-            SplitDirection::Horizontal,
-            completion_tx,
-            borderless,
-        )
-    }
-    pub fn vertical_split_of_pane_id(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        target_pane_id: PaneId,
-        completion_tx: Option<NotificationEnd>,
-        borderless: Option<bool>,
-    ) -> Result<()> {
-        self.split_of_pane_id(
-            pid,
-            initial_pane_title,
-            invoked_with,
-            target_pane_id,
-            SplitDirection::Vertical,
-            completion_tx,
-            borderless,
-        )
-    }
     fn split_of_pane_id(
         &mut self,
         pid: PaneId,
@@ -3660,15 +3735,19 @@ impl Tab {
         invoked_with: Option<Run>,
         target_pane_id: PaneId,
         split_direction: SplitDirection,
-        completion_tx: Option<NotificationEnd>,
+        mut completion_tx: Option<NotificationEnd>,
         borderless: Option<bool>,
     ) -> Result<()> {
         let err_context =
             || format!("failed to split pane {target_pane_id:?} without changing focus");
-        if self.floating_panes.panes_are_visible() {
-            return Ok(());
-        }
-        if !self.tiled_panes.panes_contain(&target_pane_id) {
+        if self.floating_panes.panes_are_visible()
+            || !self.tiled_panes.panes_contain(&target_pane_id)
+            || !matches!(pid, PaneId::Terminal(_))
+        {
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.set_exit_status(1);
+                completion.set_error_message("Destination pane cannot be split".into());
+            }
             return Ok(());
         }
         self.close_down_to_max_terminals()
@@ -3686,9 +3765,10 @@ impl Tab {
                 .can_split_pane_id_vertically(target_pane_id),
         };
         if !can_split {
-            self.senders
-                .send_to_pty(PtyInstruction::ClosePane(pid, completion_tx))
-                .with_context(err_context)?;
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.set_exit_status(1);
+                completion.set_error_message("No room to split destination pane".into());
+            }
             return Ok(());
         }
         if let PaneId::Terminal(term_pid) = pid {
@@ -4318,7 +4398,8 @@ impl Tab {
             self.publish_program_status(pid, program_status.as_deref())
                 .with_context(err_context)?;
             if title_changed {
-                self.senders.send_to_screen(ScreenInstruction::PaneTitleChanged)
+                self.senders
+                    .send_to_screen(ScreenInstruction::PaneTitleChanged)
                     .with_context(err_context)?;
             }
             for message in messages_to_pty {
@@ -4954,7 +5035,9 @@ impl Tab {
             // Clear unowned cells through the normal occlusion pipeline, not raw ECH:
             // a surviving overlay must never be erased by another overlay's repair.
             let blanks = (region.y..region.y + region.rows)
-                .map(|y| CharacterChunk::new(vec![EMPTY_TERMINAL_CHARACTER; region.cols], region.x, y))
+                .map(|y| {
+                    CharacterChunk::new(vec![EMPTY_TERMINAL_CHARACTER; region.cols], region.x, y)
+                })
                 .collect();
             output.add_character_chunks_to_multiple_clients(
                 blanks,
@@ -4967,7 +5050,9 @@ impl Tab {
             }
             if !self.tiled_panes.fullscreen_is_active() {
                 for member in self.stack_list_of_member.keys() {
-                    if let Some((_is_scrollback_editor, pane)) = self.suppressed_panes.get_mut(member) {
+                    if let Some((_is_scrollback_editor, pane)) =
+                        self.suppressed_panes.get_mut(member)
+                    {
                         pane.render_region(*region, output, None)?;
                     }
                 }
@@ -8302,24 +8387,34 @@ impl Tab {
         fullscreen: Option<bool>,
         borderless: Option<bool>,
     ) -> Result<()> {
-        let pane = self.get_pane_with_id(id).ok_or_else(|| anyhow!("Pane does not exist"))?;
+        let pane = self
+            .get_pane_with_id(id)
+            .ok_or_else(|| anyhow!("Pane does not exist"))?;
         let was_floating = self.pane_id_is_floating(&id);
         let should_float = floating.unwrap_or(was_floating);
         let was_fullscreen = self.fullscreen_pane_id() == Some(id);
         let fullscreen = fullscreen.or_else(|| {
-            if should_float != was_floating && was_fullscreen { Some(true) } else { None }
+            if should_float != was_floating && was_fullscreen {
+                Some(true)
+            } else {
+                None
+            }
         });
         if pinned == Some(true) && !should_float {
             return Err(anyhow!("Only floating panes can be pinned"));
         }
         if self.pane_is_stack_list_member(&id) || pane.position_and_size().is_stacked() {
             if floating.is_some_and(|f| f != was_floating) {
-                return Err(anyhow!("Extract a stacked pane before changing its container"));
+                return Err(anyhow!(
+                    "Extract a stacked pane before changing its container"
+                ));
             }
         }
         if should_float != was_floating {
             if self.is_fullscreen_active() && !was_fullscreen {
-                return Err(anyhow!("Leave fullscreen before changing another pane's container"));
+                return Err(anyhow!(
+                    "Leave fullscreen before changing another pane's container"
+                ));
             }
             if should_float && self.get_selectable_tiled_panes_count() <= 1 && pane.selectable() {
                 return Err(anyhow!("Cannot float the last selectable tiled pane"));
@@ -8331,7 +8426,9 @@ impl Tab {
             } else if !self.tiled_panes.has_room_for_new_pane() {
                 return Err(anyhow!("No room for an embedded pane"));
             }
-            let mut pane = self.extract_pane(id, true).ok_or_else(|| anyhow!("Could not extract pane"))?;
+            let mut pane = self
+                .extract_pane(id, true)
+                .ok_or_else(|| anyhow!("Could not extract pane"))?;
             if should_float {
                 let coordinates = FloatingPaneCoordinates {
                     pinned: Some(pane.current_geom().is_pinned),
@@ -8343,12 +8440,15 @@ impl Tab {
                 pane.set_pinned(false);
                 self.add_tiled_pane(pane, id, false, None)?;
             }
-            if self.pane_id_is_floating(&id) != should_float || self.get_pane_with_id(id).is_none() {
+            if self.pane_id_is_floating(&id) != should_float || self.get_pane_with_id(id).is_none()
+            {
                 return Err(anyhow!("Native pane container change was not accepted"));
             }
         }
         if let Some(pinned) = pinned {
-            self.get_pane_with_id_mut(id).ok_or_else(|| anyhow!("Pane disappeared"))?.set_pinned(pinned);
+            self.get_pane_with_id_mut(id)
+                .ok_or_else(|| anyhow!("Pane disappeared"))?
+                .set_pinned(pinned);
         }
         if let Some(borderless) = borderless {
             self.set_pane_borderless(&id, borderless)?;
@@ -8364,28 +8464,46 @@ impl Tab {
         Ok(())
     }
 
-    pub(crate) fn control_transfer_pane(&mut self, destination: &mut Tab, id: PaneId) -> Result<()> {
-        let pane = self.get_pane_with_id(id).ok_or_else(|| anyhow!("Pane does not exist"))?;
+    pub(crate) fn control_transfer_pane(
+        &mut self,
+        destination: &mut Tab,
+        id: PaneId,
+    ) -> Result<()> {
+        let pane = self
+            .get_pane_with_id(id)
+            .ok_or_else(|| anyhow!("Pane does not exist"))?;
         if self.pane_is_stack_list_member(&id) || pane.position_and_size().is_stacked() {
-            return Err(anyhow!("Extract a stacked pane before moving it between tabs"));
+            return Err(anyhow!(
+                "Extract a stacked pane before moving it between tabs"
+            ));
         }
         let floating = self.pane_id_is_floating(&id);
         let coordinates = FloatingPaneCoordinates {
             x: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(pane.x())),
             y: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(pane.y())),
-            width: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(pane.cols())),
-            height: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(pane.rows())),
+            width: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(
+                pane.cols(),
+            )),
+            height: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(
+                pane.rows(),
+            )),
             pinned: Some(pane.current_geom().is_pinned),
             borderless: Some(pane.borderless()),
         };
         if floating {
-            if destination.floating_panes.find_room_for_new_pane().is_none() {
+            if destination
+                .floating_panes
+                .find_room_for_new_pane()
+                .is_none()
+            {
                 return Err(anyhow!("Destination has no room for a floating pane"));
             }
         } else if !destination.tiled_panes.has_room_for_new_pane() {
             return Err(anyhow!("Destination has no room for a tiled pane"));
         }
-        let mut pane = self.extract_pane(id, true).ok_or_else(|| anyhow!("Could not extract pane"))?;
+        let mut pane = self
+            .extract_pane(id, true)
+            .ok_or_else(|| anyhow!("Could not extract pane"))?;
         if floating {
             destination.add_floating_pane(pane, id, Some(coordinates), false, None)?;
         } else {
@@ -8402,34 +8520,55 @@ impl Tab {
 
     /// Swap positions, not pane identities or the clients focused on them.
     pub(crate) fn control_swap_panes(&mut self, id: PaneId, other: PaneId) -> Result<()> {
-        if id == other { return Ok(()); }
+        if id == other {
+            return Ok(());
+        }
         let floating = self.pane_id_is_floating(&id);
         if floating != self.pane_id_is_floating(&other) {
-            return Err(anyhow!("Swap requires both panes in the same tiled or floating container"));
+            return Err(anyhow!(
+                "Swap requires both panes in the same tiled or floating container"
+            ));
         }
-        let first = self.get_pane_with_id(id).ok_or_else(|| anyhow!("First pane does not exist"))?;
+        let first = self
+            .get_pane_with_id(id)
+            .ok_or_else(|| anyhow!("First pane does not exist"))?;
         let first_geom = first.position_and_size();
-        let second = self.get_pane_with_id(other).ok_or_else(|| anyhow!("Second pane does not exist"))?;
+        let second = self
+            .get_pane_with_id(other)
+            .ok_or_else(|| anyhow!("Second pane does not exist"))?;
         let second_geom = second.position_and_size();
-        if first_geom.is_stacked() || second_geom.is_stacked()
-            || self.pane_is_stack_list_member(&id) || self.pane_is_stack_list_member(&other)
+        if first_geom.is_stacked()
+            || second_geom.is_stacked()
+            || self.pane_is_stack_list_member(&id)
+            || self.pane_is_stack_list_member(&other)
             || self.is_fullscreen_active()
         {
-            return Err(anyhow!("Swap requires non-stacked panes outside fullscreen"));
+            return Err(anyhow!(
+                "Swap requires non-stacked panes outside fullscreen"
+            ));
         }
         if floating {
             for (pane_id, geom) in [(id, second_geom), (other, first_geom)] {
-                self.change_floating_pane_coordinates(&pane_id, FloatingPaneCoordinates {
-                    x: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.x)),
-                    y: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.y)),
-                    width: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.cols.as_usize())),
-                    height: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.rows.as_usize())),
-                    pinned: None, borderless: None,
-                });
+                self.change_floating_pane_coordinates(
+                    &pane_id,
+                    FloatingPaneCoordinates {
+                        x: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.x)),
+                        y: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.y)),
+                        width: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(
+                            geom.cols.as_usize(),
+                        )),
+                        height: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(
+                            geom.rows.as_usize(),
+                        )),
+                        pinned: None,
+                        borderless: None,
+                    },
+                )?;
             }
         } else {
             self.tiled_panes.set_geom_for_pane_with_id(&id, second_geom);
-            self.tiled_panes.set_geom_for_pane_with_id(&other, first_geom);
+            self.tiled_panes
+                .set_geom_for_pane_with_id(&other, first_geom);
             self.tiled_panes.reapply_pane_frames();
             self.swap_layouts.set_is_tiled_damaged();
         }
@@ -8443,8 +8582,13 @@ impl Tab {
         id: PaneId,
         parts: Vec<(Option<KeyWithModifier>, Vec<u8>, bool)>,
     ) -> Result<()> {
-        let terminal_id = match id { PaneId::Terminal(id) => id, _ => return Err(anyhow!("Input requires a terminal pane")) };
-        let pane = self.get_pane_with_id_mut(id).ok_or_else(|| anyhow!("Pane does not exist"))?;
+        let terminal_id = match id {
+            PaneId::Terminal(id) => id,
+            _ => return Err(anyhow!("Input requires a terminal pane")),
+        };
+        let pane = self
+            .get_pane_with_id_mut(id)
+            .ok_or_else(|| anyhow!("Pane does not exist"))?;
         if pane.is_held() || pane.exited() {
             return Err(anyhow!("Terminal is held or has exited"));
         }
@@ -8460,37 +8604,78 @@ impl Tab {
             }
         }
         // One queue item contains the whole paste/text/key sequence and optional submit.
-        self.senders.send_to_pty_writer(PtyWriteInstruction::Write(bytes, terminal_id, None))?;
+        self.senders
+            .send_to_pty_writer(PtyWriteInstruction::Write(bytes, terminal_id, None))?;
         Ok(())
     }
 
-    pub(crate) fn control_set_fullscreen(&mut self, id: PaneId, enabled: bool, covers_ui: bool) -> Result<()> {
+    pub(crate) fn control_set_fullscreen(
+        &mut self,
+        id: PaneId,
+        enabled: bool,
+        covers_ui: bool,
+    ) -> Result<()> {
         if self.pane_id_is_floating(&id) {
-            if enabled { self.tiled_panes.unset_fullscreen(); }
-            self.floating_panes.set_fullscreen_for_control(id, enabled, covers_ui)?;
+            if enabled {
+                self.tiled_panes.unset_fullscreen();
+            }
+            self.floating_panes
+                .set_fullscreen_for_control(id, enabled, covers_ui)?;
         } else {
-            if enabled { self.floating_panes.unset_fullscreen(); }
-            self.tiled_panes.set_fullscreen_for_control(id, enabled, covers_ui)?;
+            if enabled {
+                self.floating_panes.unset_fullscreen();
+            }
+            self.tiled_panes
+                .set_fullscreen_for_control(id, enabled, covers_ui)?;
         }
         self.set_force_render();
         Ok(())
     }
 
-    pub(crate) fn control_add_client(&mut self, client_id: ClientId, mode_info: ModeInfo) -> Result<()> {
+    pub(crate) fn control_add_client(
+        &mut self,
+        client_id: ClientId,
+        mode_info: ModeInfo,
+    ) -> Result<()> {
         let visible_tiled = |id: &PaneId| {
             !self.tiled_panes.panes_to_hide_contains(*id)
                 && self.tiled_panes.get_pane(*id).is_some_and(|pane| {
-                    pane.selectable() && (!pane.current_geom().is_stacked() || pane.current_geom().rows.as_usize() > 1)
+                    pane.selectable()
+                        && (!pane.current_geom().is_stacked()
+                            || pane.current_geom().rows.as_usize() > 1)
                 })
         };
-        let tiled = self.tiled_panes.get_active_pane_id(client_id).filter(visible_tiled)
-            .or_else(|| self.tiled_panes.first_active_pane_id().filter(visible_tiled))
-            .or_else(|| self.get_selectable_tiled_panes().map(|(id, _)| *id).find(visible_tiled));
-        let floating = self.floating_panes.get_active_pane_id(client_id)
-            .filter(|id| self.floating_panes.get_pane(*id).is_some_and(|pane| pane.selectable()))
+        let tiled = self
+            .tiled_panes
+            .get_active_pane_id(client_id)
+            .filter(visible_tiled)
+            .or_else(|| {
+                self.tiled_panes
+                    .first_active_pane_id()
+                    .filter(visible_tiled)
+            })
+            .or_else(|| {
+                self.get_selectable_tiled_panes()
+                    .map(|(id, _)| *id)
+                    .find(visible_tiled)
+            });
+        let floating = self
+            .floating_panes
+            .get_active_pane_id(client_id)
+            .filter(|id| {
+                self.floating_panes
+                    .get_pane(*id)
+                    .is_some_and(|pane| pane.selectable())
+            })
             .or_else(|| self.floating_panes.first_active_floating_pane_id())
-            .or_else(|| self.get_selectable_floating_panes().next().map(|(id, _)| *id));
-        if tiled.is_none() && floating.is_none() { return Err(anyhow!("Tab has no selectable panes")); }
+            .or_else(|| {
+                self.get_selectable_floating_panes()
+                    .next()
+                    .map(|(id, _)| *id)
+            });
+        if tiled.is_none() && floating.is_none() {
+            return Err(anyhow!("Tab has no selectable panes"));
+        }
         self.connected_clients.borrow_mut().insert(client_id);
         self.mode_info.borrow_mut().insert(client_id, mode_info);
         if let Some(id) = tiled {
@@ -8503,9 +8688,14 @@ impl Tab {
         Ok(())
     }
 
-    pub(crate) fn control_focus_pane(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
+    pub(crate) fn control_focus_pane(
+        &mut self,
+        pane_id: PaneId,
+        client_id: ClientId,
+    ) -> Result<()> {
         if self.pane_id_is_floating(&pane_id) {
-            self.floating_panes.focus_pane_for_client(pane_id, client_id)?;
+            self.floating_panes
+                .focus_pane_for_client(pane_id, client_id)?;
             self.show_floating_panes();
         } else {
             self.tiled_panes.focus_pane_for_client(pane_id, client_id)?;
@@ -8521,53 +8711,95 @@ impl Tab {
         client_id: ClientId,
     ) -> Result<()> {
         // Passive Bkpr UI must not be repurposed by a new layout's generic pane slots.
-        let overlays: Vec<(PaneId, PaneGeom, bool)> = self.get_floating_panes()
-            .filter(|(_, pane)| !pane.selectable() && pane.borderless() && pane.current_geom().is_pinned)
-            .map(|(id, pane)| (*id, pane.position_and_size(), pane.borderless())).collect();
+        let overlays: Vec<(PaneId, PaneGeom, bool)> = self
+            .get_floating_panes()
+            .filter(|(_, pane)| {
+                !pane.selectable() && pane.borderless() && pane.current_geom().is_pinned
+            })
+            .map(|(id, pane)| (*id, pane.position_and_size(), pane.borderless()))
+            .collect();
         let mut parked_overlays = vec![];
         for (id, _, _) in &overlays {
-            if let Some(pane) = self.floating_panes.remove_pane(*id) { parked_overlays.push((*id, pane)); }
+            if let Some(pane) = self.floating_panes.remove_pane(*id) {
+                parked_overlays.push((*id, pane));
+            }
         }
         let floating_visible = self.floating_panes.panes_are_shown();
         let tiled_layout = result.tiled_layout;
         let floating_layouts = result.floating_layouts;
         let outcome = LayoutApplier::new(
-            &self.senders, &self.sixel_image_store, &self.kitty_image_store, &self.link_handler,
-            &self.terminal_emulator_colors, &self.terminal_emulator_color_codes,
-            &self.character_cell_size, &self.connected_clients_in_app, &self.style,
-            &self.display_area, &mut self.tiled_panes, &mut self.floating_panes,
-            self.pane_frame_style, &mut self.focus_pane_id, &self.os_api,
-            self.debug, self.arrow_fonts, self.styled_underlines, self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol, None,
-        ).preserve_client_focus().override_layout(
-            tiled_layout.clone(), floating_layouts.clone(), result.new_terminal_pids,
-            result.new_floating_pane_pids, result.plugin_ids, true, true, client_id,
+            &self.senders,
+            &self.sixel_image_store,
+            &self.kitty_image_store,
+            &self.link_handler,
+            &self.terminal_emulator_colors,
+            &self.terminal_emulator_color_codes,
+            &self.character_cell_size,
+            &self.connected_clients_in_app,
+            &self.style,
+            &self.display_area,
+            &mut self.tiled_panes,
+            &mut self.floating_panes,
+            self.pane_frame_style,
+            &mut self.focus_pane_id,
+            &self.os_api,
+            self.debug,
+            self.arrow_fonts,
+            self.styled_underlines,
+            self.osc8_hyperlinks,
+            self.explicitly_disable_kitty_keyboard_protocol,
+            None,
+        )
+        .preserve_client_focus()
+        .override_layout(
+            tiled_layout.clone(),
+            floating_layouts.clone(),
+            result.new_terminal_pids,
+            result.new_floating_pane_pids,
+            result.plugin_ids,
+            true,
+            true,
+            client_id,
         );
         // Restore overlays even when the layout applier rejects a geometry.
         for (id, pane) in parked_overlays {
             self.floating_panes.add_pane(id, pane);
         }
         self.floating_panes.toggle_show_panes(floating_visible);
+        let mut overlay_result: Result<()> = Ok(());
         for (id, geom, borderless) in overlays {
-            self.change_floating_pane_coordinates(&id, FloatingPaneCoordinates {
-                x: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.x)),
-                y: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.y)),
-                width: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.cols.as_usize())),
-                height: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.rows.as_usize())),
-                pinned: Some(true), borderless: Some(borderless),
-            });
+            overlay_result = overlay_result.and(self.change_floating_pane_coordinates(
+                &id,
+                FloatingPaneCoordinates {
+                    x: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.x)),
+                    y: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(geom.y)),
+                    width: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(
+                        geom.cols.as_usize(),
+                    )),
+                    height: Some(zellij_utils::input::layout::PercentOrFixed::Fixed(
+                        geom.rows.as_usize(),
+                    )),
+                    pinned: Some(true),
+                    borderless: Some(borderless),
+                },
+            ));
         }
-        outcome?;
-        self.swap_layouts.set_swap_tiled_layouts(result.swap_tiled_layouts.unwrap_or_default());
-        self.swap_layouts.set_swap_floating_layouts(result.swap_floating_layouts.unwrap_or_default());
-        self.swap_layouts.set_base_layout((tiled_layout, floating_layouts));
-        self.swap_layouts.set_is_tiled_damaged();
-        self.swap_layouts.set_is_floating_damaged();
         self.is_pending = false;
         self.tiled_panes.reapply_pane_frames();
-        self.resize_pty_all_panes()?;
+        let resize_result = self.resize_pty_all_panes();
         self.set_should_clear_display_before_rendering();
         self.set_force_render();
+        outcome?;
+        overlay_result?;
+        resize_result?;
+        self.swap_layouts
+            .set_swap_tiled_layouts(result.swap_tiled_layouts.unwrap_or_default());
+        self.swap_layouts
+            .set_swap_floating_layouts(result.swap_floating_layouts.unwrap_or_default());
+        self.swap_layouts
+            .set_base_layout((tiled_layout, floating_layouts));
+        self.swap_layouts.set_is_tiled_damaged();
+        self.swap_layouts.set_is_floating_damaged();
         Ok(())
     }
 }

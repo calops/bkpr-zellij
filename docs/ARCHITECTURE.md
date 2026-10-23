@@ -132,6 +132,11 @@ Pane/tab actions require live explicit targets. Pane/editor creation requires
 Process-exit blocking flags are rejected. A relative split uses
 `source_pane_id` plus `new-pane --no-focus --near-current-pane --direction right`
 (or `down`), not a temporary change to an attached client's focus.
+Directional `new-pane` and `edit` require that source pane without `--tab-id`;
+a tab alone does not select an attached client's pane as a split target.
+Control sidebar protection covers only canonical sidebar/owner roles.
+Ordinary plugin geometry and close requests, including Bkpr finder and
+tooltip overlays using the same WASM asset, retain their existing behavior.
 
 Response envelope:
 
@@ -144,8 +149,9 @@ means a native completion acknowledgement, never application processing.
 `dispatched` means accepted without completion proof (notably session shutdown).
 `unknown` means a response/completion was lost or timed out after dispatch may
 have begun: callers must not automatically retry it. Errors contain `code`
-and `message`. Creation IDs are returned by the actual native completion,
-never inferred by comparing pane lists.
+and `message`. Creation IDs are returned only after native pane installation,
+never inferred by comparing pane lists or PTY allocation alone. Failed splits
+close their spawned resources and return failure without a created ID.
 
 Methods and operation arguments:
 
@@ -182,3 +188,12 @@ connection. Older servers reject it before any requested mutation is sent.
 Existing ordinary attachment messages, protobuf tags and contract version
 remain unchanged; control requests/responses use new additive protobuf tags.
 
+After changing IPC protobuf definitions, regenerate and commit the tracked
+`zellij-utils/assets/prost_ipc/` bindings:
+
+```sh
+nix develop --command cargo run --locked --offline -p xtask -- proto
+```
+
+The devshell supplies `protoc`. Ordinary `cargo build` does not regenerate
+these bindings.

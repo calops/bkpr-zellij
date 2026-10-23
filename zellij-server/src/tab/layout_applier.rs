@@ -303,7 +303,11 @@ impl<'a> LayoutApplier<'a> {
                 remaining_pane_ids,
                 existing_tab_state,
                 last_logical_position,
-                if self.preserve_client_focus { None } else { Some(client_id) },
+                if self.preserve_client_focus {
+                    None
+                } else {
+                    Some(client_id)
+                },
             );
         }
 
@@ -1018,7 +1022,8 @@ impl<'a> LayoutApplier<'a> {
 
         if !self.preserve_client_focus {
             if let Some(focused_floating_pane) = focused_floating_pane {
-                self.floating_panes.focus_pane_for_all_clients(focused_floating_pane);
+                self.floating_panes
+                    .focus_pane_for_all_clients(focused_floating_pane);
             } else {
                 self.floating_panes.reapply_pane_focus();
             }

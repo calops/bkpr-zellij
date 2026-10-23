@@ -1284,7 +1284,11 @@ impl FloatingPanes {
         if !self.connected_clients.borrow().contains(&client_id) {
             return Err(anyhow!("client is not connected to this tab"));
         }
-        if !self.panes.get(&pane_id).is_some_and(|pane| pane.selectable()) {
+        if !self
+            .panes
+            .get(&pane_id)
+            .is_some_and(|pane| pane.selectable())
+        {
             return Err(anyhow!("floating pane does not exist or is not selectable"));
         }
         if let Some(previous) = self.active_panes.get(&client_id).copied() {
@@ -1292,7 +1296,8 @@ impl FloatingPanes {
                 self.active_panes.set_last_pane(client_id, previous);
             }
         }
-        self.active_panes.insert(client_id, pane_id, &mut self.panes);
+        self.active_panes
+            .insert(client_id, pane_id, &mut self.panes);
         self.z_indices.retain(|id| *id != pane_id);
         self.z_indices.push(pane_id);
         self.make_sure_pinned_panes_are_on_top();
@@ -1332,12 +1337,19 @@ impl FloatingPanes {
         self.set_fullscreen_with_focus(pane_id, covers_ui, true);
     }
 
-    pub fn set_fullscreen_for_control(&mut self, pane_id: PaneId, enabled: bool, covers_ui: bool) -> Result<()> {
+    pub fn set_fullscreen_for_control(
+        &mut self,
+        pane_id: PaneId,
+        enabled: bool,
+        covers_ui: bool,
+    ) -> Result<()> {
         if !self.panes.contains_key(&pane_id) {
             return Err(anyhow!("floating fullscreen target does not exist"));
         }
         if enabled {
-            if self.fullscreen_pane_id == Some(pane_id) && self.floating_fullscreen_covers_ui == covers_ui {
+            if self.fullscreen_pane_id == Some(pane_id)
+                && self.floating_fullscreen_covers_ui == covers_ui
+            {
                 return Ok(());
             }
             self.unset_fullscreen();

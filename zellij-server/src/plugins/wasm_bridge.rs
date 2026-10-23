@@ -65,14 +65,20 @@ fn make_plugin_url_path_safe(url: String) -> String {
 
 #[derive(Debug, Clone)]
 pub enum EventOrPipeMessage {
-    Event { event: Event, client_id: Option<ClientId> },
+    Event {
+        event: Event,
+        client_id: Option<ClientId>,
+    },
     PipeMessage(PipeMessage),
 }
 
 impl EventOrPipeMessage {
     fn targets_client(&self, recipient: ClientId) -> bool {
         match self {
-            Self::Event { client_id: Some(owner), .. } => *owner == recipient,
+            Self::Event {
+                client_id: Some(owner),
+                ..
+            } => *owner == recipient,
             _ => true,
         }
     }
@@ -844,7 +850,8 @@ impl WasmBridge {
                             // in the below conditional, we check if event_id == 0 so that we'll
                             // make sure to always render on the first resize event
                             if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
-                                let rendered_asset = running_plugin.render().with_context(err_context);
+                                let rendered_asset =
+                                    running_plugin.render().with_context(err_context);
                                 match rendered_asset {
                                     Ok(plugin_render_asset) => {
                                         senders
@@ -1331,7 +1338,13 @@ impl WasmBridge {
             {
                 if pid == plugin_id
                     && cid == client_id
-                    && running_plugin.lock().to_anyhow()?.store.data().tab_index.is_none()
+                    && running_plugin
+                        .lock()
+                        .to_anyhow()?
+                        .store
+                        .data()
+                        .tab_index
+                        .is_none()
                 {
                     subscribed_events = Some(subscriptions.lock().to_anyhow()?.clone());
                     break;
@@ -1340,11 +1353,10 @@ impl WasmBridge {
             subscribed_events
         };
         if let Some(events) = subscribed_events {
-            self.senders.send_to_screen(
-                ScreenInstruction::UpdateBackgroundPluginSubscriptions(
+            self.senders
+                .send_to_screen(ScreenInstruction::UpdateBackgroundPluginSubscriptions(
                     plugin_id, client_id, events,
-                ),
-            )?;
+                ))?;
         }
         Ok(())
     }
@@ -1503,14 +1515,15 @@ impl WasmBridge {
         if let Some(events_or_pipe_messages) =
             self.cached_events_for_pending_plugins.remove(&plugin_id)
         {
-            let all_connected_clients: Vec<ClientId> = self
-                .connected_clients
+            // Headless startup already has plugin instances before an attachment.
+            // Replay to those same instances, just like normal update dispatch;
+            // each cached envelope still enforces its original client destination.
+            let instance_clients = self
+                .plugin_map
                 .lock()
                 .unwrap()
-                .iter()
-                .copied()
-                .collect();
-            for client_id in &all_connected_clients {
+                .client_ids_for_plugin(plugin_id);
+            for client_id in &instance_clients {
                 if let Some((running_plugin, subscriptions)) = self
                     .plugin_map
                     .lock()
@@ -1535,7 +1548,10 @@ impl WasmBridge {
                                             .with_context(err_context)
                                         {
                                             Ok(event_type) => {
-                                                if !subs.contains(&event_type) {
+                                                if !subs.contains(&event_type)
+                                                    && event_type
+                                                        != EventType::PermissionRequestResult
+                                                {
                                                     continue;
                                                 }
                                                 let mut running_plugin =
@@ -2106,7 +2122,15 @@ fn check_event_permission(
         | Event::InputReceived
         | Event::InitialKeybinds(..) => PermissionType::ReadApplicationState,
         Event::CustomMessage(name, _)
-            if matches!(name.as_str(), "program_status" | "mode_info" | "keybinds_info" | "bkpr_terminal_colors" | "bkpr_context") => {
+            if matches!(
+                name.as_str(),
+                "program_status"
+                    | "mode_info"
+                    | "keybinds_info"
+                    | "bkpr_terminal_colors"
+                    | "bkpr_context"
+            ) =>
+        {
             PermissionType::ReadApplicationState
         },
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
@@ -2141,18 +2165,17 @@ pub fn apply_event_to_plugin(
     match check_event_permission(running_plugin.store.data(), event) {
         (PermissionStatus::Granted, _) => {
             let mut event = event.clone();
-            let json_mode_info = matches!(
-                event,
-                Event::ModeUpdate(..) | Event::InitialKeybinds(..)
-            ) && running_plugin
-                .store
-                .data()
-                .plugin
-                .initial_userspace_configuration
-                .inner()
-                .get("mode_info_format")
-                .map(String::as_str)
-                == Some("json");
+            let json_mode_info =
+                matches!(event, Event::ModeUpdate(..) | Event::InitialKeybinds(..))
+                    && running_plugin
+                        .store
+                        .data()
+                        .plugin
+                        .initial_userspace_configuration
+                        .inner()
+                        .get("mode_info_format")
+                        .map(String::as_str)
+                        == Some("json");
             if let Event::ModeUpdate(mode_info) = &mut event {
                 if mode_info.base_mode.is_none() {
                     mode_info.base_mode = Some(running_plugin.store.data().default_mode);
@@ -2167,7 +2190,8 @@ pub fn apply_event_to_plugin(
                 if json_mode_info {
                     event = Event::CustomMessage(
                         "mode_info".to_owned(),
-                        serde_json::to_string(mode_info).context("failed to serialize mode info")?,
+                        serde_json::to_string(mode_info)
+                            .context("failed to serialize mode info")?,
                     );
                 }
             } else if let Event::InitialKeybinds(keybinds) = &event {
@@ -2194,19 +2218,25 @@ pub fn apply_event_to_plugin(
                         // we always render in this case, otherwise the request permission screen stays on
                         // screen
                         should_render = true;
-                        if matches!(event, Event::PermissionRequestResult(PermissionStatus::Granted))
-                            && plugin_subscriptions.contains(&EventType::CustomMessage)
+                        if matches!(
+                            event,
+                            Event::PermissionRequestResult(PermissionStatus::Granted)
+                        ) && plugin_subscriptions.contains(&EventType::CustomMessage)
                         {
                             senders.send_to_screen(ScreenInstruction::BootstrapProgramStatuses(
-                                plugin_id, client_id, plugin_subscriptions.clone(),
+                                plugin_id,
+                                client_id,
+                                plugin_subscriptions.clone(),
                             ))?;
                         }
                     }
                     if rows > 0 && columns > 0 && should_render {
-                        let plugin_render_asset = running_plugin.render().with_context(err_context)?;
+                        let plugin_render_asset =
+                            running_plugin.render().with_context(err_context)?;
                         let pipes_to_block_or_unblock =
                             pipes_to_block_or_unblock(running_plugin, None);
-                        plugin_render_assets.push(plugin_render_asset.with_pipes(pipes_to_block_or_unblock));
+                        plugin_render_assets
+                            .push(plugin_render_asset.with_pipes(pipes_to_block_or_unblock));
                     } else {
                         // This is a bit of a hack to get around the fact that plugins are allowed not to
                         // render and still unblock CLI pipes
@@ -2302,8 +2332,20 @@ mod cached_event_tests {
         assert!(!event.targets_client(2));
         // Pending-cache replay clones the envelope for every connected client.
         let replay = vec![event.clone()];
-        assert_eq!(replay.iter().filter(|entry| entry.targets_client(2)).count(), 0);
-        assert_eq!(replay.iter().filter(|entry| entry.targets_client(1)).count(), 1);
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|entry| entry.targets_client(2))
+                .count(),
+            0
+        );
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|entry| entry.targets_client(1))
+                .count(),
+            1
+        );
     }
 
     #[test]
