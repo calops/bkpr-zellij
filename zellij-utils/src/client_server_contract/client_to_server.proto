@@ -33,6 +33,7 @@ message ClientToServerMsg {
     SetMobileRenderPreferencesMsg set_mobile_render_preferences = 26;
     HostTerminalFocusChangedMsg host_terminal_focus_changed = 27;
     ClipboardPasteMsg clipboard_paste = 28;
+    BkprControlRequestMsg bkpr_control = 29;
   }
 }
 
@@ -175,4 +176,9 @@ message RequestSessionListMsg {
 message SetMobileRenderPreferencesMsg {
   bool single_pane = 1;
   bool fit = 2;
+}
+
+// JSON is bounded and typed by the additive control protocol at ingress.
+message BkprControlRequestMsg {
+  string json = 1;
 }

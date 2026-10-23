@@ -19,6 +19,10 @@ fn main() {
     create_config_and_cache_folders();
     let opts = CliArgs::parse();
 
+    if let Some(Command::BkprControl) = opts.command {
+        std::process::exit(commands::bkpr_control(opts.session.as_deref()));
+    }
+
     {
         let config = Config::try_from(&opts).ok();
         if let Some(Command::Action(cli_action)) = opts.command {

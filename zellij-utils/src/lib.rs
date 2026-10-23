@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod client_server_contract;
 pub mod consts;
+pub mod control;
 pub mod data;
 pub mod envs;
 pub mod errors;

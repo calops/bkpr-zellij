@@ -398,6 +398,10 @@ fn find_indexed_session(
     }
 }
 
+pub(crate) fn bkpr_control(session_name: Option<&str>) -> i32 {
+    zellij_client::cli_client::start_bkpr_control_client(session_name)
+}
+
 /// Client entrypoint for all [`zellij_utils::cli::CliAction`]
 ///
 /// Explicit targets connect directly; discovery is only for implicit selection.

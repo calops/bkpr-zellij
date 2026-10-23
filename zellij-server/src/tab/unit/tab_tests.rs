@@ -1557,6 +1557,123 @@ fn create_tab_with_two_floating_panes() -> Tab {
     tab
 }
 
+#[test]
+fn control_floating_focus_and_fullscreen_preserve_other_client_active_ids() {
+    let mut tab = create_tab_with_two_floating_panes();
+    let first_client_pane = tab.get_active_pane_id(1);
+    tab.control_add_client(2, ModeInfo::default()).unwrap();
+    assert_eq!(tab.get_active_pane_id(1), first_client_pane);
+    tab.control_focus_pane(PaneId::Terminal(2), 2).unwrap();
+    assert_eq!(tab.get_active_pane_id(1), first_client_pane);
+    assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(2)));
+    for enabled in [true, true, false, false] {
+        tab.control_set_fullscreen(PaneId::Terminal(2), enabled, false).unwrap();
+        assert_eq!(tab.get_active_pane_id(1), first_client_pane);
+        assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(2)));
+        assert_eq!(tab.fullscreen_pane_id() == Some(PaneId::Terminal(2)), enabled);
+    }
+}
+
+#[test]
+fn control_stacked_focus_changes_only_the_requested_clients_active_id() {
+    let layout = TiledPaneLayout {
+        children_are_stacked: true,
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+    let mut tab = create_new_tab_with_layout(Size { cols: 121, rows: 20 }, layout);
+    let first_client_pane = tab.get_active_pane_id(1).unwrap();
+    tab.control_add_client(2, ModeInfo::default()).unwrap();
+    let target = tab.get_tiled_pane_ids().into_iter().find(|id| *id != first_client_pane).unwrap();
+    tab.control_focus_pane(target, 2).unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(first_client_pane));
+    assert_eq!(tab.get_active_pane_id(2), Some(target));
+}
+
+#[test]
+fn control_state_is_idempotent_for_an_unfocused_floating_pane() {
+    let mut tab = create_tab_with_two_floating_panes();
+    let focused = tab.get_active_pane_id(1);
+    for _ in 0..2 {
+        tab.control_set_pane_state(PaneId::Terminal(2), Some(true), Some(true), None, Some(true)).unwrap();
+    }
+    let pane = tab.get_pane_with_id(PaneId::Terminal(2)).unwrap();
+    assert!(pane.current_geom().is_pinned);
+    assert!(pane.borderless());
+    assert_eq!(tab.get_active_pane_id(1), focused);
+    for _ in 0..2 {
+        tab.control_set_pane_state(PaneId::Terminal(2), None, None, Some(true), None).unwrap();
+        assert_eq!(tab.fullscreen_pane_id(), Some(PaneId::Terminal(2)));
+    }
+    for _ in 0..2 {
+        tab.control_set_pane_state(PaneId::Terminal(2), None, None, Some(false), None).unwrap();
+        assert_ne!(tab.fullscreen_pane_id(), Some(PaneId::Terminal(2)));
+    }
+}
+
+#[test]
+fn control_float_does_not_focus_the_target_as_an_implementation_shortcut() {
+    let mut tab = create_tab_with_four_panes();
+    let focused = tab.get_active_pane_id(1);
+    tab.control_set_pane_state(PaneId::Terminal(2), Some(true), None, None, None).unwrap();
+    assert!(tab.pane_id_is_floating(&PaneId::Terminal(2)));
+    assert_eq!(tab.get_active_pane_id(1), focused);
+    assert!(tab.control_set_pane_state(PaneId::Terminal(900), Some(true), None, None, None).is_err());
+}
+
+#[test]
+fn control_move_keeps_pane_identity_and_destination_focus() {
+    let mut source = create_tab_with_four_panes();
+    let mut destination = create_new_tab(Size { cols: 121, rows: 20 }, false);
+    let destination_focus = destination.get_active_pane_id(1);
+    source.rename_pane_by_pane_id(PaneId::Terminal(2), b"retained-process".to_vec()).unwrap();
+    source.control_transfer_pane(&mut destination, PaneId::Terminal(2)).unwrap();
+    assert!(!source.has_pane_with_pid(&PaneId::Terminal(2)));
+    assert_eq!(destination.get_pane_with_id(PaneId::Terminal(2)).unwrap().current_title(), "retained-process");
+    assert_eq!(destination.get_active_pane_id(1), destination_focus);
+}
+
+#[test]
+fn control_layout_retains_native_panes_without_following_layout_focus() {
+    let mut tab = create_tab_with_four_panes();
+    let focused = tab.get_active_pane_id(1);
+    let pane_ids = tab.get_tiled_pane_ids();
+    let layout = TiledPaneLayout {
+        children_split_direction: SplitDirection::Vertical,
+        children: (0..4).map(|_| TiledPaneLayout { focus: Some(true), ..Default::default() }).collect(),
+        ..Default::default()
+    };
+    tab.control_override_layout(crate::screen::TabOverrideResult {
+        tab_index: tab.id, tab_name: None, tiled_layout: layout,
+        floating_layouts: vec![], swap_tiled_layouts: None, swap_floating_layouts: None,
+        new_terminal_pids: vec![], new_floating_pane_pids: vec![], plugin_ids: HashMap::new(),
+    }, 1).unwrap();
+    assert_eq!(tab.get_tiled_pane_ids(), pane_ids);
+    assert_eq!(tab.get_active_pane_id(1), focused);
+}
+
+#[test]
+fn control_input_queues_paste_and_submit_as_one_native_write() {
+    let mut tab = create_new_tab(Size { cols: 121, rows: 20 }, false);
+    let rx = install_pty_writer_capture(&mut tab);
+    tab.handle_pty_bytes(1, b"\x1b[?2004h".to_vec()).unwrap();
+    tab.control_input(PaneId::Terminal(1), vec![
+        (None, b"\x1b[200~".to_vec(), false),
+        (None, b"literal text".to_vec(), false),
+        (None, b"\x1b[201~".to_vec(), false),
+        (Some("Enter".parse().unwrap()), vec![13], false),
+    ]).unwrap();
+    let writes = drain_pty_writer(&rx);
+    assert_eq!(writes.len(), 1);
+    match &writes[0] {
+        PtyWriteInstruction::Write(bytes, id, _) => {
+            assert_eq!(*id, 1);
+            assert_eq!(bytes, b"\x1b[200~literal text\x1b[201~\r");
+        },
+        _ => panic!("expected a native terminal write"),
+    }
+}
+
 fn floating_pane_geom(tab: &Tab, pane_id: PaneId) -> PaneGeom {
     tab.floating_panes
         .get(&pane_id)

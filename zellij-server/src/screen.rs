@@ -109,6 +109,9 @@ use zellij_utils::{
 
 use crate::mobile_web::MobileWebPrefs;
 
+#[path = "control_screen.rs"]
+mod control_screen;
+
 /// Parses a namespaced OSC 99 response and extracts the original pane ID
 /// and un-namespaced response bytes.
 ///
@@ -352,6 +355,11 @@ pub struct TabOverrideResult {
 /// Instructions that can be sent to the [`Screen`].
 #[derive(Debug, Clone)]
 pub enum ScreenInstruction {
+    BkprControl {
+        request: zellij_utils::control::ControlRequest,
+        response: crossbeam::channel::Sender<zellij_utils::control::ControlResponse>,
+    },
+    BkprControlLayoutAborted { marker: String, error: Option<String> },
     PtyBytes(u32, VteBytes),
     PaneTitleChanged,
     PluginBytes(Vec<PluginRenderAsset>),
@@ -980,6 +988,8 @@ pub enum ScreenInstruction {
 impl From<&ScreenInstruction> for ScreenContext {
     fn from(screen_instruction: &ScreenInstruction) -> Self {
         match *screen_instruction {
+            ScreenInstruction::BkprControl { .. } => ScreenContext::HandlePtyBytes,
+            ScreenInstruction::BkprControlLayoutAborted { .. } => ScreenContext::OverrideLayoutComplete,
             ScreenInstruction::PtyBytes(..) => ScreenContext::HandlePtyBytes,
             ScreenInstruction::PaneTitleChanged => ScreenContext::HandlePtyBytes,
             ScreenInstruction::PluginBytes(..) => ScreenContext::PluginBytes,
@@ -1616,6 +1626,7 @@ pub(crate) struct Screen {
     cached_layouts: Vec<LayoutInfo>,
     cached_layout_errors: Vec<LayoutWithError>,
     pane_render_subscribers: HashMap<ClientId, PaneRenderSubscription>,
+    control_pending_layouts: HashMap<String, control_screen::PendingLayout>,
     background_plugin_subscriptions: HashMap<(PluginId, ClientId), HashSet<EventType>>,
     next_forward_token: u32,
     pending_forwarded_queries: HashMap<u32, PendingForwardEntry>,
@@ -1876,6 +1887,7 @@ impl Screen {
             cached_layouts: vec![],
             cached_layout_errors: vec![],
             pane_render_subscribers: HashMap::new(),
+            control_pending_layouts: HashMap::new(),
             background_plugin_subscriptions: HashMap::new(),
             next_forward_token: 1, // 0 is reserved as the startup sentinel
             pending_forwarded_queries: HashMap::new(),
@@ -8803,6 +8815,12 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::PaneTitleChanged => {
                 screen.log_and_report_session_state()?;
             },
+            ScreenInstruction::BkprControl { request, response } => {
+                screen.handle_bkpr_control(request, response);
+            },
+            ScreenInstruction::BkprControlLayoutAborted { marker, error } => {
+                screen.control_abort_layout(&marker, error);
+            },
             ScreenInstruction::PluginBytes(plugin_render_assets) => {
                 screen.apply_plugin_render_assets(plugin_render_assets)?;
             },
@@ -10115,10 +10133,20 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::ClosePane(
                 id,
                 client_id,
-                _completion_tx, // the action ends here, dropping this will release anything
-                // waiting for it
+                mut completion_tx,
                 exit_status,
             ) => {
+                if completion_tx.is_some() && !screen.tabs.values().any(|tab| {
+                    tab.has_pane_with_pid(&id)
+                        && client_id.is_none_or(|client| screen.active_tab_ids.get(&client) == Some(&tab.id))
+                        && !crate::pane_context::is_owner_pane(id)
+                }) {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(format!("Pane {id:?} is absent or protected"));
+                    }
+                    continue;
+                }
                 match client_id {
                     Some(client_id) => {
                         active_tab!(screen, client_id, |tab: &mut Tab| tab.close_pane(
@@ -10351,6 +10379,31 @@ pub(crate) fn screen_thread_main(
                 mut completion_tx,
                 blocking_terminal,
             ) => {
+                if !screen.tabs.contains_key(&tab_id) {
+                    // A workspace/tab close can win while PTYs and plugins are prepared.
+                    // Never install into a vanished destination or publish phantom IDs.
+                    for (terminal_id, _) in new_pane_pids.iter().chain(&new_floating_pane_pids) {
+                        screen.bus.senders.send_to_pty(PtyInstruction::ClosePane(
+                            PaneId::Terminal(*terminal_id), None,
+                        )).non_fatal();
+                    }
+                    for plugin_id in new_plugin_ids.values().flatten() {
+                        screen.bus.senders.send_to_pty(PtyInstruction::ClosePane(
+                            PaneId::Plugin(*plugin_id), None,
+                        )).non_fatal();
+                    }
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message("Destination tab closed before layout installation".into());
+                    }
+                    if let Some((_, mut completion)) = blocking_terminal {
+                        completion.set_exit_status(1);
+                        completion.set_error_message("Destination tab closed before layout installation".into());
+                    }
+                    pending_tab_ids.remove(&tab_id);
+                    crate::pane_context::discard_pending_tab(tab_id);
+                    continue;
+                }
                 log::info!(
                     "ScreenInstruction::ApplyLayout: applying layout for tab {}",
                     tab_id
@@ -10686,10 +10739,23 @@ pub(crate) fn screen_thread_main(
                 input_mode,
                 base_mode,
                 client_id,
-                _completion_tx, // the action ends here, dropping this will release anything
-                                // waiting for it
+                mut completion_tx,
             ) => {
-                screen.change_mode(input_mode, base_mode, client_id)?;
+                if completion_tx.is_some() && !screen.connected_clients.borrow().contains_key(&client_id) {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message("Client detached before mode mutation".into());
+                    }
+                    continue;
+                }
+                if let Err(error) = screen.change_mode(input_mode, base_mode, client_id) {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(error.to_string());
+                        continue;
+                    }
+                    return Err(error);
+                }
                 screen.render(None)?;
             },
             ScreenInstruction::ChangeModeForAllClients(
@@ -11078,6 +11144,17 @@ pub(crate) fn screen_thread_main(
                 client_id,
                 completion_tx,
             ) => {
+                if let Some(marker) = completion_tx.as_ref().and_then(|c| c.control_correlation())
+                    .filter(|marker| marker.starts_with("bkpr-control-layout:"))
+                {
+                    if let Some(error) = completion_tx.as_ref().and_then(|completion| completion.error_message()) {
+                        screen.control_close_layout_resources(&tab_results);
+                        screen.control_abort_layout(marker, Some(error.to_owned()));
+                        continue;
+                    }
+                    screen.control_finish_layout(marker, tab_results, client_id);
+                    continue;
+                }
                 // Process each tab result
                 for tab_result in tab_results {
                     if let Some(tab) = screen.tabs.get_mut(&tab_result.tab_index) {
@@ -11731,15 +11808,27 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::RenamePane(
                 pane_id,
                 new_name,
-                _completion_tx, // the action ends here, dropping this will release anything
-                                // waiting for it
+                mut completion_tx,
             ) => {
+                if !screen.tabs.values().any(|tab| tab.has_pane_with_pid(&pane_id))
+                    || crate::pane_context::is_owner_pane(pane_id) {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(format!("Pane {pane_id:?} is absent or protected"));
+                    }
+                    continue;
+                }
                 let all_tabs = screen.get_tabs_mut();
                 for tab in all_tabs.values_mut() {
                     if tab.has_pane_with_pid(&pane_id) {
                         match tab.rename_pane(new_name, pane_id) {
                             Ok(()) => drop(screen.render(None)),
-                            Err(e) => log::error!("Failed to rename pane: {:?}", e),
+                            Err(e) => {
+                                if let Some(completion) = completion_tx.as_mut() {
+                                    completion.set_exit_status(1);
+                                    completion.set_error_message(e.to_string());
+                                }
+                            },
                         }
                         break;
                     }
@@ -12547,11 +12636,22 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::ChangeFloatingPanesCoordinates(
                 pane_ids_and_coordinates,
-                _completion_tx, // the action ends here, dropping this will release anything
-                                // waiting for it
+                mut completion_tx,
             ) => {
-                screen.change_floating_panes_coordinates(pane_ids_and_coordinates);
-                let _ = screen.render(None);
+                let invalid = pane_ids_and_coordinates.iter().find(|(pane_id, _)| {
+                    !screen.tabs.values().any(|tab| tab.pane_id_is_floating(pane_id))
+                        || crate::pane_context::is_owner_pane(*pane_id)
+                });
+                if let Some((pane_id, _)) = invalid {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(format!("Pane {pane_id:?} is absent, not floating, or protected"));
+                    }
+                } else {
+                    screen.change_floating_panes_coordinates(pane_ids_and_coordinates);
+                    screen.log_and_report_session_state()?;
+                    screen.render(None)?;
+                }
             },
             ScreenInstruction::TogglePaneBorderless(pane_id, _completion_tx) => {
                 screen.toggle_pane_borderless(pane_id);
@@ -13001,8 +13101,13 @@ pub(crate) fn screen_thread_main(
                 let all_tabs = screen.get_tabs_mut();
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
-                    if tab.has_pane_with_pid(&pane_id) {
-                        tab.resize_by_pane_id(pane_id, strategy);
+                    if tab.has_non_suppressed_pane_with_pid(&pane_id) && !crate::pane_context::is_owner_pane(pane_id) {
+                        if let Err(error) = tab.resize_pane_with_id(strategy, pane_id) {
+                            if let Some(completion) = _completion_tx.as_mut() {
+                                completion.set_exit_status(1);
+                                completion.set_error_message(error.to_string());
+                            }
+                        }
                         found = true;
                         break;
                     }
@@ -13021,7 +13126,8 @@ pub(crate) fn screen_thread_main(
                 let all_tabs = screen.get_tabs_mut();
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
-                    if tab.has_pane_with_pid(&pane_id) {
+                    if tab.has_non_suppressed_pane_with_pid(&pane_id) && !tab.is_fullscreen_active()
+                        && !crate::pane_context::is_owner_pane(pane_id) {
                         tab.move_pane_by_pane_id(pane_id, direction);
                         found = true;
                         break;
@@ -13031,7 +13137,7 @@ pub(crate) fn screen_thread_main(
                     log::error!("Pane with id {:?} not found", pane_id);
                     if let Some(ref mut c) = _completion_tx {
                         c.set_exit_status(1);
-                        c.set_error_message(format!("Pane with id {:?} not found", pane_id));
+                        c.set_error_message(format!("Pane {pane_id:?} is absent, fullscreen, suppressed, or protected"));
                     }
                 }
                 screen.render(None)?;
@@ -13102,7 +13208,17 @@ pub(crate) fn screen_thread_main(
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
                     if tab.has_pane_with_pid(&pane_id) {
-                        tab.toggle_fullscreen_by_pane_id(pane_id);
+                        if _completion_tx.as_ref().is_some_and(|completion| completion.capture_output()) {
+                            let enabled = tab.fullscreen_pane_id() != Some(pane_id) || tab.fullscreen_covers_ui();
+                            if let Err(error) = tab.control_set_fullscreen(pane_id, enabled, false) {
+                                if let Some(completion) = _completion_tx.as_mut() {
+                                    completion.set_exit_status(1);
+                                    completion.set_error_message(error.to_string());
+                                }
+                            }
+                        } else {
+                            tab.toggle_fullscreen_by_pane_id(pane_id);
+                        }
                         found = true;
                         break;
                     }
@@ -13122,7 +13238,17 @@ pub(crate) fn screen_thread_main(
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
                     if tab.has_pane_with_pid(&pane_id) {
-                        tab.toggle_no_ui_fullscreen_by_pane_id(pane_id);
+                        if _completion_tx.as_ref().is_some_and(|completion| completion.capture_output()) {
+                            let enabled = tab.fullscreen_pane_id() != Some(pane_id) || !tab.fullscreen_covers_ui();
+                            if let Err(error) = tab.control_set_fullscreen(pane_id, enabled, true) {
+                                if let Some(completion) = _completion_tx.as_mut() {
+                                    completion.set_exit_status(1);
+                                    completion.set_error_message(error.to_string());
+                                }
+                            }
+                        } else {
+                            tab.toggle_no_ui_fullscreen_by_pane_id(pane_id);
+                        }
                         found = true;
                         break;
                     }
@@ -13142,8 +13268,22 @@ pub(crate) fn screen_thread_main(
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
                     if tab.has_pane_with_pid(&pane_id) {
-                        tab.toggle_pane_embed_or_floating_for_pane_id(pane_id, None)
-                            .non_fatal();
+                        if _completion_tx.as_ref().is_some_and(|completion| completion.capture_output()) {
+                            let floating = !tab.pane_id_is_floating(&pane_id);
+                            let result = if crate::pane_context::is_owner_pane(pane_id) {
+                                Err(anyhow!("The Bkpr sidebar is protected"))
+                            } else {
+                                tab.control_set_pane_state(pane_id, Some(floating), None, None, None)
+                            };
+                            if let Err(error) = result {
+                                if let Some(completion) = _completion_tx.as_mut() {
+                                    completion.set_exit_status(1);
+                                    completion.set_error_message(error.to_string());
+                                }
+                            }
+                        } else {
+                            tab.toggle_pane_embed_or_floating_for_pane_id(pane_id, None).non_fatal();
+                        }
                         found = true;
                         break;
                     }
@@ -13158,12 +13298,12 @@ pub(crate) fn screen_thread_main(
                 screen.log_and_report_session_state()?;
                 screen.render(None)?;
             },
-            ScreenInstruction::CloseFocusWithPaneId(pane_id, completion_tx) => {
+            ScreenInstruction::CloseFocusWithPaneId(pane_id, mut completion_tx) => {
                 let all_tabs = screen.get_tabs_mut();
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
-                    if tab.has_pane_with_pid(&pane_id) {
-                        tab.close_pane_by_pane_id(pane_id, completion_tx)
+                    if tab.has_pane_with_pid(&pane_id) && !crate::pane_context::is_owner_pane(pane_id) {
+                        tab.close_pane_by_pane_id(pane_id, completion_tx.take())
                             .non_fatal();
                         found = true;
                         break;
@@ -13171,6 +13311,10 @@ pub(crate) fn screen_thread_main(
                 }
                 if !found {
                     log::error!("Pane with id {:?} not found", pane_id);
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(format!("Pane {pane_id:?} is absent or protected"));
+                    }
                 }
                 screen.render(None)?;
                 screen.log_and_report_session_state()?;
@@ -13179,8 +13323,13 @@ pub(crate) fn screen_thread_main(
                 let all_tabs = screen.get_tabs_mut();
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
-                    if tab.has_pane_with_pid(&pane_id) {
-                        tab.rename_pane_by_pane_id(pane_id, name).non_fatal();
+                    if tab.has_pane_with_pid(&pane_id) && !crate::pane_context::is_owner_pane(pane_id) {
+                        if let Err(error) = tab.rename_pane_by_pane_id(pane_id, name) {
+                            if let Some(completion) = _completion_tx.as_mut() {
+                                completion.set_exit_status(1);
+                                completion.set_error_message(error.to_string());
+                            }
+                        }
                         found = true;
                         break;
                     }
@@ -13218,7 +13367,7 @@ pub(crate) fn screen_thread_main(
                 let all_tabs = screen.get_tabs_mut();
                 let mut found = false;
                 for tab in all_tabs.values_mut() {
-                    if tab.has_pane_with_pid(&pane_id) {
+                    if tab.pane_id_is_floating(&pane_id) && !crate::pane_context::is_owner_pane(pane_id) {
                         tab.toggle_pane_pinned_by_pane_id(pane_id);
                         found = true;
                         break;
@@ -13228,7 +13377,7 @@ pub(crate) fn screen_thread_main(
                     log::error!("Pane with id {:?} not found", pane_id);
                     if let Some(ref mut c) = _completion_tx {
                         c.set_exit_status(1);
-                        c.set_error_message(format!("Pane with id {:?} not found", pane_id));
+                        c.set_error_message(format!("Pane {pane_id:?} is absent, not floating, or protected"));
                     }
                 }
             },

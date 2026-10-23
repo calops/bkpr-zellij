@@ -1085,6 +1085,34 @@ impl TiledPanes {
         }
         self.reset_boundaries();
     }
+
+    /// Explicit control focus does not broadcast to stack peers or mirrored
+    /// clients. Stack expansion/fullscreen exit remain shared layout changes,
+    /// just as an explicit targeted resize is shared.
+    pub fn focus_pane_for_client(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
+        if !self.connected_clients.borrow().contains(&client_id) {
+            return Err(anyhow!("client is not connected to this tab"));
+        }
+        if !self.panes.get(&pane_id).is_some_and(|pane| pane.selectable()) {
+            return Err(anyhow!("tiled pane does not exist or is not selectable"));
+        }
+        if self.panes_to_hide.contains(&pane_id) {
+            self.unset_fullscreen();
+        }
+        if self.panes.get(&pane_id).is_some_and(|pane| pane.current_geom().stacked.is_some()) {
+            StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
+                .expand_pane(&pane_id)?;
+            self.reapply_pane_frames();
+        }
+        if let Some(previous) = self.active_panes.get(&client_id).copied() {
+            if previous != pane_id {
+                self.active_panes.set_last_pane(client_id, previous);
+            }
+        }
+        self.active_panes.insert(client_id, pane_id, &mut self.panes);
+        self.reset_boundaries();
+        Ok(())
+    }
     pub fn focus_pane_if_exists(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
         if self.panes.get(&pane_id).is_some() {
             self.focus_pane(pane_id, client_id);
@@ -2979,8 +3007,28 @@ impl TiledPanes {
     }
 
     fn set_fullscreen(&mut self, pane_id: PaneId, covers_ui: bool) {
+        self.set_fullscreen_with_focus(pane_id, covers_ui, true);
+    }
+
+    pub fn set_fullscreen_for_control(&mut self, pane_id: PaneId, enabled: bool, covers_ui: bool) -> Result<()> {
+        if !self.panes.contains_key(&pane_id) {
+            return Err(anyhow!("tiled fullscreen target does not exist"));
+        }
+        if enabled {
+            if self.fullscreen_is_active == Some(pane_id) && *self.fullscreen_covers_ui.borrow() == covers_ui {
+                return Ok(());
+            }
+            self.unset_fullscreen();
+            self.set_fullscreen_with_focus(pane_id, covers_ui, false);
+        } else if self.fullscreen_is_active == Some(pane_id) {
+            self.unset_fullscreen();
+        }
+        Ok(())
+    }
+
+    fn set_fullscreen_with_focus(&mut self, pane_id: PaneId, covers_ui: bool, focus_clients: bool) {
         self.panes_to_hide = self.panes_covered_by_fullscreen(pane_id, covers_ui);
-        if self.panes_to_hide.is_empty() && !covers_ui {
+        if self.panes_to_hide.is_empty() && !covers_ui && focus_clients {
             return;
         }
         if covers_ui {
@@ -2989,7 +3037,9 @@ impl TiledPanes {
             self.pin_panes_outside_viewport_in_place();
             self.expand_pane_over_whole_viewport(pane_id);
         }
-        self.focus_pane_for_all_clients(pane_id);
+        if focus_clients {
+            self.focus_pane_for_all_clients(pane_id);
+        }
         self.fullscreen_is_active = Some(pane_id);
         *self.fullscreen_covers_ui.borrow_mut() = covers_ui;
         self.rerun_layout_solver_and_rerender();

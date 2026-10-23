@@ -25,6 +25,7 @@ message ServerToClientMsg {
     EmitNestedSessionFrameMsg emit_nested_session_frame = 18;
     MobileStateMsg mobile_state = 19;
     SetClipboardPasteModeMsg set_clipboard_paste_mode = 20;
+    BkprControlResponseMsg bkpr_control = 21;
   }
 }
 
@@ -164,4 +165,8 @@ message MobileStateMsg {
   repeated MobilePaneMsg panes = 8;
   repeated MobileSessionMsg sessions = 9;
   MobileRenderPrefsMsg render_prefs = 10;
+}
+
+message BkprControlResponseMsg {
+  string json = 1;
 }

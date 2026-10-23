@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+* feat: add bounded `zellij --session NAME bkpr-control` JSON control with immutable Bkpr session validation, direct native topology, explicit target operations, and actual creation/completion receipts. The additive socket capability probe preserves ordinary attachments to older servers.
+* feat: provide client-specific view control, targeted pane/tab state and movement, retained-pane layout application, and atomic terminal input with explicit optional submission, without plugin output mirroring or focus-based targeting.
+* fix: distinguish native action timeout/channel loss from successful completion; uncertain mutations return `unknown` and must not be automatically replayed.
 * feat: add opt-in `zellij attach -d, --detach-others` to detach other clients after attaching while preserving panes and running programs.
 * fix: check attachment capabilities on the same IPC connection and reject `--detach-others` against older servers with an upgrade message, without changing normal attachments or the IPC contract version.
 * fix: release disconnected clients' screen and plugin state immediately, including their canvas-size constraints, without waiting for a client exit acknowledgement.

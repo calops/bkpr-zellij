@@ -13,6 +13,7 @@ pub mod tab;
 
 pub mod background_jobs;
 mod global_async_runtime;
+mod control;
 mod logging_pipe;
 mod mobile_web;
 pub mod nested_guest;
@@ -1723,9 +1724,12 @@ pub fn start_server_impl(
             ServerInstruction::Log(
                 lines_to_log,
                 client_id,
-                _completion_tx, // the action ends here, dropping this will release anything waiting
-                                // for it
+                mut completion,
             ) => {
+                if let Some(completion) = completion.as_mut().filter(|completion| completion.capture_output()) {
+                    completion.set_stdout_message(lines_to_log.join("\n"));
+                    continue;
+                }
                 send_to_client!(
                     client_id,
                     os_input,
@@ -1739,9 +1743,12 @@ pub fn start_server_impl(
             ServerInstruction::LogError(
                 lines_to_log,
                 client_id,
-                _completion_tx, // the action ends here, dropping this will release anything waiting
-                                // for it
+                mut completion,
             ) => {
+                if let Some(completion) = completion.as_mut().filter(|completion| completion.capture_output()) {
+                    completion.set_error_message(lines_to_log.join("\n"));
+                    continue;
+                }
                 send_to_client!(
                     client_id,
                     os_input,

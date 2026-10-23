@@ -21,6 +21,7 @@ fn server_message_name(msg: &ServerToClientMsg) -> String {
         ServerToClientMsg::UnblockInputThread => "UnblockInputThread",
         ServerToClientMsg::Exit { .. } => "Exit",
         ServerToClientMsg::Connected => "Connected",
+        ServerToClientMsg::ConnectedWithCapabilities { .. } => "ConnectedWithCapabilities",
         ServerToClientMsg::Log { .. } => "Log",
         ServerToClientMsg::LogError { .. } => "LogError",
         ServerToClientMsg::SwitchSession { .. } => "SwitchSession",
@@ -36,6 +37,8 @@ fn server_message_name(msg: &ServerToClientMsg) -> String {
         ServerToClientMsg::ForwardQueryToHost { .. } => "ForwardQueryToHost",
         ServerToClientMsg::MobileState { .. } => "MobileState",
         ServerToClientMsg::EmitNestedSessionFrame { .. } => "EmitNestedSessionFrame",
+        ServerToClientMsg::SetClipboardPasteMode { .. } => "SetClipboardPasteMode",
+        ServerToClientMsg::BkprControl { .. } => "BkprControl",
     }
     .to_string()
 }

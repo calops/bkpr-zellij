@@ -39,6 +39,8 @@ const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
+    /// Distinguishes a real acknowledgement from a timeout or dropped receiver.
+    pub completed: bool,
     pub exit_status: Option<i32>,
     pub affected_pane_id: Option<PaneId>,
     pub affected_tab_id: Option<usize>,
@@ -59,6 +61,7 @@ pub fn wait_for_action_completion(
                 Err(e) => {
                     log::error!("Failed to wait for action {}: {}", action_name, e);
                     ActionCompletionResult {
+                        completed: false,
                         exit_status: None,
                         affected_pane_id: None,
                         affected_tab_id: None,
@@ -80,6 +83,7 @@ pub fn wait_for_action_completion(
                     ACTION_COMPLETION_TIMEOUT
                 );
                 ActionCompletionResult {
+                    completed: false,
                     exit_status: None,
                     affected_pane_id: None,
                     affected_tab_id: None,
@@ -89,6 +93,22 @@ pub fn wait_for_action_completion(
             },
         }
     }
+}
+
+thread_local! {
+    static CAPTURE_CONTROL_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Capture existing Log/LogError output into its original native completion,
+/// rather than delivering query text to an attached client's UI.
+pub(crate) struct ControlOutputScope(bool);
+impl Drop for ControlOutputScope {
+    fn drop(&mut self) {
+        CAPTURE_CONTROL_OUTPUT.with(|capture| capture.set(self.0));
+    }
+}
+pub(crate) fn capture_control_output() -> ControlOutputScope {
+    ControlOutputScope(CAPTURE_CONTROL_OUTPUT.with(|capture| capture.replace(true)))
 }
 
 // This is used to wait for actions that span multiple threads until they logically end
@@ -106,6 +126,8 @@ pub struct NotificationEnd {
     affected_tab_id: Option<usize>,   // optional payload of the tab id affected by this action
     error_message: Option<String>,
     stdout_message: Option<String>,
+    capture_output: bool,
+    control_correlation: Option<String>,
 }
 
 impl Clone for NotificationEnd {
@@ -119,6 +141,8 @@ impl Clone for NotificationEnd {
             affected_tab_id: self.affected_tab_id,
             error_message: self.error_message.clone(),
             stdout_message: self.stdout_message.clone(),
+            capture_output: self.capture_output,
+            control_correlation: self.control_correlation.clone(),
         }
     }
 }
@@ -133,6 +157,8 @@ impl NotificationEnd {
             affected_tab_id: None,
             error_message: None,
             stdout_message: None,
+            capture_output: CAPTURE_CONTROL_OUTPUT.with(std::cell::Cell::get),
+            control_correlation: None,
         }
     }
 
@@ -148,7 +174,21 @@ impl NotificationEnd {
             affected_tab_id: None,
             error_message: None,
             stdout_message: None,
+            capture_output: CAPTURE_CONTROL_OUTPUT.with(std::cell::Cell::get),
+            control_correlation: None,
         }
+    }
+
+    pub fn capture_output(&self) -> bool {
+        self.capture_output
+    }
+
+    pub fn set_control_correlation(&mut self, correlation: String) {
+        self.control_correlation = Some(correlation);
+    }
+
+    pub fn control_correlation(&self) -> Option<&str> {
+        self.control_correlation.as_deref()
     }
 
     pub fn set_exit_status(&mut self, exit_status: i32) {
@@ -174,12 +214,17 @@ impl NotificationEnd {
     pub fn unblock_condition(&self) -> Option<UnblockCondition> {
         self.unblock_condition
     }
+
+    pub fn error_message(&self) -> Option<&str> {
+        self.error_message.as_deref()
+    }
 }
 
 impl Drop for NotificationEnd {
     fn drop(&mut self) {
         if let Some(tx) = self.channel.take() {
             let result = ActionCompletionResult {
+                completed: true,
                 exit_status: self.exit_status,
                 affected_pane_id: self.affected_pane_id,
                 affected_tab_id: self.affected_tab_id,
@@ -2408,6 +2453,37 @@ pub(crate) fn route_thread_main(
                                 }
                             }
                         },
+                        ClientToServerMsg::BkprControl { request } => {
+                            // Never retain the session read lock while waiting on screen/PTY:
+                            // ordinary lifecycle actions may need its write lock to complete.
+                            let assets = session_data.read().unwrap().as_ref().map(|session| {
+                                (
+                                    session.senders.clone(),
+                                    session.default_shell.clone(),
+                                    session.session_configuration
+                                        .get_client_default_input_mode(&client_id),
+                                )
+                            });
+                            let shutdown_senders = if request.method == "session.stop" {
+                                assets.as_ref().map(|(senders, _, _)| senders.clone())
+                            } else { None };
+                            let response = if let Some((senders, shell, mode)) = assets {
+                                crate::control::handle(request, senders, shell, mode, os_input.clone())
+                            } else {
+                                zellij_utils::control::ControlResponse::failed(
+                                    &request, "session_unavailable", "native session is not initialized",
+                                )
+                            };
+                            let shutdown = response.outcome == "dispatched" && shutdown_senders.is_some();
+                            let _ = os_input.send_to_client(
+                                client_id, ServerToClientMsg::BkprControl { response },
+                            );
+                            if shutdown {
+                                if let Some(senders) = shutdown_senders {
+                                    let _ = senders.send_to_server(ServerInstruction::KillSession);
+                                }
+                            }
+                        },
                         ClientToServerMsg::Action {
                             action,
                             terminal_id: maybe_pane_id,
@@ -3454,6 +3530,7 @@ mod tests {
     #[test]
     fn test_action_completion_result_includes_tab_id() {
         let result = ActionCompletionResult {
+            completed: true,
             exit_status: None,
             affected_pane_id: None,
             affected_tab_id: Some(123),

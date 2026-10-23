@@ -86,6 +86,7 @@ pub(crate) struct Registry {
     owner_token: String,
     owner: Option<(u32, u64)>,
     owner_plugin: Option<u32>,
+    protected_plugins: BTreeSet<u32>,
     owner_lease: Option<std::fs::File>,
     restart_pending: bool,
     owner_configuration: Option<RunPluginOrAlias>,
@@ -108,6 +109,7 @@ impl Registry {
             owner_token,
             owner: None,
             owner_plugin: None,
+            protected_plugins: BTreeSet::new(),
             owner_lease: None,
             restart_pending: false,
             owner_configuration: None,
@@ -120,6 +122,29 @@ impl Registry {
             root_pids: BTreeMap::new(),
             clients: BTreeMap::new(),
         }
+    }
+
+    fn rename_session(&mut self, name: &str) -> Result<(), String> {
+        if name.is_empty() || name.len() > 4096 || name.chars().any(char::is_control) {
+            return Err("session label must be nonempty printable text of at most 4096 bytes".into());
+        }
+        self.session_name = name.into();
+        Ok(())
+    }
+
+    fn validate_control_context(&self, expected_session: &str, source_pane: Option<&str>) -> Result<(), String> {
+        if self.session_id != expected_session {
+            return Err("session incarnation does not match expected Bkpr session".into());
+        }
+        if let Some(source) = source_pane {
+            if !source.starts_with("terminal_")
+                || !self.panes.contains_key(source)
+                || self.pending_panes.contains(source)
+            {
+                return Err("source pane is not a live terminal in this session".into());
+            }
+        }
+        Ok(())
     }
 
     fn ensure_tab(&mut self, tab_id: usize, name: &str) {
@@ -357,11 +382,12 @@ impl Registry {
     }
 
     fn unload_owner(&mut self, plugin_id: u32) {
+        self.protected_plugins.remove(&plugin_id);
         if self.owner_plugin == Some(plugin_id) {
             self.owner_lease.take();
         }
     }
-    fn event(&self) -> Event {
+    fn snapshot(&self) -> Snapshot<'_> {
         let panes = self
             .panes
             .iter()
@@ -383,21 +409,21 @@ impl Registry {
                 })
             })
             .collect();
+        Snapshot {
+            version: 1,
+            session_id: &self.session_id,
+            session_name: &self.session_name,
+            tabs: self.tabs.values()
+                .filter(|tab| !self.pending_tabs.contains(&tab.context.tab_id))
+                .map(|tab| &tab.context).collect(),
+            panes,
+        }
+    }
+
+    fn event(&self) -> Event {
         Event::CustomMessage(
             "bkpr_context".into(),
-            serde_json::to_string(&Snapshot {
-                version: 1,
-                session_id: &self.session_id,
-                session_name: &self.session_name,
-                tabs: self
-                    .tabs
-                    .values()
-                    .filter(|tab| !self.pending_tabs.contains(&tab.context.tab_id))
-                    .map(|tab| &tab.context)
-                    .collect(),
-                panes,
-            })
-            .expect("native context is serializable"),
+            serde_json::to_string(&self.snapshot()).expect("native context is serializable"),
         )
     }
 }
@@ -421,6 +447,70 @@ static REGISTRY: LazyLock<Option<Mutex<Registry>>> = LazyLock::new(|| {
 
 fn registry() -> Option<&'static Mutex<Registry>> {
     REGISTRY.as_ref()
+}
+
+/// Same-user control verifies the immutable server incarnation, never an owner token.
+pub(crate) fn validate_control_context(expected_session: &str, source_pane: Option<&str>) -> Result<(), String> {
+    let registry = registry().ok_or("session has no native Bkpr ownership")?;
+    registry.lock().map_err(|_| "native context lock poisoned")?
+        .validate_control_context(expected_session, source_pane)
+}
+
+pub(crate) fn control_snapshot(
+    expected_session: &str,
+    source_pane: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let registry = registry().ok_or("session has no native Bkpr ownership")?;
+    let registry = registry.lock().map_err(|_| "native context lock poisoned")?;
+    registry.validate_control_context(expected_session, source_pane)?;
+    serde_json::to_value(registry.snapshot()).map_err(|error| error.to_string())
+}
+
+pub(crate) fn is_owner_pane(pane_id: PaneId) -> bool {
+    let PaneId::Plugin(id) = pane_id else { return false; };
+    registry().is_some_and(|registry| {
+        registry.lock().is_ok_and(|registry| registry.owner_plugin == Some(id) || registry.protected_plugins.contains(&id))
+    })
+}
+
+pub(crate) fn owner_plugin_location() -> Option<RunPluginLocation> {
+    let registry = registry()?.lock().ok()?;
+    Some(registry.owner_configuration.as_ref()?.get_run_plugin()?.location.clone())
+}
+
+pub(crate) fn rename_session(name: &str) -> Result<(), String> {
+    let registry = registry().ok_or("session has no native Bkpr ownership")?;
+    registry.lock().map_err(|_| "native context lock poisoned")?.rename_session(name)
+}
+
+pub(crate) fn tab_context(tab_id: usize) -> Option<TabContext> {
+    Some(registry()?.lock().ok()?.tabs.get(&tab_id)?.context.clone())
+}
+
+pub(crate) fn workspace_tab_ids(workspace_id: &str) -> Result<Vec<usize>, String> {
+    let registry = registry().ok_or("session has no native Bkpr ownership")?;
+    let registry = registry.lock().map_err(|_| "native context lock poisoned")?;
+    let tabs: Vec<_> = registry.tabs.iter()
+        .filter_map(|(id, tab)| (tab.context.workspace_id == workspace_id).then_some(*id))
+        .collect();
+    if tabs.is_empty() { Err("workspace is not live in this session".into()) } else { Ok(tabs) }
+}
+
+pub(crate) fn rename_workspace(workspace_id: &str, name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 4096 || name.chars().any(char::is_control) {
+        return Err("workspace name must be nonempty printable text of at most 4096 bytes".into());
+    }
+    let registry = registry().ok_or("session has no native Bkpr ownership")?;
+    let mut registry = registry.lock().map_err(|_| "native context lock poisoned")?;
+    let mut found = false;
+    for binding in registry.tabs.values_mut() {
+        if binding.context.workspace_id == workspace_id {
+            binding.context.workspace_name = name.into();
+            binding.explicit = true;
+            found = true;
+        }
+    }
+    if found { Ok(()) } else { Err("workspace is not live in this session".into()) }
 }
 
 thread_local! { static SPAWN_TAB: Cell<Option<usize>> = const { Cell::new(None) }; }
@@ -628,6 +718,12 @@ pub(crate) fn owner_loaded(plugin: &zellij_utils::input::layout::RunPlugin, plug
         return;
     };
     let mut registry = registry.lock().unwrap();
+    if registry.owner_configuration.as_ref()
+        .and_then(RunPluginOrAlias::get_run_plugin)
+        .is_some_and(|owner| owner.location == plugin.location)
+    {
+        registry.protected_plugins.insert(plugin_id);
+    }
     if registry
         .owner_configuration
         .as_ref()
@@ -813,6 +909,37 @@ mod tests {
         lease.try_lock().unwrap();
         registry.owner_lease = Some(lease);
         registry
+    }
+
+    #[test]
+    fn display_rename_preserves_incarnation_authority_and_old_process_snapshot() {
+        let mut registry = registry();
+        registry.ensure_tab(0, "workspace");
+        let before = registry.terminal_environment(0, 7).unwrap();
+        registry.rename_session("new display label").unwrap();
+        let after = registry.terminal_environment(0, 8).unwrap();
+        assert_eq!(before.session_name, "work");
+        assert_eq!(after.session_name, "new display label");
+        assert_eq!(before.session_id, after.session_id);
+        assert_eq!(registry.owner_token, "secret");
+        assert_eq!(registry.owner_plugin, Some(2));
+        assert!(registry.owner_lease.is_some());
+        assert!(registry.rename_session("bad\nlabel").is_err());
+        assert_eq!(registry.session_name, "new display label");
+    }
+
+    #[test]
+    fn control_rejects_reused_session_names_pending_and_closed_sources() {
+        let mut registry = registry();
+        registry.synchronize(vec![(0, "one", vec![PaneId::Terminal(7)])].into_iter(), &BTreeMap::new());
+        assert!(registry.validate_control_context("incarnation-a", Some("terminal_7")).is_ok());
+        assert!(registry.validate_control_context("incarnation-b", Some("terminal_7")).is_err());
+        assert!(registry.validate_control_context("incarnation-a", Some("7")).is_err());
+        registry.pending_panes.insert("terminal_7".into());
+        assert!(registry.validate_control_context("incarnation-a", Some("terminal_7")).is_err());
+        registry.pending_panes.clear();
+        registry.synchronize(vec![(0, "one", vec![])].into_iter(), &BTreeMap::new());
+        assert!(registry.validate_control_context("incarnation-a", Some("terminal_7")).is_err());
     }
 
     #[test]

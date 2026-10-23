@@ -261,6 +261,10 @@ pub enum ClientToServerMsg {
     HostTerminalFocusChanged {
         focused: bool,
     },
+    /// Additive, authenticated-by-local-socket structured control ingress.
+    BkprControl {
+        request: crate::control::ControlRequest,
+    },
 }
 
 // Types of messages sent from the server to the client
@@ -324,6 +328,9 @@ pub enum ServerToClientMsg {
     },
     MobileState {
         payload: MobileStatePayload,
+    },
+    BkprControl {
+        response: crate::control::ControlResponse,
     },
 }
 

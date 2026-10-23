@@ -24,6 +24,7 @@ use crate::{
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
         TerminalColorsUpdate as ProtoTerminalColorsUpdate,
         UnblockInputThreadMsg, WebServerStartedMsg,
+        BkprControlRequestMsg, BkprControlResponseMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
@@ -200,6 +201,11 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 client_to_server_msg::Message::HostTerminalFocusChanged(
                     HostTerminalFocusChangedMsg { focused },
                 )
+            },
+            ClientToServerMsg::BkprControl { request } => {
+                client_to_server_msg::Message::BkprControl(BkprControlRequestMsg {
+                    json: serde_json::to_string(&request).expect("control request is serializable"),
+                })
             },
         };
 
@@ -396,6 +402,12 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                     focused: msg.focused,
                 })
             },
+            Some(client_to_server_msg::Message::BkprControl(msg)) => {
+                if msg.json.len() > crate::control::MAX_REQUEST_BYTES {
+                    return Err(anyhow!("control request exceeds 1 MiB"));
+                }
+                Ok(ClientToServerMsg::BkprControl { request: serde_json::from_str(&msg.json)? })
+            },
             None => Err(anyhow!("Empty ClientToServerMsg message")),
         }
     }
@@ -504,6 +516,11 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             },
             ServerToClientMsg::MobileState { payload } => {
                 server_to_client_msg::Message::MobileState(mobile_state_payload_to_proto(payload))
+            },
+            ServerToClientMsg::BkprControl { response } => {
+                server_to_client_msg::Message::BkprControl(BkprControlResponseMsg {
+                    json: serde_json::to_string(&response).expect("control response is serializable"),
+                })
             },
         };
 
@@ -760,6 +777,9 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
                 Ok(ServerToClientMsg::MobileState {
                     payload: mobile_state_payload_from_proto(msg),
                 })
+            },
+            Some(server_to_client_msg::Message::BkprControl(msg)) => {
+                Ok(ServerToClientMsg::BkprControl { response: serde_json::from_str(&msg.json)? })
             },
             None => Err(anyhow!("Empty ServerToClientMsg message")),
         }

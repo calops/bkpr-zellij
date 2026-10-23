@@ -154,6 +154,10 @@ pub enum Command {
         "zellij [--session <OTHER SESSION NAME>] subscribe [OPTIONS] --pane-id..."
     ))]
     Subscribe(SubscribeCli),
+
+    /// Exchange one bounded JSON control request with an explicitly named native session
+    #[clap(name = "bkpr-control", override_usage("zellij --session <SESSION NAME> bkpr-control"))]
+    BkprControl,
 }
 
 #[derive(Debug, Parser, Clone, Serialize, Deserialize)]
@@ -1596,6 +1600,18 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn bkpr_control_is_a_unit_command_with_an_explicit_session_target() {
+        let cli = CliArgs::try_parse_from([
+            "zellij", "--session", "work", "bkpr-control",
+        ]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("work"));
+        assert!(matches!(cli.command, Some(Command::BkprControl)));
+        assert!(CliArgs::try_parse_from([
+            "zellij", "--session", "work", "bkpr-control", "snapshot",
+        ]).is_err());
+    }
 
     #[test]
     fn detach_others_is_explicit_and_accepts_both_spellings() {

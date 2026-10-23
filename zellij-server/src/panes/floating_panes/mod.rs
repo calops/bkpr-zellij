@@ -1277,6 +1277,29 @@ impl FloatingPanes {
         self.set_pane_active_at(pane_id);
         self.set_force_render();
     }
+
+    /// Control-plane focus is client-specific even though floating z-order is
+    /// shared tab layout state. The ordinary interactive focus policy is unchanged.
+    pub fn focus_pane_for_client(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
+        if !self.connected_clients.borrow().contains(&client_id) {
+            return Err(anyhow!("client is not connected to this tab"));
+        }
+        if !self.panes.get(&pane_id).is_some_and(|pane| pane.selectable()) {
+            return Err(anyhow!("floating pane does not exist or is not selectable"));
+        }
+        if let Some(previous) = self.active_panes.get(&client_id).copied() {
+            if previous != pane_id {
+                self.active_panes.set_last_pane(client_id, previous);
+            }
+        }
+        self.active_panes.insert(client_id, pane_id, &mut self.panes);
+        self.z_indices.retain(|id| *id != pane_id);
+        self.z_indices.push(pane_id);
+        self.make_sure_pinned_panes_are_on_top();
+        self.set_pane_active_at(pane_id);
+        self.set_force_render();
+        Ok(())
+    }
     pub fn fullscreen_is_active(&self) -> bool {
         self.fullscreen_pane_id.is_some()
     }
@@ -1306,6 +1329,26 @@ impl FloatingPanes {
         }
     }
     fn set_fullscreen(&mut self, pane_id: PaneId, covers_ui: bool) {
+        self.set_fullscreen_with_focus(pane_id, covers_ui, true);
+    }
+
+    pub fn set_fullscreen_for_control(&mut self, pane_id: PaneId, enabled: bool, covers_ui: bool) -> Result<()> {
+        if !self.panes.contains_key(&pane_id) {
+            return Err(anyhow!("floating fullscreen target does not exist"));
+        }
+        if enabled {
+            if self.fullscreen_pane_id == Some(pane_id) && self.floating_fullscreen_covers_ui == covers_ui {
+                return Ok(());
+            }
+            self.unset_fullscreen();
+            self.set_fullscreen_with_focus(pane_id, covers_ui, false);
+        } else if self.fullscreen_pane_id == Some(pane_id) {
+            self.unset_fullscreen();
+        }
+        Ok(())
+    }
+
+    fn set_fullscreen_with_focus(&mut self, pane_id: PaneId, covers_ui: bool, focus_clients: bool) {
         if !self.panes.contains_key(&pane_id) {
             log::error!("No floating pane with id: {:?} found", pane_id);
             return;
@@ -1350,7 +1393,9 @@ impl FloatingPanes {
         );
         self.fullscreen_pane_id = Some(pane_id);
         self.floating_fullscreen_covers_ui = covers_ui;
-        self.focus_pane_for_all_clients(pane_id);
+        if focus_clients {
+            self.focus_pane_for_all_clients(pane_id);
+        }
         self.set_force_render();
     }
     pub fn unset_fullscreen(&mut self) {

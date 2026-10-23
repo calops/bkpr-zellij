@@ -46,6 +46,7 @@ pub struct LayoutApplier<'a> {
     osc8_hyperlinks: bool,
     explicitly_disable_kitty_keyboard_protocol: bool,
     blocking_terminal: Option<(u32, NotificationEnd)>,
+    preserve_client_focus: bool,
 }
 
 impl<'a> LayoutApplier<'a> {
@@ -72,6 +73,7 @@ impl<'a> LayoutApplier<'a> {
         explicitly_disable_kitty_keyboard_protocol: bool,
         blocking_terminal: Option<(u32, NotificationEnd)>,
     ) -> Self {
+        // Control layouts rearrange native panes without selecting a client's pane.
         let senders = senders.clone();
         let sixel_image_store = sixel_image_store.clone();
         let kitty_image_store = kitty_image_store.clone();
@@ -105,7 +107,12 @@ impl<'a> LayoutApplier<'a> {
             osc8_hyperlinks,
             explicitly_disable_kitty_keyboard_protocol,
             blocking_terminal,
+            preserve_client_focus: false,
         }
+    }
+    pub fn preserve_client_focus(&mut self) -> &mut Self {
+        self.preserve_client_focus = true;
+        self
     }
     pub fn apply_layout(
         &mut self,
@@ -296,22 +303,30 @@ impl<'a> LayoutApplier<'a> {
                 remaining_pane_ids,
                 existing_tab_state,
                 last_logical_position,
-                Some(client_id),
+                if self.preserve_client_focus { None } else { Some(client_id) },
             );
         }
 
-        pane_applier.finalize_tiled_state();
+        if self.preserve_client_focus {
+            pane_applier.tiled_panes.reapply_pane_frames();
+        } else {
+            pane_applier.finalize_tiled_state();
+        }
 
-        if let Some(pane_id) = focus_pane_id {
-            *self.focus_pane_id = Some(pane_id);
-            self.tiled_panes.focus_pane(pane_id, client_id);
+        if !self.preserve_client_focus {
+            if let Some(pane_id) = focus_pane_id {
+                *self.focus_pane_id = Some(pane_id);
+                self.tiled_panes.focus_pane(pane_id, client_id);
+            }
         }
 
         // in case focused panes were closed by the override
         self.tiled_panes.move_client_focus_to_existing_panes();
 
-        for pane_id in &pane_ids_expanded_in_stack {
-            self.tiled_panes.expand_pane_in_stack(*pane_id);
+        if !self.preserve_client_focus {
+            for pane_id in &pane_ids_expanded_in_stack {
+                self.tiled_panes.expand_pane_in_stack(*pane_id);
+            }
         }
 
         self.tiled_panes.set_pane_frames(self.pane_frame_style);
@@ -989,16 +1004,24 @@ impl<'a> LayoutApplier<'a> {
             &self.senders,
             &self.character_cell_size,
         );
-        pane_applier.handle_remaining_floating_pane_ids(existing_tab_state, logical_position);
-
-        if let Some(focused_floating_pane) = focused_floating_pane {
-            self.floating_panes
-                .focus_pane_for_all_clients(focused_floating_pane);
+        if self.preserve_client_focus {
+            // Retained floating panes already have native geometry and focus metadata.
+            // Re-packing can silently discard them when the new layout fills the screen.
+            for pane_id in existing_tab_state.pane_ids() {
+                if let Some(pane) = existing_tab_state.remove_pane(&pane_id) {
+                    pane_applier.floating_panes.add_pane(pane_id, pane);
+                }
+            }
         } else {
-            // we do this in case there is no explicitly focused pane in the new layout, so as to
-            // make sure any panes that are already focused have a higher z_index than the ones
-            // added above
-            self.floating_panes.reapply_pane_focus();
+            pane_applier.handle_remaining_floating_pane_ids(existing_tab_state, logical_position);
+        }
+
+        if !self.preserve_client_focus {
+            if let Some(focused_floating_pane) = focused_floating_pane {
+                self.floating_panes.focus_pane_for_all_clients(focused_floating_pane);
+            } else {
+                self.floating_panes.reapply_pane_focus();
+            }
         }
 
         // in case focused panes were closed by the override

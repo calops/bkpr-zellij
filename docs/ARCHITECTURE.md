@@ -97,3 +97,85 @@ restart requests. No authority token is returned to sidebars or supplied in env.
 The opt-in marker is also removed from all child environments and session-env
 readback, so an ordinary nested Zellij does not inherit Bkpr host authority.
 
+
+## Bkpr native control (protocol 1)
+
+`zellij --session NAME bkpr-control` reads exactly one JSON object from stdin
+(maximum 1 MiB) and writes exactly one JSON response followed by a newline.
+An explicit native session name is required; no prefix or last-active-client
+selection is performed. The same-user private native socket is the authority.
+The request must also name the immutable canonical Bkpr `session_id`; its
+incarnation and optional live `source_pane_id` are checked before dispatch.
+No owner token is accepted or returned. The existing native-context launch
+marker is sufficient; no additional marker or asset rewrite is needed.
+
+Request envelope:
+
+```json
+{"protocol":1,"request_id":"unique-correlation-id","session_id":"canonical-bkpr-id","source_pane_id":"terminal_7","client_id":2,"method":"action","arguments":{"argv":["resize","increase","right","--pane-id","terminal_7"]}}
+```
+
+`source_pane_id` and `client_id` are optional. Pane identifiers are canonical
+`terminal_N` / `plugin_N`, tab IDs are stable native integers, and client IDs
+are native integers. Unknown envelope or operation argument fields are rejected.
+The native CLI-action parser validates `arguments.argv`; these are argv elements,
+not shell text. Focus-relative actions, mode broadcasts, plugin pipes, native
+socket/session-name renaming, and persistent configuration changes are outside
+this ingress. Display labels can change through `session.rename` without
+changing the canonical session ID, socket address, owner authority or any
+already-running process's creation-time `BKPR_SESSION_NAME`.
+Pane/tab actions require live explicit targets. Pane/editor creation requires
+`--no-focus` and a source pane or tab ID; new tabs require `--no-focus`.
+Process-exit blocking flags are rejected. A relative split uses
+`source_pane_id` plus `new-pane --no-focus --near-current-pane --direction right`
+(or `down`), not a temporary change to an attached client's focus.
+
+Response envelope:
+
+```json
+{"protocol":1,"request_id":"unique-correlation-id","outcome":"completed","result":{"pane_id":"terminal_8","tab_id":null,"exit_status":null,"stdout":null},"error":null}
+```
+
+Outcomes are `completed`, `dispatched`, `unknown`, or `failed`. `completed`
+means a native completion acknowledgement, never application processing.
+`dispatched` means accepted without completion proof (notably session shutdown).
+`unknown` means a response/completion was lost or timed out after dispatch may
+have begun: callers must not automatically retry it. Errors contain `code`
+and `message`. Creation IDs are returned by the actual native completion,
+never inferred by comparing pane lists.
+
+Methods and operation arguments:
+
+| Method | Arguments |
+| --- | --- |
+| `capabilities` | `{}`; reports negotiated protocol, limits and method support |
+| `snapshot` | `{}`; Bkpr session/tabs/panes plus `native` pane/tab/client metadata |
+| `action` | `{argv:[string]}`; safe explicit-target native CLI actions |
+| `input` | `{pane_id,kind,text?,keys?,bytes?,submit?:bool}`; kind is `text`, `paste`, `keys`, or `bytes` |
+| `pane.set_state` | `{pane_id,floating?,pinned?,fullscreen?,borderless?}`; idempotent setters |
+| `pane.move_to_tab` | `{pane_id,tab_id}`; keeps pane identity and updates live membership |
+| `pane.swap` | `{pane_id,other_pane_id}`; exact panes in the same tab/container |
+| `tab.set_sync` | `{tab_id,sync:bool}` |
+| `client.focus` | `{client_id,pane_id? ,tab_id?}`; exactly one target |
+| `client.mode` | `{client_id,mode}`; never broadcasts to other clients |
+| `client.detach` | `{client_id}` |
+| `layout.apply` | `{tab_id,layout}`; raw KDL, targets one tab and retains existing panes/plugins |
+| `workspace.rename` | `{workspace_id,name}`; updates the live shared workspace label |
+| `workspace.close` | `{workspace_id}`; closes its authoritative live tabs in one screen operation |
+| `session.rename` | `{name}`; updates the live Bkpr display label, not the native socket name |
+| `session.stop` | `{}`; shutdown dispatch receipt may race server exit |
+
+The snapshot's Bkpr tabs contain `tab_id`, `workspace_id`, `workspace_name`;
+panes additionally contain `pane_id` and `root_pid`. Newly created tabs get
+their workspace binding before the child process executes. Moving a running
+pane changes its live binding but does not rewrite its immutable original
+`BKPR_*` environment. Fullscreen and sync are native shared-tab layout state,
+not per-client focus. Absolute tiled dimensions are not supported: use native
+increment/decrement resizing. Terminal output streaming remains direct
+`zellij subscribe`; it is not mirrored through plugins or this request API.
+
+The control client first sends a nonmutating capability probe on the same
+connection. Older servers reject it before any requested mutation is sent.
+Existing ordinary attachment messages, protobuf tags and contract version
+remain unchanged; control requests/responses use new additive protobuf tags.
+
