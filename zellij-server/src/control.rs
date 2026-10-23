@@ -59,6 +59,18 @@ pub(crate) fn handle(
     if let Err(error) = pane_context::validate_control_context(&request.session_id, request.source_pane_id.as_deref()) {
         return fail("session_mismatch", error);
     }
+    if let Some(client_id) = request.client_id {
+        if request.method.starts_with("client.") && request.arguments.get("client_id").and_then(Value::as_u64) != Some(u64::from(client_id)) {
+            return fail("invalid_target", "envelope and operation client_id disagree".into());
+        }
+        let guard = ControlRequest {
+            protocol: request.protocol, request_id: request.request_id.clone(),
+            session_id: request.session_id.clone(), source_pane_id: request.source_pane_id.clone(),
+            client_id: None, method: "client.detach".into(), arguments: json!({"client_id":client_id}),
+        };
+        let response = screen_request(&guard, &senders);
+        if response.outcome != "completed" { return response; }
+    }
     match request.method.as_str() {
         "capabilities" => {
             if request.arguments != json!({}) { return fail("invalid_arguments", "capabilities takes no arguments".into()); }

@@ -39,6 +39,9 @@ struct ClientFocus { client_id: ClientId, pane_id: Option<String>, tab_id: Optio
 struct ClientMode { client_id: ClientId, mode: String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ClientTarget { client_id: ClientId }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyLayout { tab_id: usize, layout: String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -338,6 +341,13 @@ impl Screen {
                 let tab = self.tabs.get_mut(&args.tab_id).ok_or("Tab does not exist")?;
                 if tab.is_sync_panes_active() != args.sync { tab.toggle_sync_panes_is_active(); }
                 Ok(json!({"tab_id":args.tab_id,"sync":tab.is_sync_panes_active()}))
+            },
+            // Detachment is completed by the server owner after this screen-
+            // authoritative validation; this branch itself never detaches.
+            "client.detach" => {
+                let args: ClientTarget = decode(args)?;
+                self.control_client(args.client_id)?;
+                Ok(json!({"client_id":args.client_id}))
             },
             "client.focus" => {
                 let args: ClientFocus = decode(args)?;

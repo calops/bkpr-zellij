@@ -118,6 +118,9 @@ Request envelope:
 `source_pane_id` and `client_id` are optional. Pane identifiers are canonical
 `terminal_N` / `plugin_N`, tab IDs are stable native integers, and client IDs
 are native integers. Unknown envelope or operation argument fields are rejected.
+An envelope `client_id`, when present, is a live attached-client guard and must
+match the explicit client argument on a client operation. It never supplies
+an implicit human-focus target for a pane/tab action.
 The native CLI-action parser validates `arguments.argv`; these are argv elements,
 not shell text. Focus-relative actions, mode broadcasts, plugin pipes, native
 socket/session-name renaming, and persistent configuration changes are outside
