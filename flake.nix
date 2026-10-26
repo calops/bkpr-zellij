@@ -58,7 +58,7 @@
               withWebServer = false;
             }).overrideAttrs
               (old: {
-                version = "0.45.1-bkpr.5";
+                version = "0.45.1-bkpr.6";
                 src = pkgs.lib.cleanSourceWith {
                   name = "zellij-source";
                   src = ./.;
