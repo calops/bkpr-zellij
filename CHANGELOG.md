@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+* feat: let focused floating plugins opt into client-scoped background faint styling with `dim_background="true"`, without changing pane visibility or input behavior.
 * feat: add client-local `--initial-mode` independently of the configured default/base mode, preserving Normal key delivery after a Locked startup and isolating attachment mode overrides.
 * fix: keep cursorless focused plugins anchored to the client's last input cursor, including hidden application cursors, instead of the last sidebar or popup paint position.
 * fix: stop emitting pane-origin cursor moves for empty raw grid output.

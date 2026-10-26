@@ -62,6 +62,46 @@ fn create_pane_geom(x: usize, y: usize, cols: usize, rows: usize) -> PaneGeom {
 }
 
 #[test]
+fn background_dimming_preserves_the_focused_layer_other_clients_and_source_styles() {
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(2),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        None,
+    );
+    output.set_background_dimming(1, Some(2));
+    let mut source = create_character_chunk_from_str("background", 0, 0);
+    source.terminal_characters[0]
+        .styles
+        .update(|style| style.bold = Some(AnsiCode::On));
+    for (client, layer) in [(1, None), (2, None), (1, Some(2))] {
+        output
+            .add_character_chunks_to_client(client, vec![source.clone()], layer)
+            .unwrap();
+    }
+    let dimmed = &output.client_character_chunks[&1][0].terminal_characters[0];
+    assert_eq!(dimmed.styles.dim, Some(AnsiCode::On));
+    assert_eq!(dimmed.styles.bold, Some(AnsiCode::On));
+    assert_eq!(
+        output.client_character_chunks[&1][1].terminal_characters[0].styles.dim,
+        None,
+    );
+    assert_eq!(
+        output.client_character_chunks[&2][0].terminal_characters[0].styles.dim,
+        None,
+    );
+    assert_eq!(source.terminal_characters[0].styles.dim, None);
+    output.set_background_dimming(1, None);
+    output
+        .add_character_chunks_to_client(1, vec![source], None)
+        .unwrap();
+    assert_eq!(
+        output.client_character_chunks[&1][2].terminal_characters[0].styles.dim,
+        None,
+    );
+}
+
+#[test]
 fn test_output_new() {
     let output = create_test_output();
 

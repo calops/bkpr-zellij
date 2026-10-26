@@ -636,6 +636,7 @@ pub struct Output {
     client_rendered_kitty_panes: HashMap<ClientId, HashSet<PaneId>>,
     client_kitty_visible_panes: HashMap<ClientId, HashSet<PaneId>>,
     clients_with_cleared_host_display: HashSet<ClientId>,
+    background_dimming: HashMap<ClientId, usize>,
     link_handler: Option<Rc<RefCell<LinkHandler>>>,
     sixel_image_store: Rc<RefCell<SixelImageStore>>,
     kitty_image_store: Rc<RefCell<KittyImageStore>>,
@@ -684,7 +685,15 @@ impl Output {
         self.link_handler = Some(link_handler);
         self.floating_panes_stack = floating_panes_stack;
         for client_id in client_ids {
+            self.background_dimming.remove(client_id);
             self.client_character_chunks.insert(*client_id, vec![]);
+        }
+    }
+    pub(crate) fn set_background_dimming(&mut self, client_id: ClientId, layer: Option<usize>) {
+        if let Some(layer) = layer {
+            self.background_dimming.insert(client_id, layer);
+        } else {
+            self.background_dimming.remove(&client_id);
         }
     }
     pub fn add_character_chunks_to_client(
@@ -694,6 +703,13 @@ impl Output {
         z_index: Option<usize>,
     ) -> Result<()> {
         if let Some(client_character_chunks) = self.client_character_chunks.get_mut(&client_id) {
+            if self
+                .background_dimming
+                .get(&client_id)
+                .is_some_and(|layer| Some(*layer) != z_index)
+            {
+                crate::ui::pane_contents_and_ui::dim_character_chunks(&mut character_chunks);
+            }
             if let Some(floating_panes_stack) = &self.floating_panes_stack {
                 let mut visible_character_chunks = floating_panes_stack
                     .visible_character_chunks(character_chunks, z_index)

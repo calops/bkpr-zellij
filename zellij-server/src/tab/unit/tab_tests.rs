@@ -17911,3 +17911,68 @@ fn floating_plugin_panes_are_not_shown_again_when_their_tab_returns_with_the_sur
         "a plugin whose floating surface is hidden should not be told it is visible when its tab returns"
     );
 }
+
+#[test]
+fn background_dimming_follows_only_an_opted_in_visible_focused_floating_plugin() {
+    use std::collections::BTreeMap;
+    use zellij_utils::input::layout::{PluginUserConfiguration, Run, RunPlugin, RunPluginOrAlias};
+    let mut tab = create_new_tab(
+        Size { cols: 121, rows: 20 },
+        true,
+    );
+    let plugin = RunPlugin {
+        configuration: PluginUserConfiguration::new(BTreeMap::from([
+            ("dim_background".to_owned(), "true".to_owned()),
+        ])),
+        ..RunPlugin::default()
+    };
+    let run = Run::Plugin(RunPluginOrAlias::RunPlugin(plugin));
+    tab.register_background_dimming(7, &run, Some(1));
+    tab.new_pane(
+        PaneId::Plugin(7),
+        None,
+        Some(run),
+        false,
+        true,
+        NewPanePlacement::Floating(None),
+        Some(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        tab.floating_panes.background_dimming_layer(1, &tab.background_dimming_clients),
+        Some((PaneId::Plugin(7), 1))
+    );
+    tab.floating_panes.focus_pane(PaneId::Plugin(7), 2);
+    assert_eq!(
+        tab.floating_panes.background_dimming_layer(2, &tab.background_dimming_clients),
+        None,
+    );
+    tab.hide_floating_panes();
+    assert_eq!(
+        tab.floating_panes.background_dimming_layer(1, &tab.background_dimming_clients),
+        None,
+    );
+    tab.show_floating_panes();
+    assert_eq!(
+        tab.floating_panes.background_dimming_layer(1, &tab.background_dimming_clients),
+        Some((PaneId::Plugin(7), 1))
+    );
+    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+        .unwrap();
+    assert_eq!(
+        tab.floating_panes.background_dimming_layer(1, &tab.background_dimming_clients),
+        None,
+    );
+    tab.floating_panes.focus_pane(PaneId::Plugin(7), 1);
+    tab.clear_background_dimming_for_client(1);
+    assert_eq!(
+        tab.floating_panes.background_dimming_layer(1, &tab.background_dimming_clients),
+        None,
+    );
+    let (ordinary, _) = tab_with_floating_plugin_pane(8);
+    assert_eq!(
+        ordinary.floating_panes.background_dimming_layer(1, &ordinary.background_dimming_clients),
+        None,
+    );
+}

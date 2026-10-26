@@ -4465,6 +4465,7 @@ impl Screen {
             connected_client_id.and_then(|client_id| self.get_active_tab_mut(client_id).ok())
         };
         if let Some(tab) = target_tab {
+            tab.register_background_dimming(plugin_id, &run_plugin, client_id);
             tab.new_pane(
                 PaneId::Plugin(plugin_id),
                 Some(pane_title),
@@ -5532,6 +5533,7 @@ impl Screen {
         self.nested_guest_choices
             .retain(|(choice_client_id, _), _| *choice_client_id != client_id);
         for tab in self.tabs.values_mut() {
+            tab.clear_background_dimming_for_client(client_id);
             tab.clear_guest_modal_for_client_on_all_panes(client_id);
             tab.clear_guest_choice_indicator_for_client_on_all_panes(client_id);
         }
