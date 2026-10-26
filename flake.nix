@@ -111,6 +111,9 @@
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib terminal_palette_extension_remains_a_legacy_color_register_message
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib attachment_tests
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib initial_mode_cli_does_not_replace_default_mode
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib cursorless_plugin
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib focused_plugin_input_cursor_handoffs_keep_the_requested_position
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib rendering_character_chunks_does_not_emit_empty_raw_output
                 '';
                 passthru = { };
                 meta = old.meta // {
