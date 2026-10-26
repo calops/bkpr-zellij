@@ -5893,6 +5893,12 @@ impl Tab {
                     self.hide_floating_panes();
                 }
             }
+        } else if let Some((_, pane)) = self
+            .suppressed_panes
+            .values_mut()
+            .find(|(_, pane)| pane.pid() == id)
+        {
+            pane.set_selectable(selectable);
         }
         // we do this here because if there is a non-selectable pane on the edge, we consider it
         // outside the viewport (a ui-pane, eg. the status-bar and tab-bar) and need to adjust for it
@@ -5918,6 +5924,12 @@ impl Tab {
                 self.floating_panes
                     .move_client_out_of_pane(pane_id, client_id);
             }
+        } else if let Some((_, pane)) = self
+            .suppressed_panes
+            .values_mut()
+            .find(|(_, pane)| pane.pid() == pane_id)
+        {
+            pane.set_selectable_for_client(client_id, selectable);
         }
         self.tiled_panes.set_pane_frames(self.pane_frame_style);
     }
@@ -7379,6 +7391,17 @@ impl Tab {
         if let Some(modal) = self.floating_panes.modal_overlay(pane_id) {
             if modal.owner != client_id || !modal.enabled {
                 return Err(anyhow!("Modal overlay belongs to another launch client"));
+            }
+            if !modal.modal {
+                // A client-owned passive helper can be revealed, never made an input target.
+                // In particular, do not dismiss the owner's existing modal while revealing it.
+                if self.floating_panes.panes_contain(&pane_id) {
+                    self.floating_panes.show_passive_overlay(pane_id);
+                } else {
+                    self.unsuppress_pane(pane_id, true);
+                }
+                self.set_force_render();
+                return Ok(());
             }
             if self.floating_panes.panes_contain(&pane_id) {
                 self.floating_panes.focus_pane(pane_id, client_id);

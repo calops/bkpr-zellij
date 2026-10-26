@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * feat: let plugins opt into host-launch-client-only floating output with `client_overlay=true`, sharing modal ownership and lifecycle handling without focus changes or backdrop dimming; `modal_overlay=true` retains focused modal behavior.
 * feat: dim surrounding terminal text only for the client opening a `modal_overlay=true` helper, preserving independent nested-session dimming and ordinary fullscreen state.
 * fix: keep plugin selectability, pane/tab focus reports and mixed tiled/floating client inspection bound to each actual client, so opening an overlay cannot evict another client from shared sidebar controls.
+* fix: exclude private passive helpers from every floating focus-restoration path, including cold/default-selectable and reopened plugins, and retain client-local selectability changes received while a pane is hidden.
 * feat: add client-local `--initial-mode` independently of the configured default/base mode, preserving Normal key delivery after a Locked startup and isolating attachment mode overrides.
 * fix: keep cursorless focused plugins anchored to the client's last input cursor, including hidden application cursors, instead of the last sidebar or popup paint position.
 * fix: stop emitting pane-origin cursor moves for empty raw grid output.

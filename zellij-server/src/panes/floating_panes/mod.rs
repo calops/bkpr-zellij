@@ -215,6 +215,11 @@ impl FloatingPanes {
             _ => None,
         }
     }
+    fn overlay_allows_focus(&self, pane_id: PaneId, client_id: ClientId) -> bool {
+        self.modal_overlay(pane_id)
+            .map(|overlay| overlay.modal && overlay.enabled && overlay.owner == client_id)
+            .unwrap_or(true)
+    }
     pub(crate) fn show_passive_overlay(&mut self, pane_id: PaneId) {
         if let PaneId::Plugin(plugin_id) = pane_id {
             if let Some(overlay) = self.modal_overlays.borrow_mut().get_mut(&plugin_id) {
@@ -269,8 +274,9 @@ impl FloatingPanes {
     pub fn panes_are_visible_for_client(&self, client_id: ClientId) -> bool {
         (!*self.fullscreen_covers_ui.borrow() && self.show_panes)
             || self.active_panes.get(&client_id).is_some_and(|pane_id| {
-                self.modal_overlay(*pane_id)
-                    .is_some_and(|modal| modal.owner == client_id && modal.enabled && modal.visible)
+                self.modal_overlay(*pane_id).is_some_and(|modal| {
+                    modal.modal && modal.owner == client_id && modal.enabled && modal.visible
+                })
             })
     }
     pub fn hide_modal_overlays_for_client(&mut self, client_id: ClientId) -> bool {
@@ -616,14 +622,26 @@ impl FloatingPanes {
     pub fn last_selectable_floating_pane_id(&self) -> Option<PaneId> {
         self.panes
             .iter()
-            .filter(|(_p_id, p)| p.selectable())
+            .filter(|(pane_id, pane)| {
+                pane.selectable()
+                    && self
+                        .modal_overlay(**pane_id)
+                        .map(|overlay| overlay.modal)
+                        .unwrap_or(true)
+            })
             .last()
             .map(|(p_id, _p)| *p_id)
     }
     pub fn has_selectable_panes(&self) -> bool {
         self.panes
             .iter()
-            .filter(|(_p_id, p)| p.selectable())
+            .filter(|(pane_id, pane)| {
+                pane.selectable()
+                    && self
+                        .modal_overlay(**pane_id)
+                        .map(|overlay| overlay.modal)
+                        .unwrap_or(true)
+            })
             .last()
             .is_some()
     }
@@ -1175,6 +1193,7 @@ impl FloatingPanes {
             .copied()
             .filter(|last_pane_id| {
                 Some(*last_pane_id) != currently_active_pane_id
+                    && self.overlay_allows_focus(*last_pane_id, client_id)
                     && self
                         .panes
                         .get(last_pane_id)
@@ -1197,7 +1216,9 @@ impl FloatingPanes {
         self.panes
             .iter()
             .filter(|(pane_id, pane)| {
-                Some(**pane_id) != exclude && pane.selectable_for_client(client_id)
+                Some(**pane_id) != exclude
+                    && self.overlay_allows_focus(**pane_id, client_id)
+                    && pane.selectable_for_client(client_id)
             })
             .max_by_key(|(_pane_id, pane)| pane.active_at())
             .map(|(pane_id, _pane)| *pane_id)
@@ -1409,10 +1430,7 @@ impl FloatingPanes {
                 .filter(|(id, pane)| {
                     **id != pane_id
                         && pane.selectable_for_client(client_id)
-                        && self
-                            .modal_overlay(**id)
-                            .map(|modal| modal.enabled && modal.owner == client_id)
-                            .unwrap_or(true)
+                        && self.overlay_allows_focus(**id, client_id)
                 })
                 .map(|(id, pane)| (*id, pane.active_at()))
                 .collect();
@@ -1440,10 +1458,7 @@ impl FloatingPanes {
             .filter(|(id, pane)| {
                 **id != pane_id
                     && pane.selectable_for_client(client_id)
-                    && self
-                        .modal_overlay(**id)
-                        .map(|modal| modal.enabled && modal.owner == client_id)
-                        .unwrap_or(true)
+                    && self.overlay_allows_focus(**id, client_id)
             })
             .max_by_key(|(_, pane)| pane.active_at())
             .map(|(id, _)| *id);
@@ -1469,10 +1484,11 @@ impl FloatingPanes {
         let connected_clients: Vec<ClientId> =
             self.connected_clients.borrow().iter().copied().collect();
         for client_id in connected_clients {
-            if !self
-                .panes
-                .get(&pane_id)
-                .is_some_and(|pane| pane.selectable_for_client(client_id))
+            if !self.overlay_allows_focus(pane_id, client_id)
+                || !self
+                    .panes
+                    .get(&pane_id)
+                    .is_some_and(|pane| pane.selectable_for_client(client_id))
             {
                 continue;
             }
@@ -1654,10 +1670,7 @@ impl FloatingPanes {
         }
     }
     pub fn focus_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
-        if self
-            .modal_overlay(pane_id)
-            .is_some_and(|modal| !modal.enabled || modal.owner != client_id)
-        {
+        if !self.overlay_allows_focus(pane_id, client_id) {
             return;
         }
         if self.active_panes.get(&client_id).copied() != Some(pane_id) {
@@ -1958,8 +1971,15 @@ impl FloatingPanes {
             .collect();
         for client_id in clients_in_pane {
             self.active_panes.remove(&client_id, &mut self.panes);
-            self.active_panes
-                .insert(client_id, to_pane_id, &mut self.panes);
+            if self.overlay_allows_focus(to_pane_id, client_id)
+                && self
+                    .panes
+                    .get(&to_pane_id)
+                    .is_some_and(|pane| pane.selectable_for_client(client_id))
+            {
+                self.active_panes
+                    .insert(client_id, to_pane_id, &mut self.panes);
+            }
         }
     }
     pub fn reapply_pane_focus(&mut self) {
@@ -2016,12 +2036,7 @@ impl FloatingPanes {
             .map(|(id, _)| *id)
     }
     pub fn focus_pane_if_exists(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
-        if self.panes.contains_key(&pane_id)
-            && self
-                .modal_overlay(pane_id)
-                .map(|modal| modal.enabled && modal.owner == client_id)
-                .unwrap_or(true)
-        {
+        if self.panes.contains_key(&pane_id) && self.overlay_allows_focus(pane_id, client_id) {
             self.focus_pane(pane_id, client_id);
             Ok(())
         } else {
