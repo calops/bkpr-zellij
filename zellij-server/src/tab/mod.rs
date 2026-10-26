@@ -251,6 +251,8 @@ pub(crate) struct Tab {
     web_sharing: WebSharing,
     mouse_hover_pane_id: HashMap<ClientId, PaneId>,
     dimmed_clients: HashSet<ClientId>,
+    background_dimming: HashMap<ClientId, (PaneId, usize)>,
+    background_dimming_clients: HashMap<PaneId, ClientId>,
     plugin_hover_pane_id: HashMap<ClientId, PaneId>,
     mouse_last_pane_id: HashMap<ClientId, PaneId>,
     mouse_help_text_visible: HashMap<ClientId, bool>,
@@ -1071,6 +1073,8 @@ impl Tab {
             tab_bell_flash: false,
             tab_bell_ring: false,
             dimmed_clients: HashSet::new(),
+            background_dimming: HashMap::new(),
+            background_dimming_clients: HashMap::new(),
             tab_visible: true,
         }
     }
@@ -1083,6 +1087,32 @@ impl Tab {
         }
         self.tiled_panes.set_client_dimmed(client_id, dimmed);
         self.floating_panes.set_client_dimmed(client_id, dimmed);
+    }
+
+    pub fn clear_background_dimming_for_client(&mut self, client_id: ClientId) {
+        self.background_dimming_clients
+            .retain(|_, owner| *owner != client_id);
+        self.background_dimming.remove(&client_id);
+    }
+
+    pub fn register_background_dimming(
+        &mut self,
+        plugin_id: PluginId,
+        run: &Run,
+        client_id: Option<ClientId>,
+    ) {
+        // Scope styling to the actual launch client; floating focus itself can be shared.
+        if let (Some(client), Run::Plugin(plugin)) = (client_id, run) {
+            let plugin = match plugin {
+                RunPluginOrAlias::RunPlugin(plugin) => Some(plugin),
+                RunPluginOrAlias::Alias(alias) => alias.run_plugin.as_ref(),
+            };
+            if plugin.is_some_and(|plugin| {
+                plugin.configuration.inner().get("dim_background").map(String::as_str) == Some("true")
+            }) {
+                self.background_dimming_clients.insert(PaneId::Plugin(plugin_id), client);
+            }
+        }
     }
 
     pub fn stacked_pane_list_is_active(&self) -> bool {
@@ -5004,6 +5034,33 @@ impl Tab {
             self.link_handler.clone(),
             floating_panes_stack,
         );
+        self.background_dimming
+            .retain(|client_id, _| connected_clients.contains(client_id));
+        self.background_dimming_clients.retain(|pane_id, _| {
+            self.tiled_panes.panes_contain(pane_id)
+                || self.floating_panes.panes_contain(pane_id)
+                || self.suppressed_panes.values().any(|(_, pane)| pane.pid() == *pane_id)
+        });
+        let mut dimming_changed = false;
+        for client_id in &connected_clients {
+            let layer = self.floating_panes.background_dimming_layer(
+                *client_id,
+                &self.background_dimming_clients,
+            );
+            if self.background_dimming.get(client_id).copied() != layer {
+                dimming_changed = true;
+                if let Some(layer) = layer {
+                    self.background_dimming.insert(*client_id, layer);
+                } else {
+                    self.background_dimming.remove(client_id);
+                }
+            }
+            output.set_background_dimming(*client_id, layer.map(|(_, z_index)| z_index));
+        }
+        if dimming_changed {
+            // Unchanged cells also need their previous output-only faint style replaced.
+            self.set_force_render();
+        }
         if client_id_override.is_none() {
             self.render_vacated_ui_overlay_surface(output, &connected_clients)
                 .with_context(err_context)?;

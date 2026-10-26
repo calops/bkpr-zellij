@@ -364,6 +364,34 @@ impl FloatingPanes {
     pub fn get_pane_z_index(&self, pane_id: PaneId) -> Option<usize> {
         self.z_indices.iter().position(|id| id == &pane_id)
     }
+    pub(crate) fn background_dimming_layer(
+        &self,
+        client_id: ClientId,
+        dimming_clients: &HashMap<PaneId, ClientId>,
+    ) -> Option<(PaneId, usize)> {
+        if !self.panes_are_visible() {
+            return None;
+        }
+        let pane_id = self.active_pane_id(client_id)?;
+        if dimming_clients.get(&pane_id) != Some(&client_id) {
+            return None;
+        }
+        if !matches!(pane_id, PaneId::Plugin(_))
+            || self.fullscreen_pane_id.is_some_and(|id| id != pane_id)
+        {
+            return None;
+        }
+        let pane = self.panes.get(&pane_id)?;
+        if !pane.selectable() {
+            return None;
+        }
+        let layer = if self.fullscreen_pane_id.is_some() {
+            1
+        } else {
+            self.get_pane_z_index(pane_id)? + 1
+        };
+        Some((pane_id, layer))
+    }
     pub fn active_pane_id_or_focused_pane_id(&self, client_id: Option<ClientId>) -> Option<PaneId> {
         // returns the focused pane of any client_id - should be safe because the way things are
         // set up at the time of writing, all clients are focused on the same floating pane due to
