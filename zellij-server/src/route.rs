@@ -2481,6 +2481,19 @@ pub(crate) fn route_thread_main(
                                         log::error!("{}", e);
                                     },
                                 }
+                            } else if let Action::SwitchToMode { input_mode } = action {
+                                // The first client can send its initial mode before session
+                                // initialization finishes. The server queue orders this after
+                                // FirstClientConnected; wait before routing subsequent keys.
+                                let (completion_tx, completion_rx) = oneshot::channel();
+                                to_server
+                                    .send(ServerInstruction::ChangeMode(
+                                        client_id,
+                                        input_mode,
+                                        Some(NotificationEnd::new(completion_tx)),
+                                    ))
+                                    .with_context(err_context)?;
+                                wait_for_action_completion(completion_rx, "SwitchToMode", true);
                             }
                         },
                         ClientToServerMsg::TerminalResize { new_size } => {

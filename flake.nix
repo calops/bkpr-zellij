@@ -58,7 +58,7 @@
               withWebServer = false;
             }).overrideAttrs
               (old: {
-                version = "0.45.1-bkpr.4";
+                version = "0.45.1-bkpr.5";
                 src = pkgs.lib.cleanSourceWith {
                   name = "zellij-source";
                   src = ./.;
@@ -109,6 +109,8 @@
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib terminal_reply_batch
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-server --lib cached_event_tests
                   cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib terminal_palette_extension_remains_a_legacy_color_register_message
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-client --lib attachment_tests
+                  cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} --no-default-features --package zellij-utils --lib initial_mode_cli_does_not_replace_default_mode
                 '';
                 passthru = { };
                 meta = old.meta // {
