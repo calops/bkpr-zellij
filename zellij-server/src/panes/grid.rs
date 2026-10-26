@@ -2004,8 +2004,6 @@ impl Grid {
         if self.lock_renders {
             return Ok(None);
         }
-        let raw_vte_output = String::new();
-
         let (mut character_chunks, sixel_image_chunks, kitty_image_chunks) =
             self.read_changes(content_x, content_y);
 
@@ -2120,7 +2118,7 @@ impl Grid {
         }
         return Ok(Some((
             character_chunks,
-            Some(raw_vte_output),
+            None,
             sixel_image_chunks,
             kitty_image_chunks,
         )));

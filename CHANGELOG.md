@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+* feat: add client-local `--initial-mode` independently of the configured default/base mode, preserving Normal key delivery after a Locked startup and isolating attachment mode overrides.
+* fix: keep cursorless focused plugins anchored to the client's last input cursor, including hidden application cursors, instead of the last sidebar or popup paint position.
+* fix: stop emitting pane-origin cursor moves for empty raw grid output.
 * feat: add opt-in `zellij attach -d, --detach-others` to detach other clients after attaching while preserving panes and running programs.
 * fix: check attachment capabilities on the same IPC connection and reject `--detach-others` against older servers with an upgrade message, without changing normal attachments or the IPC contract version.
 * fix: release disconnected clients' screen and plugin state immediately, including their canvas-size constraints, without waiting for a client exit acknowledgement.

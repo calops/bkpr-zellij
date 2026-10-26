@@ -963,6 +963,16 @@ fn explicit_attach_default_mode(cli_args: &CliArgs) -> Option<InputMode> {
     }
 }
 
+fn startup_mode_override(cli_args: &CliArgs, is_attachment: bool) -> Option<InputMode> {
+    cli_args.initial_mode.or_else(|| {
+        if is_attachment {
+            explicit_attach_default_mode(cli_args)
+        } else {
+            None
+        }
+    })
+}
+
 pub fn start_client(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
@@ -1239,16 +1249,16 @@ pub fn start_client(
             }
         }
     }
-    let attachment_default_mode = if matches!(&first_msg, ClientToServerMsg::AttachClient { .. }) {
-        explicit_attach_default_mode(&cli_args)
-    } else {
-        None
-    };
+    let startup_mode = startup_mode_override(
+        &cli_args,
+        matches!(&first_msg, ClientToServerMsg::AttachClient { .. }),
+    );
     os_input.send_to_server(first_msg);
-    // LEGACY_COMPAT(next-major): older servers ignore the attachment's default_mode.
-    // Send the override on this attachment's own connection before starting input.
-    // The server completes this action before routing any subsequent key messages.
-    if let Some(input_mode) = attachment_default_mode {
+    // This connection identifies the client, including against older servers.
+    // Order the initial mode before input without changing the base-mode key semantics.
+    // LEGACY_COMPAT(next-major): also retain explicit attach --default-mode overrides
+    // for servers that ignore the attachment's runtime options.
+    if let Some(input_mode) = startup_mode {
         os_input.send_to_server(ClientToServerMsg::Action {
             action: Action::SwitchToMode { input_mode },
             terminal_id: None,
@@ -1348,7 +1358,9 @@ pub fn start_client(
             let send_client_instructions = send_client_instructions.clone();
             let command_is_executing = command_is_executing.clone();
             let os_input = os_input.clone();
-            let default_mode = config_options.default_mode.unwrap_or_default();
+            let initial_mode = startup_mode
+                .or(config_options.default_mode)
+                .unwrap_or_default();
             let nested_reannounce = nested_reannounce.clone();
             move || {
                 input_loop(
@@ -1357,7 +1369,7 @@ pub fn start_client(
                     config_options,
                     command_is_executing,
                     send_client_instructions,
-                    default_mode,
+                    initial_mode,
                     receive_input_instructions,
                     nested_reannounce,
                 )

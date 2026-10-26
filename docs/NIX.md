@@ -33,6 +33,19 @@ same release profile and target as the package build. Render-message tests run
 serially. The inherited install checks check the binary version and, on glibc,
 system curl linkage.
 
+## Initial client mode
+
+`zellij --initial-mode locked` starts a fresh or attaching client in Locked mode
+without changing its configured `default_mode`. Keep the default/base mode
+Normal when ordinary keys must reach applications and plugins after unlocking.
+For an existing session saved with a different base mode, use
+`zellij --initial-mode locked attach NAME options --default-mode normal`.
+These overrides apply only to the new client; configuration files and other
+attached clients remain unchanged.
+
+The initial mode uses the client's own IPC connection before input starts,
+including when attaching to an older server. No new IPC message is required.
+
 ## Terminal palette metadata
 
 Plugins with `ReadApplicationState` permission can subscribe to `CustomMessage`

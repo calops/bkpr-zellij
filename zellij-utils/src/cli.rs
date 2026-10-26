@@ -53,7 +53,7 @@ fn validate_session(name: &str) -> Result<String, String> {
 
 #[derive(Parser, Default, Debug, Clone, Serialize, Deserialize)]
 #[clap(
-    version = "0.45.1-bkpr.4",
+    version = "0.45.1-bkpr.5",
     name = "zellij",
     about = "A terminal workspace with batteries included",
     styles = CLI_STYLES,
@@ -75,6 +75,11 @@ pub struct CliArgs {
     /// Specify name of a new session
     #[clap(long, short, overrides_with = "session", value_parser = validate_session)]
     pub session: Option<String>,
+
+    /// Start this client in a mode without changing the default/base mode
+    #[clap(long, value_enum, hide_possible_values = true, value_parser)]
+    #[serde(default)]
+    pub initial_mode: Option<InputMode>,
 
     /// Name of a predefined layout inside the layout directory or the path to a layout file
     /// if inside a session (or using the --session flag) will be added to the session as a new tab
@@ -1596,6 +1601,44 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn initial_mode_cli_does_not_replace_default_mode() {
+        for arguments in [
+            vec![
+                "zellij",
+                "--initial-mode",
+                "locked",
+                "options",
+                "--default-mode",
+                "normal",
+            ],
+            vec![
+                "zellij",
+                "--initial-mode",
+                "locked",
+                "attach",
+                "work",
+                "options",
+                "--default-mode",
+                "normal",
+            ],
+        ] {
+            let cli = CliArgs::try_parse_from(arguments).unwrap();
+            assert_eq!(cli.initial_mode, Some(InputMode::Locked));
+            let options = match cli.command.unwrap() {
+                Command::Options(options) => options,
+                Command::Sessions(Sessions::Attach {
+                    options: Some(options),
+                    ..
+                }) => match *options {
+                    SessionCommand::Options(options) => options,
+                },
+                other => panic!("Expected fresh or attach options, got {:?}", other),
+            };
+            assert_eq!(options.default_mode, Some(InputMode::Normal));
+        }
+    }
 
     #[test]
     fn detach_others_is_explicit_and_accepts_both_spellings() {
