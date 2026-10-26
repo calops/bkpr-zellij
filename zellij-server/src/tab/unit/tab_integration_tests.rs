@@ -2197,6 +2197,162 @@ fn passive_popup_warm_unsuppress_preserves_native_float_focus_and_cursor() {
 }
 
 #[test]
+fn client_owned_passive_card_neither_paints_nor_occludes_the_foreign_client() {
+    let size = Size { cols: 100, rows: 30 };
+    let (mut tab, _receiver) = create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    tab.add_client(2, None).unwrap();
+    tab.handle_pty_bytes(
+        1, b"\x1b[6;11HAPP-UNDER-CARD\x1b[21;3H\x1b[?25h".to_vec(),
+    ).unwrap();
+    let cursors = [tab.get_active_terminal_cursor_position(1), tab.get_active_terminal_cursor_position(2)];
+    let registry = Rc::new(RefCell::new(HashMap::from([(
+        2, crate::panes::floating_panes::ModalOverlay::passive(1),
+    )])));
+    tab.set_modal_overlay_registry(registry.clone());
+    tab.new_floating_pane(PaneId::Plugin(2), None, None, true, false, None, None).unwrap();
+    tab.set_pane_selectable(PaneId::Plugin(2), false);
+    let coordinates = passive_popup_coordinates(8, 4, 30, 8);
+    let mut tapes = passive_popup_render(&mut tab);
+    let assert_frame = |tab: &mut Tab, tapes: &mut HashMap<ClientId, String>, visible: bool| {
+        tab.sync_modal_overlays();
+        assert!(tab.modal_overlays.is_empty());
+        assert!(tab.dimmed_clients.is_empty());
+        tab.set_force_render();
+        let mut output = Output::default();
+        tab.render(&mut output, None).unwrap();
+        assert!(!output.client_has_modal_overlay(1));
+        assert!(!output.client_has_modal_overlay(2));
+        let rendered = output.serialize().unwrap();
+        for client in [1, 2] {
+            assert_eq!(tab.get_active_pane_id(client), Some(PaneId::Terminal(1)));
+            assert_eq!(tab.get_active_terminal_cursor_position(client), cursors[client as usize - 1]);
+            assert_host_cursor(&rendered[&client], size, (2, 20), true);
+            tapes.entry(client).or_default().push_str(&rendered[&client]);
+            let screen = take_snapshot(&tapes[&client], size.rows, size.cols, Palette::default());
+            assert!(!screen.contains("FOREIGN-CARD"));
+            if client == 1 && visible {
+                assert!(screen.contains("OWNER-CARD"));
+                assert!(!screen.contains("APP-UNDER-CARD"));
+            } else {
+                assert!(!screen.contains("OWNER-CARD"));
+                assert!(screen.contains("APP-UNDER-CARD"), "foreign app must survive the entire card rectangle");
+            }
+            let mut panes = tab.pane_infos();
+            tab.project_pane_infos_for_client(client, &mut panes);
+            assert_eq!(panes.iter().any(|pane| pane.is_plugin && pane.id == 2), client == 1);
+        }
+    };
+    assert_frame(&mut tab, &mut tapes, false);
+    for _ in 0..2 {
+        // Even the legacy unsuppress path's focus request cannot focus a passive overlay.
+        tab.unsuppress_or_expand_pane(PaneId::Plugin(2), true);
+        tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates.clone()).unwrap();
+        tab.handle_plugin_bytes(2, 1, b"\x1b[2JOWNER-CARD".to_vec()).unwrap();
+        tab.handle_plugin_bytes(2, 2, b"\x1b[2JFOREIGN-CARD".to_vec()).unwrap();
+        assert!(registry.borrow()[&2].visible);
+        assert_frame(&mut tab, &mut tapes, true);
+        tab.suppress_pane(PaneId::Plugin(2), Some(2));
+        assert_frame(&mut tab, &mut tapes, true);
+        tab.suppress_pane(PaneId::Plugin(2), Some(1));
+        assert!(!registry.borrow()[&2].visible);
+        assert_frame(&mut tab, &mut tapes, false);
+    }
+    tab.unsuppress_pane(PaneId::Plugin(2), true);
+    tab.change_floating_pane_coordinates(&PaneId::Plugin(2), coordinates).unwrap();
+    tab.handle_plugin_bytes(2, 1, b"\x1b[2JOWNER-CARD".to_vec()).unwrap();
+    assert_frame(&mut tab, &mut tapes, true);
+    tab.close_pane(PaneId::Plugin(2), false, None);
+    assert!(!registry.borrow()[&2].visible);
+    tab.sync_modal_overlays();
+    tab.set_force_render();
+    for (client, rendered) in passive_popup_render(&mut tab) {
+        tapes.entry(client).or_default().push_str(&rendered);
+        let screen = take_snapshot(&tapes[&client], size.rows, size.cols, Palette::default());
+        assert!(screen.contains("APP-UNDER-CARD"));
+        assert!(!screen.contains("OWNER-CARD"));
+        assert_eq!(tab.get_active_pane_id(client), Some(PaneId::Terminal(1)));
+        assert_host_cursor(&rendered, size, (2, 20), true);
+    }
+}
+
+#[test]
+fn cold_and_reopened_private_passive_helpers_never_become_focus_restore_targets() {
+    let size = Size { cols: 120, rows: 40 };
+    let (mut tab, _receiver) = create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.add_client(2, None).unwrap();
+    tab.new_floating_pane(
+        PaneId::Terminal(8), None, None, false, true,
+        Some(FloatingPaneCoordinates::default()
+            .with_x_fixed(5).with_y_fixed(3)
+            .with_width_fixed(70).with_height_fixed(30)),
+        None,
+    ).unwrap();
+    tab.handle_pty_bytes(8, b"\x1b[20;3HAPP\x1b[20;3H\x1b[?25h".to_vec()).unwrap();
+    let cursors = [tab.get_active_terminal_cursor_position(1), tab.get_active_terminal_cursor_position(2)];
+    let registry = Rc::new(RefCell::new(HashMap::from([
+        (10, crate::panes::floating_panes::ModalOverlay::new(1)),
+        (11, crate::panes::floating_panes::ModalOverlay::new(1)),
+        (20, crate::panes::floating_panes::ModalOverlay::passive(1)),
+    ])));
+    tab.set_modal_overlay_registry(registry);
+    let coordinates = passive_popup_coordinates(10, 5, 30, 8);
+    // No SetSelectable has arrived: this is the cold plugin's real default state.
+    tab.new_floating_pane(
+        PaneId::Plugin(20), None, None, false, true, Some(coordinates.clone()), None,
+    ).unwrap();
+    assert!(tab.get_pane_with_id(PaneId::Plugin(20)).unwrap().selectable_for_client(1));
+    let assert_app_focus = |tab: &mut Tab| {
+        tab.sync_modal_overlays();
+        assert!(tab.modal_overlays.is_empty());
+        tab.set_force_render();
+        for (client, rendered) in passive_popup_render(tab) {
+            assert_eq!(tab.get_active_pane_id(client), Some(PaneId::Terminal(8)));
+            let cursor = cursors[client as usize - 1].unwrap();
+            assert_eq!(tab.get_active_terminal_cursor_position(client), Some(cursor));
+            assert_host_cursor(&rendered, size, (cursor.0, cursor.1), true);
+        }
+    };
+    assert_app_focus(&mut tab);
+    tab.new_floating_pane(PaneId::Plugin(10), None, None, false, true, None, None).unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(10)));
+    tab.floating_panes.focus_pane(PaneId::Plugin(20), 1);
+    tab.floating_panes.focus_pane_for_all_clients(PaneId::Plugin(20));
+    tab.focus_pane_with_id(PaneId::Plugin(20), true, false, 1).unwrap();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(10)));
+    assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(8)));
+    // Closing a modal used to choose the newer default-selectable passive card.
+    tab.close_pane(PaneId::Plugin(10), false, None);
+    assert_app_focus(&mut tab);
+    tab.new_floating_pane(PaneId::Plugin(11), None, None, false, true, None, None).unwrap();
+    // The client-local selectability path has a separate replacement-focus assignment.
+    tab.set_plugin_selectable(11, false, 1);
+    assert_app_focus(&mut tab);
+    tab.close_pane(PaneId::Plugin(11), false, None);
+    assert_app_focus(&mut tab);
+    for selectable in [false, true] {
+        tab.suppress_pane(PaneId::Plugin(20), Some(1));
+        tab.set_plugin_selectable(20, selectable, 1);
+        let pane = tab.get_pane_with_id(PaneId::Plugin(20)).unwrap();
+        assert_eq!(pane.selectable_for_client(1), selectable);
+        assert!(pane.selectable_for_client(2), "hidden selectability remains client-local");
+        tab.focus_suppressed_pane_for_all_clients(PaneId::Plugin(20));
+        tab.change_floating_pane_coordinates(&PaneId::Plugin(20), coordinates.clone()).unwrap();
+        assert_eq!(tab.get_pane_with_id(PaneId::Plugin(20)).unwrap().selectable_for_client(1), selectable);
+        assert_app_focus(&mut tab);
+        tab.suppress_pane(PaneId::Plugin(20), Some(1));
+        tab.focus_pane_with_id(PaneId::Plugin(20), true, false, 1).unwrap();
+        tab.change_floating_pane_coordinates(&PaneId::Plugin(20), coordinates.clone()).unwrap();
+        assert_app_focus(&mut tab);
+    }
+    tab.suppress_pane(PaneId::Plugin(20), Some(1));
+    tab.set_pane_selectable(PaneId::Plugin(20), false);
+    assert!(!tab.get_pane_with_id(PaneId::Plugin(20)).unwrap().selectable());
+    tab.unsuppress_pane(PaneId::Plugin(20), true);
+    assert_app_focus(&mut tab);
+}
+
+#[test]
 fn increase_tiled_pane_sizes_with_stacked_resizes() {
     // this is the default resizing algorithm
     let size = Size {
