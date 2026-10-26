@@ -53,7 +53,7 @@ fn validate_session(name: &str) -> Result<String, String> {
 
 #[derive(Parser, Default, Debug, Clone, Serialize, Deserialize)]
 #[clap(
-    version = "0.45.1-bkpr.5",
+    version = "0.45.1-bkpr.6",
     name = "zellij",
     about = "A terminal workspace with batteries included",
     styles = CLI_STYLES,
@@ -1650,13 +1650,19 @@ mod tests {
             let cli = CliArgs::try_parse_from(arguments).unwrap();
             assert!(matches!(
                 cli.command,
-                Some(Command::Sessions(Sessions::Attach { detach_others: true, .. }))
+                Some(Command::Sessions(Sessions::Attach {
+                    detach_others: true,
+                    ..
+                }))
             ));
         }
         let normal = CliArgs::try_parse_from(["zellij", "attach", "work"]).unwrap();
         assert!(matches!(
             normal.command,
-            Some(Command::Sessions(Sessions::Attach { detach_others: false, .. }))
+            Some(Command::Sessions(Sessions::Attach {
+                detach_others: false,
+                ..
+            }))
         ));
     }
 

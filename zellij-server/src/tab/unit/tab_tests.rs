@@ -251,6 +251,291 @@ fn create_new_tab_with_plugin_receiver(
     (tab, plugin_receiver)
 }
 
+fn modal_overlay_tab() -> (Tab, Receiver<(PluginInstruction, ErrorContext)>) {
+    let (mut tab, receiver) = create_new_tab_with_plugin_receiver(
+        Size {
+            rows: 30,
+            cols: 100,
+        },
+        false,
+    );
+    tab.set_modal_overlay_registry(Rc::new(RefCell::new(HashMap::from([(
+        10,
+        crate::panes::floating_panes::ModalOverlay::new(1),
+    )]))));
+    tab.new_floating_pane(PaneId::Plugin(10), None, None, false, true, None, None)
+        .unwrap();
+    (tab, receiver)
+}
+
+#[test]
+fn modal_overlay_tracks_only_its_owner_and_visible_focused_floating_pane() {
+    let (mut tab, _receiver) = modal_overlay_tab();
+    tab.add_client(2, None).unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays, HashMap::from([(1, PaneId::Plugin(10))]));
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, 1)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert!(tab.modal_overlays.is_empty());
+    tab.focus_pane_with_id(PaneId::Plugin(10), false, false, 1)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays.get(&1), Some(&PaneId::Plugin(10)));
+    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+        .unwrap();
+    tab.focus_pane_with_id(PaneId::Terminal(2), false, false, 1)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert!(
+        tab.modal_overlays.is_empty(),
+        "ordinary floating panes are not modals"
+    );
+    tab.focus_pane_with_id(PaneId::Plugin(10), false, false, 1)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays.len(), 1);
+    tab.suppress_pane(PaneId::Plugin(10), Some(1));
+    tab.sync_modal_overlays();
+    assert!(
+        tab.modal_overlays.is_empty(),
+        "a suppressed plugin cannot leave a backdrop"
+    );
+}
+
+#[test]
+fn modal_overlay_overlap_follows_focus_and_close_restores_previous_modal() {
+    let (mut tab, _receiver) = modal_overlay_tab();
+    tab.set_modal_overlay_registry(Rc::new(RefCell::new(HashMap::from([
+        (10, crate::panes::floating_panes::ModalOverlay::new(1)),
+        (11, crate::panes::floating_panes::ModalOverlay::new(1)),
+    ]))));
+    tab.new_floating_pane(PaneId::Plugin(11), None, None, false, true, None, None)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays.get(&1), Some(&PaneId::Plugin(11)));
+    tab.close_pane(PaneId::Plugin(11), false, None);
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays.get(&1), Some(&PaneId::Plugin(10)));
+    tab.close_pane(PaneId::Plugin(10), false, None);
+    tab.sync_modal_overlays();
+    assert!(tab.modal_overlays.is_empty());
+}
+
+#[test]
+fn modal_overlay_clears_when_owner_leaves_tab_or_detaches() {
+    let (mut tab, _receiver) = modal_overlay_tab();
+    tab.add_client(2, None).unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays.len(), 1);
+    tab.drain_single_client(1);
+    tab.sync_modal_overlays();
+    assert!(
+        tab.modal_overlays.is_empty(),
+        "tab switch must not dim the remaining client"
+    );
+    tab.add_client(1, None).unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.modal_overlays.get(&1), Some(&PaneId::Plugin(10)));
+    tab.remove_client(1);
+    tab.sync_modal_overlays();
+    assert!(tab.modal_overlays.is_empty());
+}
+
+#[test]
+fn modal_overlay_cleanup_does_not_clear_nested_session_dimming_or_cursor_anchor() {
+    let (mut tab, _receiver) = modal_overlay_tab();
+    tab.handle_pty_bytes(1, b"\x1b[4;7H\x1b[?25h".to_vec())
+        .unwrap();
+    let cursor = tab
+        .get_pane_with_id(PaneId::Terminal(1))
+        .unwrap()
+        .cursor_coordinates(None);
+    tab.set_client_dimmed(1, true);
+    tab.sync_modal_overlays();
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, 1)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert!(tab.modal_overlays.is_empty());
+    assert!(tab.dimmed_clients.contains(&1));
+    tab.focus_pane_with_id(PaneId::Plugin(10), false, false, 1)
+        .unwrap();
+    tab.sync_modal_overlays();
+    tab.set_client_dimmed(1, false);
+    assert_eq!(tab.modal_overlays.get(&1), Some(&PaneId::Plugin(10)));
+    assert_eq!(
+        tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap()
+            .cursor_coordinates(None),
+        cursor
+    );
+}
+
+#[test]
+fn modal_overlay_is_not_painted_focused_or_hit_tested_on_another_client() {
+    use zellij_utils::position::Position;
+    let (mut tab, _receiver) = create_new_tab_with_plugin_receiver(
+        Size {
+            rows: 30,
+            cols: 100,
+        },
+        false,
+    );
+    tab.add_client(2, None).unwrap();
+    tab.set_modal_overlay_registry(Rc::new(RefCell::new(HashMap::from([(
+        10,
+        crate::panes::floating_panes::ModalOverlay::new(1),
+    )]))));
+    tab.new_floating_pane(PaneId::Plugin(10), None, None, false, true, None, None)
+        .unwrap();
+    tab.handle_pty_bytes(1, b"\x1b[11;35HUNDERMODAL".to_vec())
+        .unwrap();
+    tab.handle_plugin_bytes(10, 1, b"\x1b[HOWNERMODAL".to_vec())
+        .unwrap();
+    tab.handle_plugin_bytes(10, 2, b"\x1b[HFOREIGNMODAL".to_vec())
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(10)));
+    assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(1)));
+    let pane = tab.get_pane_with_id(PaneId::Plugin(10)).unwrap();
+    let point = Position::new(pane.y() as i32 + 1, (pane.x() + 1) as u16);
+    assert_eq!(
+        tab.floating_panes.get_pane_id_at(&point, false, 1).unwrap(),
+        Some(PaneId::Plugin(10))
+    );
+    assert_eq!(
+        tab.floating_panes.get_pane_id_at(&point, false, 2).unwrap(),
+        None
+    );
+    assert!(tab
+        .focus_pane_with_id(PaneId::Plugin(10), false, false, 2)
+        .is_err());
+    let mut output = crate::output::Output::default();
+    tab.render(&mut output, None).unwrap();
+    let rendered = output.serialize().unwrap();
+    assert!(rendered[&1].contains("OWNERMODAL"));
+    assert!(!rendered[&2].contains("OWNERMODAL"));
+    assert!(!rendered[&2].contains("FOREIGNMODAL"));
+    assert!(
+        rendered[&2].contains("UNDERMODAL"),
+        "the owner's modal must not occlude the foreign client's real application"
+    );
+}
+
+#[test]
+fn modal_overlay_survives_another_client_focusing_a_tiled_pane() {
+    let (mut tab, _receiver) = modal_overlay_tab();
+    tab.add_client(2, None).unwrap();
+    tab.focus_pane_with_id(PaneId::Terminal(1), false, false, 2)
+        .unwrap();
+    tab.sync_modal_overlays();
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(10)));
+    assert_eq!(tab.modal_overlays.get(&1), Some(&PaneId::Plugin(10)));
+    assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(1)));
+}
+
+fn modal_overlay_with_floating_peer(
+    fullscreen: Option<bool>,
+) -> (Tab, Receiver<(PluginInstruction, ErrorContext)>, PaneGeom) {
+    let (mut tab, receiver) = create_new_tab_with_plugin_receiver(
+        Size {
+            rows: 30,
+            cols: 100,
+        },
+        false,
+    );
+    tab.add_client(2, None).unwrap();
+    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+        .unwrap();
+    match fullscreen {
+        Some(true) => tab.toggle_active_pane_no_ui_fullscreen(2),
+        Some(false) => tab.toggle_active_pane_fullscreen(2),
+        None => {},
+    }
+    let peer_geometry = tab
+        .get_pane_with_id(PaneId::Terminal(2))
+        .unwrap()
+        .position_and_size();
+    tab.set_modal_overlay_registry(Rc::new(RefCell::new(HashMap::from([(
+        10,
+        crate::panes::floating_panes::ModalOverlay::new(1),
+    )]))));
+    tab.new_floating_pane(PaneId::Plugin(10), None, None, false, true, None, None)
+        .unwrap();
+    (tab, receiver, peer_geometry)
+}
+
+#[test]
+fn modal_overlay_cannot_take_shared_fullscreen_or_redirect_its_peer() {
+    let (mut tab, _receiver, peer_geometry) = modal_overlay_with_floating_peer(None);
+    tab.toggle_active_pane_fullscreen(1);
+    assert!(!tab.floating_panes.fullscreen_is_active());
+    tab.toggle_active_pane_no_ui_fullscreen(1);
+    assert!(!tab.floating_panes.fullscreen_is_active());
+    tab.toggle_pane_fullscreen(PaneId::Plugin(10));
+    assert!(!tab.floating_panes.fullscreen_is_active());
+    tab.toggle_pane_no_ui_fullscreen(PaneId::Plugin(10));
+    assert!(!tab.floating_panes.fullscreen_is_active());
+    assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(2)));
+    assert_eq!(
+        tab.get_pane_with_id(PaneId::Terminal(2))
+            .unwrap()
+            .position_and_size(),
+        peer_geometry
+    );
+}
+
+#[test]
+fn modal_overlay_composes_above_existing_floating_fullscreen_without_changing_its_peer() {
+    for no_ui in [false, true] {
+        let (mut tab, _receiver, peer_geometry) = modal_overlay_with_floating_peer(Some(no_ui));
+        assert_eq!(
+            tab.floating_panes.fullscreen_pane_id(),
+            Some(PaneId::Terminal(2))
+        );
+        assert_eq!(
+            tab.get_pane_with_id(PaneId::Terminal(2))
+                .unwrap()
+                .position_and_size(),
+            peer_geometry
+        );
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(10)));
+        assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(2)));
+        tab.handle_pty_bytes(2, b"\x1b[HPEERAPPLICATION".to_vec())
+            .unwrap();
+        tab.handle_plugin_bytes(10, 1, b"\x1b[HOWNERMODAL".to_vec())
+            .unwrap();
+        tab.sync_modal_overlays();
+        let mut output = crate::output::Output::default();
+        tab.render(&mut output, None).unwrap();
+        let rendered = output.serialize().unwrap();
+        assert!(rendered[&1].contains("OWNERMODAL"));
+        assert!(!rendered[&2].contains("OWNERMODAL"));
+        assert!(rendered[&2].contains("PEERAPPLICATION"));
+    }
+}
+
+#[test]
+fn modal_overlay_stays_above_tiled_no_ui_fullscreen_only_for_its_owner() {
+    let (mut tab, _receiver) = modal_overlay_tab();
+    tab.add_client(2, None).unwrap();
+    tab.toggle_active_pane_no_ui_fullscreen(2);
+    assert!(tab.tiled_panes.fullscreen_covers_ui());
+    assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(10)));
+    assert_eq!(tab.get_active_pane_id(2), Some(PaneId::Terminal(1)));
+    tab.handle_pty_bytes(1, b"\x1b[HFULLSCREENAPPLICATION".to_vec())
+        .unwrap();
+    tab.handle_plugin_bytes(10, 1, b"\x1b[HOWNERMODAL".to_vec())
+        .unwrap();
+    tab.sync_modal_overlays();
+    let mut output = crate::output::Output::default();
+    tab.render(&mut output, None).unwrap();
+    let rendered = output.serialize().unwrap();
+    assert!(rendered[&1].contains("OWNERMODAL"));
+    assert!(!rendered[&2].contains("OWNERMODAL"));
+    assert!(rendered[&2].contains("FULLSCREENAPPLICATION"));
+}
+
 fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
     let index = 0;
     let position = 0;

@@ -79,6 +79,7 @@ pub(crate) struct PluginPane {
     pub pid: u32,
     pub should_render: HashMap<ClientId, bool>,
     pub selectable: bool,
+    selectable_by_client: HashMap<ClientId, bool>,
     pub geom: PaneGeom,
     pub geom_override: Option<PaneGeom>,
     pub content_offset: Offset,
@@ -138,6 +139,7 @@ impl PluginPane {
             pid,
             should_render: HashMap::new(),
             selectable: true,
+            selectable_by_client: HashMap::new(),
             geom: position_and_size,
             geom_override: None,
             send_plugin_instructions,
@@ -402,10 +404,29 @@ impl Pane for PluginPane {
         Ok(())
     }
     fn selectable(&self) -> bool {
-        self.selectable
+        if self.selectable_by_client.is_empty() {
+            self.selectable
+        } else {
+            self.selectable_by_client
+                .values()
+                .any(|selectable| *selectable)
+        }
     }
     fn set_selectable(&mut self, selectable: bool) {
         self.selectable = selectable;
+        self.selectable_by_client.clear();
+    }
+    fn selectable_for_client(&self, client_id: ClientId) -> bool {
+        self.selectable_by_client
+            .get(&client_id)
+            .copied()
+            .unwrap_or(self.selectable)
+    }
+    fn set_selectable_for_client(&mut self, client_id: ClientId, selectable: bool) {
+        self.selectable_by_client.insert(client_id, selectable);
+    }
+    fn clear_client_selectability(&mut self, client_id: ClientId) {
+        self.selectable_by_client.remove(&client_id);
     }
     fn show_cursor(&mut self, client_id: ClientId, cursor_position: Option<(usize, usize)>) {
         self.cursor_visibility.insert(client_id, cursor_position);

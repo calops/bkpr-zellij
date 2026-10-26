@@ -50,20 +50,18 @@ fn pane_content_offset(position_and_size: &PaneGeom, viewport: &Viewport) -> (us
     // if the pane is not on the bottom or right edge on the screen, we need to reserve one space
     // from its content to leave room for the boundary between it and the next pane (if it doesn't
     // draw its own frame)
-    let columns_offset = if position_and_size.x + position_and_size.cols.as_usize()
-        < viewport.x + viewport.cols
-    {
-        1
-    } else {
-        0
-    };
-    let rows_offset = if position_and_size.y + position_and_size.rows.as_usize()
-        < viewport.y + viewport.rows
-    {
-        1
-    } else {
-        0
-    };
+    let columns_offset =
+        if position_and_size.x + position_and_size.cols.as_usize() < viewport.x + viewport.cols {
+            1
+        } else {
+            0
+        };
+    let rows_offset =
+        if position_and_size.y + position_and_size.rows.as_usize() < viewport.y + viewport.rows {
+            1
+        } else {
+            0
+        };
     (columns_offset, rows_offset)
 }
 
@@ -551,9 +549,7 @@ impl TiledPanes {
             let geometry = pane.position_and_size();
             let columns = geometry.cols.as_usize();
             let rows = geometry.rows.as_usize();
-            if geometry.x == viewport.x
-                && geometry.x + columns == viewport.x + viewport.cols
-            {
+            if geometry.x == viewport.x && geometry.x + columns == viewport.x + viewport.cols {
                 if geometry.y == viewport.y {
                     viewport.y += rows;
                     viewport.rows -= rows;
@@ -561,9 +557,7 @@ impl TiledPanes {
                     viewport.rows -= rows;
                 }
             }
-            if geometry.y == viewport.y
-                && geometry.y + rows == viewport.y + viewport.rows
-            {
+            if geometry.y == viewport.y && geometry.y + rows == viewport.y + viewport.rows {
                 if geometry.x == viewport.x {
                     viewport.x += columns;
                     viewport.cols -= columns;
@@ -1051,7 +1045,7 @@ impl TiledPanes {
         let pane_is_selectable = self
             .panes
             .get(&pane_id)
-            .map(|p| p.selectable())
+            .map(|p| p.selectable_for_client(client_id))
             .unwrap_or(false);
         if !pane_is_selectable {
             log::error!("Cannot focus pane {:?} as it is not selectable!", pane_id);
@@ -1079,6 +1073,13 @@ impl TiledPanes {
             let connected_clients: Vec<ClientId> =
                 self.connected_clients.borrow().iter().copied().collect();
             for client_id in connected_clients {
+                if !self
+                    .panes
+                    .get(&pane_id)
+                    .is_some_and(|pane| pane.selectable_for_client(client_id))
+                {
+                    continue;
+                }
                 self.active_panes
                     .insert(client_id, pane_id, &mut self.panes);
             }
@@ -1211,7 +1212,10 @@ impl TiledPanes {
         } else {
             self.active_panes
                 .iter()
-                .filter(|(client_id, _pane_id)| connected_clients.contains(client_id))
+                .filter(|(client_id, _pane_id)| {
+                    connected_clients.contains(client_id)
+                        && !output.client_has_modal_overlay(**client_id)
+                })
                 .map(|(client_id, pane_id)| (*client_id, *pane_id))
                 .collect()
         };
@@ -1503,8 +1507,11 @@ impl TiledPanes {
         let display = *self.display_area.borrow();
         let sidebar = self.panes.get(&pane_id)?;
         let geom = sidebar.position_and_size();
-        if geom.x != 0 || geom.y != 0 || geom.rows.as_usize() != display.rows
-            || !geom.cols.is_percent() || geom.cols.as_usize() >= display.cols
+        if geom.x != 0
+            || geom.y != 0
+            || geom.rows.as_usize() != display.rows
+            || !geom.cols.is_percent()
+            || geom.cols.as_usize() >= display.cols
         {
             return None;
         }
@@ -1520,9 +1527,8 @@ impl TiledPanes {
             if other.x < geom.cols.as_usize() || !other.cols.is_percent() {
                 return None;
             }
-            minimum_remaining = minimum_remaining.max(
-                (old_remaining * pane.min_width()).div_ceil(other.cols.as_usize()),
-            );
+            minimum_remaining = minimum_remaining
+                .max((old_remaining * pane.min_width()).div_ceil(other.cols.as_usize()));
         }
         let maximum = display.cols.saturating_sub(minimum_remaining);
         (maximum > 0).then_some(maximum)
@@ -1531,7 +1537,11 @@ impl TiledPanes {
     /// Resize a full-height left rail in outer cells, retaining flexible dimensions
     /// so native keyboard and mouse resizing continue to work normally.
     pub fn set_left_pane_outer_width(&mut self, pane_id: PaneId, intended: usize) -> bool {
-        if self.panes.get(&pane_id).is_some_and(|pane| pane.cols() == intended) {
+        if self
+            .panes
+            .get(&pane_id)
+            .is_some_and(|pane| pane.cols() == intended)
+        {
             return false;
         }
         let Some(maximum) = self.left_pane_outer_width_limit(pane_id) else {
@@ -1545,7 +1555,9 @@ impl TiledPanes {
         if geom.cols.as_usize() == target {
             return false;
         }
-        let original: Vec<_> = self.panes.iter()
+        let original: Vec<_> = self
+            .panes
+            .iter()
             .map(|(id, pane)| (*id, pane.position_and_size()))
             .collect();
         // Lock only for this solver invocation. The other panes retain their relative
@@ -1564,9 +1576,18 @@ impl TiledPanes {
             pane.set_geom(next);
         }
         let result = TiledPaneGrid::new(
-            &mut self.panes, &self.panes_to_hide, display, *self.viewport.borrow(),
-        ).layout(SplitDirection::Horizontal, display.cols);
-        if result.is_err() || self.panes.values().any(|pane| pane.cols() < pane.min_width()) {
+            &mut self.panes,
+            &self.panes_to_hide,
+            display,
+            *self.viewport.borrow(),
+        )
+        .layout(SplitDirection::Horizontal, display.cols);
+        if result.is_err()
+            || self
+                .panes
+                .values()
+                .any(|pane| pane.cols() < pane.min_width())
+        {
             for (id, original_geom) in original {
                 self.panes.get_mut(&id).unwrap().set_geom(original_geom);
             }
@@ -2858,6 +2879,43 @@ impl TiledPanes {
             None => self.active_panes.clear(&mut self.panes),
         }
     }
+    pub fn move_client_out_of_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
+        if self.active_panes.get(&client_id).copied() != Some(pane_id) {
+            return;
+        }
+        let replacement = self
+            .panes
+            .iter()
+            .filter(|(id, pane)| {
+                **id != pane_id
+                    && !self.panes_to_hide.contains(id)
+                    && pane.selectable_for_client(client_id)
+            })
+            .max_by_key(|(_, pane)| pane.active_at())
+            .map(|(id, _)| *id);
+        if let Some(replacement) = replacement {
+            if self
+                .panes
+                .get(&replacement)
+                .is_some_and(|pane| pane.current_geom().is_stacked())
+            {
+                let _ = StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
+                    .expand_pane(&replacement);
+                self.reapply_pane_frames();
+            }
+            // Plugin selectability is replica-local even when ordinary focus is mirrored.
+            self.active_panes
+                .insert(client_id, replacement, &mut self.panes);
+        } else {
+            self.active_panes.remove(&client_id, &mut self.panes);
+        }
+        self.reset_boundaries();
+    }
+    pub fn clear_client_selectability(&mut self, client_id: ClientId) {
+        for pane in self.panes.values_mut() {
+            pane.clear_client_selectability(client_id);
+        }
+    }
     pub fn extract_pane(&mut self, pane_id: PaneId) -> Option<Box<dyn Pane>> {
         self.reset_boundaries();
         self.panes.remove(&pane_id)
@@ -3309,8 +3367,8 @@ pub fn pane_geom_is_inside_viewport(viewport: &Viewport, geom: &PaneGeom) -> boo
 
 #[cfg(test)]
 mod viewport_geometry_regressions {
-    use super::*;
     use super::pane_resizer_test_mock::{dim_fixed, spec, MockPane};
+    use super::*;
 
     #[test]
     fn horizontal_ui_panes_stay_outside_the_application_viewport_at_every_width() {
@@ -3322,10 +3380,18 @@ mod viewport_geometry_regressions {
                 rows: 30,
             };
             let sidebar: Box<dyn Pane> = Box::new(MockPane::from_spec(spec(
-                1, 0, 2, dim_fixed(sidebar_width), dim_fixed(30),
+                1,
+                0,
+                2,
+                dim_fixed(sidebar_width),
+                dim_fixed(30),
             )));
             let terminal: Box<dyn Pane> = Box::new(MockPane::from_spec(spec(
-                2, sidebar_width, 2, dim_fixed(viewport.cols), dim_fixed(30),
+                2,
+                sidebar_width,
+                2,
+                dim_fixed(viewport.cols),
+                dim_fixed(30),
             )));
             assert!(!is_inside_viewport(&viewport, &sidebar));
             assert!(is_inside_viewport(&viewport, &terminal));
@@ -3334,7 +3400,12 @@ mod viewport_geometry_regressions {
 
     #[test]
     fn separator_offsets_use_absolute_right_and_bottom_viewport_edges() {
-        let viewport = Viewport { x: 80, y: 3, cols: 80, rows: 30 };
+        let viewport = Viewport {
+            x: 80,
+            y: 3,
+            cols: 80,
+            rows: 30,
+        };
         for (x, y, cols, rows, expected) in [
             (80, 3, 30, 12, (1, 1)),
             (110, 3, 50, 12, (0, 1)),

@@ -636,6 +636,8 @@ pub struct Output {
     client_rendered_kitty_panes: HashMap<ClientId, HashSet<PaneId>>,
     client_kitty_visible_panes: HashMap<ClientId, HashSet<PaneId>>,
     clients_with_cleared_host_display: HashSet<ClientId>,
+    modal_overlay_z_indices: HashMap<ClientId, usize>,
+    hidden_floating_layers: HashMap<ClientId, HashSet<usize>>,
     link_handler: Option<Rc<RefCell<LinkHandler>>>,
     sixel_image_store: Rc<RefCell<SixelImageStore>>,
     kitty_image_store: Rc<RefCell<KittyImageStore>>,
@@ -684,8 +686,44 @@ impl Output {
         self.link_handler = Some(link_handler);
         self.floating_panes_stack = floating_panes_stack;
         for client_id in client_ids {
+            self.hidden_floating_layers.remove(client_id);
+            self.modal_overlay_z_indices.remove(client_id);
             self.client_character_chunks.insert(*client_id, vec![]);
         }
+    }
+    pub fn set_modal_overlay(&mut self, client_id: ClientId, z_index: Option<usize>) {
+        if let Some(z_index) = z_index {
+            self.modal_overlay_z_indices.insert(client_id, z_index);
+        } else {
+            self.modal_overlay_z_indices.remove(&client_id);
+        }
+    }
+    pub fn client_has_modal_overlay(&self, client_id: ClientId) -> bool {
+        self.modal_overlay_z_indices.contains_key(&client_id)
+    }
+    pub fn set_floating_layer_visibility(
+        &mut self,
+        client_id: ClientId,
+        z_index: usize,
+        visible: bool,
+    ) {
+        if visible {
+            if let Some(hidden) = self.hidden_floating_layers.get_mut(&client_id) {
+                hidden.remove(&z_index);
+            }
+        } else {
+            self.hidden_floating_layers
+                .entry(client_id)
+                .or_default()
+                .insert(z_index);
+        }
+    }
+    fn floating_layer_is_hidden(&self, client_id: ClientId, z_index: Option<usize>) -> bool {
+        z_index.is_some_and(|z_index| {
+            self.hidden_floating_layers
+                .get(&client_id)
+                .is_some_and(|hidden| hidden.contains(&z_index))
+        })
     }
     pub fn add_character_chunks_to_client(
         &mut self,
@@ -693,10 +731,27 @@ impl Output {
         mut character_chunks: Vec<CharacterChunk>,
         z_index: Option<usize>,
     ) -> Result<()> {
+        if self.floating_layer_is_hidden(client_id, z_index) {
+            return Ok(());
+        }
         if let Some(client_character_chunks) = self.client_character_chunks.get_mut(&client_id) {
+            if self
+                .modal_overlay_z_indices
+                .get(&client_id)
+                .map(|modal_z_index| Some(*modal_z_index) != z_index)
+                .unwrap_or(false)
+            {
+                // Apply the native faint style only to client output, never the pane's grid.
+                // This also covers cached region/frame repairs without changing SGR or links.
+                crate::ui::pane_contents_and_ui::dim_character_chunks(&mut character_chunks);
+            }
             if let Some(floating_panes_stack) = &self.floating_panes_stack {
                 let mut visible_character_chunks = floating_panes_stack
-                    .visible_character_chunks(character_chunks, z_index)
+                    .visible_character_chunks_excluding(
+                        character_chunks,
+                        z_index,
+                        self.hidden_floating_layers.get(&client_id),
+                    )
                     .with_context(|| {
                         format!("failed to add character chunks for client {}", client_id)
                     })?;
@@ -785,12 +840,16 @@ impl Output {
         sixel_image_chunks: Vec<SixelImageChunk>,
         z_index: Option<usize>,
     ) {
+        if self.floating_layer_is_hidden(client_id, z_index) {
+            return;
+        }
         if let Some(character_cell_size) = *self.character_cell_size.borrow() {
             let mut sixel_chunks = if let Some(floating_panes_stack) = &self.floating_panes_stack {
-                floating_panes_stack.visible_sixel_image_chunks(
+                floating_panes_stack.visible_sixel_image_chunks_excluding(
                     sixel_image_chunks,
                     z_index,
                     &character_cell_size,
+                    self.hidden_floating_layers.get(&client_id),
                 )
             } else {
                 sixel_image_chunks
@@ -805,6 +864,16 @@ impl Output {
         client_ids: impl Iterator<Item = ClientId>,
         z_index: Option<usize>,
     ) {
+        if !self.hidden_floating_layers.is_empty() {
+            for client_id in client_ids {
+                self.add_sixel_image_chunks_to_client(
+                    client_id,
+                    sixel_image_chunks.clone(),
+                    z_index,
+                );
+            }
+            return;
+        }
         if let Some(character_cell_size) = *self.character_cell_size.borrow() {
             let sixel_chunks = if let Some(floating_panes_stack) = &self.floating_panes_stack {
                 floating_panes_stack.visible_sixel_image_chunks(
@@ -828,6 +897,9 @@ impl Output {
         kitty_image_chunks: Vec<KittyImageChunk>,
         z_index: Option<usize>,
     ) {
+        if self.floating_layer_is_hidden(client_id, z_index) {
+            return;
+        }
         self.client_rendered_kitty_panes
             .entry(client_id)
             .or_insert_with(HashSet::new)
@@ -837,7 +909,12 @@ impl Output {
             &self.floating_panes_stack,
         ) {
             (Some(character_cell_size), Some(floating_panes_stack)) => floating_panes_stack
-                .visible_kitty_image_chunks(kitty_image_chunks, z_index, &character_cell_size),
+                .visible_kitty_image_chunks_excluding(
+                    kitty_image_chunks,
+                    z_index,
+                    &character_cell_size,
+                    self.hidden_floating_layers.get(&client_id),
+                ),
             _ => kitty_image_chunks,
         };
         self.client_kitty_chunks
@@ -854,6 +931,17 @@ impl Output {
         client_ids: impl Iterator<Item = ClientId>,
         z_index: Option<usize>,
     ) {
+        if !self.hidden_floating_layers.is_empty() {
+            for client_id in client_ids {
+                self.add_kitty_image_chunks_to_client(
+                    client_id,
+                    pane_id,
+                    kitty_image_chunks.clone(),
+                    z_index,
+                );
+            }
+            return;
+        }
         let kitty_chunks = match (
             *self.character_cell_size.borrow(),
             &self.floating_panes_stack,
@@ -1132,8 +1220,16 @@ pub struct FloatingPanesStack {
 impl FloatingPanesStack {
     pub fn visible_character_chunks(
         &self,
+        character_chunks: Vec<CharacterChunk>,
+        z_index: Option<usize>,
+    ) -> Result<Vec<CharacterChunk>> {
+        self.visible_character_chunks_excluding(character_chunks, z_index, None)
+    }
+    fn visible_character_chunks_excluding(
+        &self,
         mut character_chunks: Vec<CharacterChunk>,
         z_index: Option<usize>,
+        hidden_layers: Option<&HashSet<usize>>,
     ) -> Result<Vec<CharacterChunk>> {
         let err_context = || {
             format!(
@@ -1148,8 +1244,15 @@ impl FloatingPanesStack {
         'chunk_loop: loop {
             match chunks_to_check.pop() {
                 Some(mut c_chunk) => {
-                    let panes_to_check = self.layers.iter().skip(z_index);
-                    for pane_geom in panes_to_check {
+                    let panes_to_check =
+                        self.layers
+                            .iter()
+                            .enumerate()
+                            .skip(z_index)
+                            .filter(|(index, _)| {
+                                !hidden_layers.is_some_and(|hidden| hidden.contains(&(index + 1)))
+                            });
+                    for (_, pane_geom) in panes_to_check {
                         let new_chunk_to_check = self
                             .remove_covered_parts(pane_geom, &mut c_chunk)
                             .with_context(err_context)?;
@@ -1174,14 +1277,35 @@ impl FloatingPanesStack {
     }
     pub fn visible_sixel_image_chunks(
         &self,
-        mut sixel_image_chunks: Vec<SixelImageChunk>,
+        sixel_image_chunks: Vec<SixelImageChunk>,
         z_index: Option<usize>,
         character_cell_size: &SizeInPixels,
     ) -> Vec<SixelImageChunk> {
+        self.visible_sixel_image_chunks_excluding(
+            sixel_image_chunks,
+            z_index,
+            character_cell_size,
+            None,
+        )
+    }
+    fn visible_sixel_image_chunks_excluding(
+        &self,
+        mut sixel_image_chunks: Vec<SixelImageChunk>,
+        z_index: Option<usize>,
+        character_cell_size: &SizeInPixels,
+        hidden_layers: Option<&HashSet<usize>>,
+    ) -> Vec<SixelImageChunk> {
         let z_index = z_index.unwrap_or(0);
         let mut chunks_to_check: Vec<SixelImageChunk> = sixel_image_chunks.drain(..).collect();
-        let panes_to_check = self.layers.iter().skip(z_index);
-        for pane_geom in panes_to_check {
+        let panes_to_check = self
+            .layers
+            .iter()
+            .enumerate()
+            .skip(z_index)
+            .filter(|(index, _)| {
+                !hidden_layers.is_some_and(|hidden| hidden.contains(&(index + 1)))
+            });
+        for (_, pane_geom) in panes_to_check {
             let chunks_to_check_against_this_pane: Vec<SixelImageChunk> =
                 chunks_to_check.drain(..).collect();
             for s_chunk in chunks_to_check_against_this_pane {
@@ -1194,14 +1318,35 @@ impl FloatingPanesStack {
     }
     pub fn visible_kitty_image_chunks(
         &self,
-        mut kitty_image_chunks: Vec<KittyImageChunk>,
+        kitty_image_chunks: Vec<KittyImageChunk>,
         z_index: Option<usize>,
         character_cell_size: &SizeInPixels,
     ) -> Vec<KittyImageChunk> {
+        self.visible_kitty_image_chunks_excluding(
+            kitty_image_chunks,
+            z_index,
+            character_cell_size,
+            None,
+        )
+    }
+    fn visible_kitty_image_chunks_excluding(
+        &self,
+        mut kitty_image_chunks: Vec<KittyImageChunk>,
+        z_index: Option<usize>,
+        character_cell_size: &SizeInPixels,
+        hidden_layers: Option<&HashSet<usize>>,
+    ) -> Vec<KittyImageChunk> {
         let z_index = z_index.unwrap_or(0);
         let mut chunks_to_check: Vec<KittyImageChunk> = kitty_image_chunks.drain(..).collect();
-        let panes_to_check = self.layers.iter().skip(z_index);
-        for pane_geom in panes_to_check {
+        let panes_to_check = self
+            .layers
+            .iter()
+            .enumerate()
+            .skip(z_index)
+            .filter(|(index, _)| {
+                !hidden_layers.is_some_and(|hidden| hidden.contains(&(index + 1)))
+            });
+        for (_, pane_geom) in panes_to_check {
             let chunks_to_check_against_this_pane: Vec<KittyImageChunk> =
                 chunks_to_check.drain(..).collect();
             for k_chunk in chunks_to_check_against_this_pane {
@@ -1721,10 +1866,8 @@ impl CharacterChunk {
                 } else if next_character.width() > 1 {
                     let left_width = x - drained_part_len;
                     let right_width = next_character.width() - left_width;
-                    let padding = TerminalCharacter::new_singlewidth_styled(
-                        ' ',
-                        next_character.styles,
-                    );
+                    let padding =
+                        TerminalCharacter::new_singlewidth_styled(' ', next_character.styles);
                     for _ in 0..left_width {
                         drained_part.push_back(padding.clone());
                     }
@@ -1770,14 +1913,18 @@ impl CharacterChunk {
         if pad_left_end_by > 0 {
             let padding = terminal_characters
                 .first()
-                .map(|character| TerminalCharacter::new_singlewidth_styled(' ', character.styles.clone()))
+                .map(|character| {
+                    TerminalCharacter::new_singlewidth_styled(' ', character.styles.clone())
+                })
                 .unwrap_or(EMPTY_TERMINAL_CHARACTER);
             characters_on_the_left.resize(characters_on_the_left.len() + pad_left_end_by, padding);
         }
         if pad_right_start_by > 0 {
             let padding = terminal_characters
                 .last()
-                .map(|character| TerminalCharacter::new_singlewidth_styled(' ', character.styles.clone()))
+                .map(|character| {
+                    TerminalCharacter::new_singlewidth_styled(' ', character.styles.clone())
+                })
                 .unwrap_or(EMPTY_TERMINAL_CHARACTER);
             for _ in 0..pad_right_start_by {
                 characters_on_the_right.insert(0, padding.clone());
@@ -1906,7 +2053,9 @@ impl OutputBuffer {
                     let mut padding = EMPTY_TERMINAL_CHARACTER;
                     if let Some(row) = viewport.get(line_index) {
                         if let Some(bg_color) = row.bg_color {
-                            padding.styles.update(|styles| styles.background = Some(bg_color));
+                            padding
+                                .styles
+                                .update(|styles| styles.background = Some(bg_color));
                         }
                         for character in &row.columns {
                             let width = character.width();
@@ -1924,7 +2073,10 @@ impl OutputBuffer {
                     }
                     // Keep complete wide glyphs at either edge, and preserve the row's
                     // erased-cell background without allocating the rest of the row.
-                    characters.resize(characters.len() + right.saturating_sub(x.max(region.x)), padding);
+                    characters.resize(
+                        characters.len() + right.saturating_sub(x.max(region.x)),
+                        padding,
+                    );
                     changed_chunks.push(CharacterChunk::new(
                         characters,
                         chunk_x + x_offset,

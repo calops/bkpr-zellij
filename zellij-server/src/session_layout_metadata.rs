@@ -62,37 +62,14 @@ impl SessionLayoutMetadata {
         }
     }
     pub fn list_clients_metadata(&self) -> String {
-        let mut clients_metadata: BTreeMap<ClientId, ClientMetadata> = BTreeMap::new();
-        for tab in &self.tabs {
-            let panes = if tab.hide_floating_panes {
-                &tab.tiled_panes
-            } else {
-                &tab.floating_panes
-            };
-            for pane in panes {
-                for focused_client in &pane.focused_clients {
-                    clients_metadata.insert(
-                        *focused_client,
-                        ClientMetadata {
-                            pane_id: pane.id.clone(),
-                            command: pane.run.clone(),
-                        },
-                    );
-                }
-            }
-        }
-
-        ClientMetadata::render_many(clients_metadata, &self.default_editor)
+        ClientMetadata::render_many(self.all_clients_metadata(), &self.default_editor)
     }
     pub fn all_clients_metadata(&self) -> BTreeMap<ClientId, ClientMetadata> {
         let mut clients_metadata: BTreeMap<ClientId, ClientMetadata> = BTreeMap::new();
         for tab in &self.tabs {
-            let panes = if tab.hide_floating_panes {
-                &tab.tiled_panes
-            } else {
-                &tab.floating_panes
-            };
-            for pane in panes {
+            // focused_clients already identifies each client's actual active surface.
+            // Modal owners and tiled peers can coexist in the same tab.
+            for pane in tab.tiled_panes.iter().chain(tab.floating_panes.iter()) {
                 for focused_client in &pane.focused_clients {
                     clients_metadata.insert(
                         *focused_client,

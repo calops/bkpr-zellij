@@ -471,6 +471,7 @@ pub enum ScreenInstruction {
     TogglePaneFrames(Option<NotificationEnd>),
     SetPaneFrameStyle(PaneFrameStyle, Option<NotificationEnd>),
     SetSelectable(PaneId, bool),
+    SetPluginSelectable(u32, bool, ClientId),
     ShowPluginCursor(u32, ClientId, Option<(usize, usize)>),
     ClosePane(
         PaneId,
@@ -726,8 +727,9 @@ pub enum ScreenInstruction {
         Option<NotificationEnd>, // completion signal
     ),
     UpdatePluginLoadingStage(u32, LoadingIndication), // u32 - plugin_id
+    PluginUnloaded(PluginId),
     StartPluginLoadingIndication(u32, LoadingIndication), // u32 - plugin_id
-    ProgressPluginLoadingOffset(u32),                 // u32 - plugin id
+    ProgressPluginLoadingOffset(u32),                     // u32 - plugin id
     RequestStateUpdateForPlugins,
     LaunchOrFocusPlugin(
         RunPluginOrAlias,
@@ -1080,6 +1082,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::TogglePaneFrames(..) => ScreenContext::TogglePaneFrames,
             ScreenInstruction::SetPaneFrameStyle(..) => ScreenContext::SetPaneFrameStyle,
             ScreenInstruction::SetSelectable(..) => ScreenContext::SetSelectable,
+            ScreenInstruction::SetPluginSelectable(..) => ScreenContext::SetSelectable,
             ScreenInstruction::ShowPluginCursor(..) => ScreenContext::ShowPluginCursor,
             ScreenInstruction::ClosePane(..) => ScreenContext::ClosePane,
             ScreenInstruction::HoldPane(..) => ScreenContext::HoldPane,
@@ -1185,6 +1188,7 @@ impl From<&ScreenInstruction> for ScreenContext {
                 ScreenContext::StartOrReloadPluginPane
             },
             ScreenInstruction::AddPlugin(..) => ScreenContext::AddPlugin,
+            ScreenInstruction::PluginUnloaded(..) => ScreenContext::ClosePane,
             ScreenInstruction::UpdatePluginLoadingStage(..) => {
                 ScreenContext::UpdatePluginLoadingStage
             },
@@ -1639,6 +1643,7 @@ pub(crate) struct Screen {
     reported_guest_fullscreen: HashMap<PaneId, bool>,
     host_fullscreen: bool,
     dimmed_clients: HashSet<ClientId>,
+    modal_overlay_owners: crate::panes::floating_panes::ModalOverlayRegistry,
     nested_guest_choices: HashMap<(ClientId, PaneId), NestedGuestChoice>,
     guest_ascend_keys: HashMap<PaneId, Vec<KeyWithModifier>>,
     host_descend_keys: Vec<KeyWithModifier>,
@@ -1666,10 +1671,35 @@ fn shared_tiled_width_configuration(pane: &dyn crate::tab::Pane) -> Option<(&str
     let configuration = match plugin {
         RunPluginOrAlias::RunPlugin(plugin) => &plugin.configuration,
         RunPluginOrAlias::Alias(alias) => &alias.run_plugin.as_ref()?.configuration,
-    }.inner();
+    }
+    .inner();
     let group = configuration.get("shared_tiled_width_group")?.as_str();
-    let initial = configuration.get("shared_tiled_width_initial")?.parse().ok()?;
+    let initial = configuration
+        .get("shared_tiled_width_initial")?
+        .parse()
+        .ok()?;
     (!group.is_empty() && initial > 0).then_some((group, initial))
+}
+
+fn client_overlay_kind(run: &Run) -> Option<bool> {
+    let Run::Plugin(plugin) = run else {
+        return None;
+    };
+    let configuration = match plugin {
+        RunPluginOrAlias::RunPlugin(plugin) => &plugin.configuration,
+        RunPluginOrAlias::Alias(alias) => match &alias.run_plugin {
+            Some(plugin) => &plugin.configuration,
+            None => return None,
+        },
+    };
+    let configuration = configuration.inner();
+    if configuration.get("modal_overlay").map(String::as_str) == Some("true") {
+        Some(true)
+    } else if configuration.get("client_overlay").map(String::as_str) == Some("true") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn shared_tiled_width_pane(tab: &Tab) -> Option<(PaneId, &str, usize, usize)> {
@@ -1681,17 +1711,23 @@ fn shared_tiled_width_pane(tab: &Tab) -> Option<(PaneId, &str, usize, usize)> {
         let (group, initial) = shared_tiled_width_configuration(pane.as_ref())?;
         let geom = pane.position_and_size();
         let columns = geom.cols.as_usize();
-        if geom.x != 0 || geom.y != 0 || geom.rows.as_usize() != display.rows
-            || !geom.cols.is_percent() || columns >= display.cols
+        if geom.x != 0
+            || geom.y != 0
+            || geom.rows.as_usize() != display.rows
+            || !geom.cols.is_percent()
+            || columns >= display.cols
         {
             return None;
         }
         // The same eligibility applies to width sources and destinations. An opt-in
         // carried through an unrelated native layout must not rewrite shared intent.
-        tab.get_tiled_panes().all(|(other_id, other)| {
-            *other_id == *id || (other.position_and_size().x >= columns
-                && other.position_and_size().cols.is_percent())
-        }).then_some((*id, group, initial, columns))
+        tab.get_tiled_panes()
+            .all(|(other_id, other)| {
+                *other_id == *id
+                    || (other.position_and_size().x >= columns
+                        && other.position_and_size().cols.is_percent())
+            })
+            .then_some((*id, group, initial, columns))
     })
 }
 
@@ -1899,6 +1935,7 @@ impl Screen {
             reported_guest_fullscreen: HashMap::new(),
             host_fullscreen: false,
             dimmed_clients: HashSet::new(),
+            modal_overlay_owners: Rc::new(RefCell::new(HashMap::new())),
             nested_guest_choices: HashMap::new(),
             guest_ascend_keys: HashMap::new(),
             host_descend_keys: vec![],
@@ -2893,9 +2930,13 @@ impl Screen {
     ) -> Result<()> {
         let colors = self.terminal_colors.entry(client_id).or_default();
         if colors.update(update) {
-            self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
-                None, Some(client_id), colors.event(),
-            )]))?;
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Update(vec![(
+                    None,
+                    Some(client_id),
+                    colors.event(),
+                )]))?;
         }
         Ok(())
     }
@@ -2920,9 +2961,10 @@ impl Screen {
                         self.get_client_input_mode(client_id),
                         Some(InputMode::Normal | InputMode::Locked)
                     ) || self.should_route_keys_to_pane(client_id, *pane_id))
-                    && !self.tabs.values().any(|tab| {
-                        tab.pane_has_guest_modal_for_client(*pane_id, client_id)
-                    })
+                    && !self
+                        .tabs
+                        .values()
+                        .any(|tab| tab.pane_has_guest_modal_for_client(*pane_id, client_id))
                     && self.pane_clipboard_paste_mode(*pane_id)
             });
             let previous = self.clipboard_paste_targets.get(&client_id).copied();
@@ -2955,9 +2997,10 @@ impl Screen {
                 context
             });
             self.clipboard_paste_mode_synced.insert(client_id);
-            let _ = self.bus.senders.send_to_server(
-                ServerInstruction::SetClipboardPasteMode(client_id, context),
-            );
+            let _ = self
+                .bus
+                .senders
+                .send_to_server(ServerInstruction::SetClipboardPasteMode(client_id, context));
         }
     }
 
@@ -2968,7 +3011,9 @@ impl Screen {
         {
             return;
         }
-        let pane_id = self.clipboard_paste_targets.get(&client_id)
+        let pane_id = self
+            .clipboard_paste_targets
+            .get(&client_id)
             .filter(|(current_context, _)| *current_context == context)
             .map(|(_, pane_id)| *pane_id)
             .or_else(|| {
@@ -2994,18 +3039,22 @@ impl Screen {
         };
         self.clipboard_paste_grants.remove(&pane_id);
         if let Some(password) = authorization.password {
-            self.clipboard_paste_grants.insert(pane_id, ClipboardPasteGrant {
-                client_id,
-                password,
-                primary: authorization.primary,
-                expires: Instant::now() + std::time::Duration::from_secs(30),
-            });
+            self.clipboard_paste_grants.insert(
+                pane_id,
+                ClipboardPasteGrant {
+                    client_id,
+                    password,
+                    primary: authorization.primary,
+                    expires: Instant::now() + std::time::Duration::from_secs(30),
+                },
+            );
         }
         // Unsolicited input must not release a solicited query's pause,
         // replay buffered PTY output, or pass through sync-pane input routing.
-        let _ = self.bus.senders.send_to_pty_writer(
-            PtyWriteInstruction::Write(bytes, terminal_id, None),
-        );
+        let _ = self
+            .bus
+            .senders
+            .send_to_pty_writer(PtyWriteInstruction::Write(bytes, terminal_id, None));
     }
 
     fn consume_clipboard_paste_grant(
@@ -3014,11 +3063,15 @@ impl Screen {
         query: &crate::host_query::HostQuery,
     ) -> Option<ClientId> {
         let bytes = match query {
-            crate::host_query::HostQuery::KittyClipboard { bytes, write: false } => bytes,
+            crate::host_query::HostQuery::KittyClipboard {
+                bytes,
+                write: false,
+            } => bytes,
             _ => return None,
         };
         let packet_bytes = bytes.strip_prefix(b"\x1b]")?;
-        let packet_bytes = packet_bytes.strip_suffix(b"\x1b\\")
+        let packet_bytes = packet_bytes
+            .strip_suffix(b"\x1b\\")
             .or_else(|| packet_bytes.strip_suffix(b"\x07"))?;
         let packet = zellij_utils::kitty_clipboard::Packet::parse(packet_bytes)?;
         if packet.field(b"type") != Some(b"read") || packet.field(b"status").is_some() {
@@ -3037,12 +3090,16 @@ impl Screen {
         if grant.expires <= Instant::now()
             || grant.password != password
             || grant.primary != primary
-            || !self.connected_clients.borrow().contains_key(&grant.client_id)
+            || !self
+                .connected_clients
+                .borrow()
+                .contains_key(&grant.client_id)
             || !self.pane_clipboard_paste_mode(pane_id)
         {
             return None;
         }
-        self.clipboard_paste_grants.remove(&pane_id)
+        self.clipboard_paste_grants
+            .remove(&pane_id)
             .map(|grant| grant.client_id)
     }
 
@@ -3064,31 +3121,39 @@ impl Screen {
             self.answer_color_palette_mode_query_locally(pane_id);
             return STARTUP_SENTINEL_TOKEN; // sentinel: no real forward happened
         }
-        if matches!(query, crate::host_query::HostQuery::ClipboardContent { .. }
-            | crate::host_query::HostQuery::KittyClipboard { .. })
-        {
+        if matches!(
+            query,
+            crate::host_query::HostQuery::ClipboardContent { .. }
+                | crate::host_query::HostQuery::KittyClipboard { .. }
+        ) {
             let forced_target = self.consume_clipboard_paste_grant(pane_id, &query);
             if !self.paste_buffer_read_enabled
-                && !matches!(query, crate::host_query::HostQuery::KittyClipboard { write: true, .. })
+                && !matches!(
+                    query,
+                    crate::host_query::HostQuery::KittyClipboard { write: true, .. }
+                )
                 && forced_target.is_none()
             {
                 let reply = query.clipboard_error_reply(b"EPERM");
                 let _ = self.resume_pane_after_forward(pane_id, reply);
                 return STARTUP_SENTINEL_TOKEN;
             }
-            let queued_bytes: usize = self.clipboard_forward_queue.iter().map(|pending| {
-                match &pending.query {
+            let queued_bytes: usize = self
+                .clipboard_forward_queue
+                .iter()
+                .map(|pending| match &pending.query {
                     crate::host_query::HostQuery::KittyClipboard { bytes, .. } => bytes.len(),
                     _ => 0,
-                }
-            }).sum();
+                })
+                .sum();
             let incoming_bytes = match &query {
                 crate::host_query::HostQuery::KittyClipboard { bytes, .. } => bytes.len(),
                 _ => 0,
             };
             if self.clipboard_forward_queue.len() >= 32
                 || (self.clipboard_forward_in_flight_token.is_some()
-                    && queued_bytes.saturating_add(incoming_bytes) > zellij_utils::kitty_clipboard::MAX_TRANSFER_BYTES)
+                    && queued_bytes.saturating_add(incoming_bytes)
+                        > zellij_utils::kitty_clipboard::MAX_TRANSFER_BYTES)
             {
                 let reply = query.clipboard_error_reply(b"EBUSY");
                 let _ = self.resume_pane_after_forward(pane_id, reply);
@@ -3314,22 +3379,26 @@ impl Screen {
                     } else {
                         reply_bytes
                     };
-                    let payload = if matches!(query, crate::host_query::HostQuery::KittyClipboardSupport) {
-                        // Other unsolicited host reports can share this DA-delimited
-                        // batch. Advertise the pane's own mode, never the host's state.
-                        let response = payload.windows(b"\x1b[?5522;0$y".len()).find(|bytes| {
-                            bytes.starts_with(b"\x1b[?5522;") && bytes.ends_with(b"$y")
-                                && (b'0'..=b'4').contains(&bytes[8])
-                        });
-                        match response.map(|bytes| bytes[8]) {
-                            Some(b'0' | b'4') => response.unwrap().to_vec(),
-                            Some(_) if self.pane_clipboard_paste_mode(pane_id) => b"\x1b[?5522;1$y".to_vec(),
-                            Some(_) => b"\x1b[?5522;2$y".to_vec(),
-                            None => query.empty_reply_bytes(),
-                        }
-                    } else {
-                        payload
-                    };
+                    let payload =
+                        if matches!(query, crate::host_query::HostQuery::KittyClipboardSupport) {
+                            // Other unsolicited host reports can share this DA-delimited
+                            // batch. Advertise the pane's own mode, never the host's state.
+                            let response = payload.windows(b"\x1b[?5522;0$y".len()).find(|bytes| {
+                                bytes.starts_with(b"\x1b[?5522;")
+                                    && bytes.ends_with(b"$y")
+                                    && (b'0'..=b'4').contains(&bytes[8])
+                            });
+                            match response.map(|bytes| bytes[8]) {
+                                Some(b'0' | b'4') => response.unwrap().to_vec(),
+                                Some(_) if self.pane_clipboard_paste_mode(pane_id) => {
+                                    b"\x1b[?5522;1$y".to_vec()
+                                },
+                                Some(_) => b"\x1b[?5522;2$y".to_vec(),
+                                None => query.empty_reply_bytes(),
+                            }
+                        } else {
+                            payload
+                        };
                     // Route via Tab so the reply lands on the pane in
                     // the correct stream position and any PTY input
                     // the app emitted while waiting is replayed.
@@ -4452,6 +4521,20 @@ impl Screen {
         tab_index: Option<usize>,
         client_id: Option<ClientId>,
     ) -> Result<()> {
+        // The launch client is host-supplied; plugin configuration cannot claim another owner.
+        // Leave the option in userspace configuration so identity and deduplication stay stable.
+        let overlay_kind = client_overlay_kind(&run_plugin);
+        if overlay_kind.is_some() && client_id.is_none() {
+            log::warn!("Refusing client overlay without a launch client");
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Unload(plugin_id))
+                .non_fatal();
+            return Ok(());
+        }
+        let modal_owner = client_id.filter(|_| overlay_kind.is_some());
+        let modal_enabled =
+            modal_owner.is_some_and(|owner| self.active_tab_ids.contains_key(&owner));
         let connected_client_id = client_id.and_then(|client_id| {
             if self.active_tab_ids.contains_key(&client_id) {
                 Some(client_id)
@@ -4459,20 +4542,37 @@ impl Screen {
                 self.get_first_client_id()
             }
         });
+        let registry = self.modal_overlay_owners.clone();
         let target_tab = if let Some(tab_index) = tab_index {
             self.tabs.get_mut(&tab_index)
         } else {
             connected_client_id.and_then(|client_id| self.get_active_tab_mut(client_id).ok())
         };
         if let Some(tab) = target_tab {
+            tab.set_modal_overlay_registry(registry.clone());
+            if let Some(owner) = modal_owner {
+                let mut modal = if overlay_kind == Some(true) {
+                    crate::panes::floating_panes::ModalOverlay::new(owner)
+                } else {
+                    crate::panes::floating_panes::ModalOverlay::passive(owner)
+                };
+                if !modal_enabled {
+                    modal.disable();
+                }
+                registry.borrow_mut().insert(plugin_id, modal);
+            }
             tab.new_pane(
                 PaneId::Plugin(plugin_id),
                 Some(pane_title),
                 Some(run_plugin),
                 start_suppressed,
-                should_focus_plugin,
+                should_focus_plugin && overlay_kind != Some(false),
                 placement,
-                if tab_index.is_some() { None } else { connected_client_id },
+                if tab_index.is_some() {
+                    None
+                } else {
+                    connected_client_id
+                },
                 None,
             )?;
         } else {
@@ -4530,10 +4630,14 @@ impl Screen {
         if let Some(mut plugin_render_assets) = plugin_render_assets {
             for asset in &mut plugin_render_assets {
                 for message in asset.render_messages.drain(..) {
-                    self.bus.senders.send_to_plugin(PluginInstruction::MessageFromPlugin {
-                        source_plugin_id: asset.plugin_id,
-                        message,
-                    }).context("failed to deliver rendered plugin message").non_fatal();
+                    self.bus
+                        .senders
+                        .send_to_plugin(PluginInstruction::MessageFromPlugin {
+                            source_plugin_id: asset.plugin_id,
+                            message,
+                        })
+                        .context("failed to deliver rendered plugin message")
+                        .non_fatal();
                 }
             }
             let _ = self
@@ -4544,12 +4648,23 @@ impl Screen {
         }
         Ok(())
     }
+    fn sync_modal_overlays(&mut self) {
+        let tabs = &self.tabs;
+        self.modal_overlay_owners
+            .borrow_mut()
+            .retain(|plugin_id, _| tabs.values().any(|tab| tab.has_plugin(*plugin_id)));
+        for tab in self.tabs.values_mut() {
+            tab.set_modal_overlay_registry(self.modal_overlay_owners.clone());
+            tab.sync_modal_overlays();
+        }
+    }
 
     pub fn render_to_clients(&mut self) -> Result<()> {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
         let err_context = "failed to render screen";
         self.sync_clipboard_paste_modes();
+        self.sync_modal_overlays();
 
         // Separate rendering for regular clients and watchers
         let has_regular_clients = self
@@ -5488,19 +5603,31 @@ impl Screen {
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
+        for modal in self.modal_overlay_owners.borrow_mut().values_mut() {
+            if modal.owner == client_id {
+                modal.disable();
+            }
+        }
         self.terminal_colors.remove(&client_id);
-        let _ = self.bus.senders.send_to_server(
-            ServerInstruction::SetClipboardPasteMode(client_id, None),
-        );
+        let _ = self
+            .bus
+            .senders
+            .send_to_server(ServerInstruction::SetClipboardPasteMode(client_id, None));
         self.clipboard_paste_targets.remove(&client_id);
         self.clipboard_paste_mode_synced.remove(&client_id);
-        self.clipboard_paste_history.retain(|(_, owner, _, _)| *owner != client_id);
-        self.clipboard_paste_grants.retain(|_, grant| grant.client_id != client_id);
+        self.clipboard_paste_history
+            .retain(|(_, owner, _, _)| *owner != client_id);
+        self.clipboard_paste_grants
+            .retain(|_, grant| grant.client_id != client_id);
         let mut rejected = Vec::new();
         let clipboard_forward_targets = &self.clipboard_forward_targets;
         self.clipboard_forward_queue.retain(|pending| {
             if clipboard_forward_targets.get(&pending.token) == Some(&client_id) {
-                rejected.push((pending.token, pending.pane_id, pending.query.clipboard_error_reply(b"EPERM")));
+                rejected.push((
+                    pending.token,
+                    pending.pane_id,
+                    pending.query.clipboard_error_reply(b"EPERM"),
+                ));
                 false
             } else {
                 true
@@ -5706,8 +5833,8 @@ impl Screen {
                 let (active_swap_layout_name, is_swap_layout_dirty) = tab.swap_layout_info();
                 let tab_viewport = tab.get_viewport();
                 let tab_display_area = tab.get_display_area();
-                let selectable_tiled_panes_count = tab.get_selectable_tiled_panes_count();
-                let selectable_floating_panes_count = tab.get_selectable_floating_panes_count();
+                let (selectable_tiled_panes_count, selectable_floating_panes_count) =
+                    tab.selectable_pane_counts_for_client(*client_id);
                 let tab_info_for_plugins = TabInfo {
                     position: tab.position,
                     name: tab
@@ -5717,7 +5844,8 @@ impl Screen {
                     panes_to_hide: tab.panes_to_hide_count(),
                     is_fullscreen_active: tab.is_fullscreen_active(),
                     is_sync_panes_active: tab.is_sync_panes_active(),
-                    are_floating_panes_visible: tab.are_floating_panes_visible(),
+                    are_floating_panes_visible: tab
+                        .are_floating_panes_visible_for_client(*client_id),
                     other_focused_clients,
                     active_swap_layout_name,
                     is_swap_layout_dirty,
@@ -5758,13 +5886,27 @@ impl Screen {
         let client_ids: Vec<ClientId> = self.active_tab_ids.keys().copied().collect();
         for client_id in client_ids {
             let target_plugin_ids = self.targeted_plugin_ids(client_id, EventType::PaneUpdate);
-            for plugin_id in target_plugin_ids {
+            let Some((last_plugin_id, other_plugin_ids)) = target_plugin_ids.split_last() else {
+                continue;
+            };
+            let mut client_manifest = pane_manifest.clone();
+            for tab in self.tabs.values() {
+                if let Some(panes) = client_manifest.panes.get_mut(&tab.position) {
+                    tab.project_pane_infos_for_client(client_id, panes);
+                }
+            }
+            for plugin_id in other_plugin_ids {
                 plugin_updates.push((
-                    Some(plugin_id),
+                    Some(*plugin_id),
                     Some(client_id),
-                    Event::PaneUpdate(pane_manifest.clone()),
+                    Event::PaneUpdate(client_manifest.clone()),
                 ));
             }
+            plugin_updates.push((
+                Some(*last_plugin_id),
+                Some(client_id),
+                Event::PaneUpdate(client_manifest),
+            ));
         }
         if !plugin_updates.is_empty() {
             self.bus
@@ -5856,17 +5998,25 @@ impl Screen {
         }
     }
     fn synchronize_shared_tiled_widths(&mut self) {
-        self.shared_tiled_width_observations.retain(|pane_id, (tab_id, _, _)| {
-            self.tabs.get(tab_id).and_then(shared_tiled_width_pane)
-                .is_some_and(|(id, _, _, _)| id == *pane_id)
-        });
+        self.shared_tiled_width_observations
+            .retain(|pane_id, (tab_id, _, _)| {
+                self.tabs
+                    .get(tab_id)
+                    .and_then(shared_tiled_width_pane)
+                    .is_some_and(|(id, _, _, _)| id == *pane_id)
+            });
         for tab in self.tabs.values() {
             let Some((id, group, initial, columns)) = shared_tiled_width_pane(tab) else {
                 continue;
             };
-            let changed = self.shared_tiled_width_observations.get(&id)
-                .is_some_and(|previous| previous.0 == tab.id
-                    && previous.1 == tab.get_display_area().cols && previous.2 != columns);
+            let changed = self
+                .shared_tiled_width_observations
+                .get(&id)
+                .is_some_and(|previous| {
+                    previous.0 == tab.id
+                        && previous.1 == tab.get_display_area().cols
+                        && previous.2 != columns
+                });
             if let Some(intended) = self.shared_tiled_widths.get_mut(group) {
                 if changed {
                     *intended = columns;
@@ -5880,28 +6030,36 @@ impl Screen {
                 .map(|(id, group, _, _)| (id, self.shared_tiled_widths[group]));
             if let Some((id, intended)) = desired {
                 tab.set_left_pane_outer_width(id, intended);
-                if let Some((_, pane)) = tab.get_tiled_panes().find(|(pane_id, _)| **pane_id == id) {
-                    self.shared_tiled_width_observations.insert(
-                        id, (tab.id, tab.get_display_area().cols, pane.cols()),
-                    );
+                if let Some((_, pane)) = tab.get_tiled_panes().find(|(pane_id, _)| **pane_id == id)
+                {
+                    self.shared_tiled_width_observations
+                        .insert(id, (tab.id, tab.get_display_area().cols, pane.cols()));
                 }
             }
         }
     }
 
     fn synchronize_pane_context(&self) {
-        crate::pane_context::synchronize(self.tabs.values().map(|tab| {
-            let panes = tab.get_tiled_panes().map(|(id, _)| *id)
-                .chain(tab.get_floating_panes().map(|(id, _)| *id))
-                .chain(tab.get_suppressed_panes().map(|(id, _)| *id)).collect();
-            (tab.id, tab.name.as_str(), panes)
-        }), &self.active_tab_ids);
+        crate::pane_context::synchronize(
+            self.tabs.values().map(|tab| {
+                let panes = tab
+                    .get_tiled_panes()
+                    .map(|(id, _)| *id)
+                    .chain(tab.get_floating_panes().map(|(id, _)| *id))
+                    .chain(tab.get_suppressed_panes().map(|(id, _)| *id))
+                    .collect();
+                (tab.id, tab.name.as_str(), panes)
+            }),
+            &self.active_tab_ids,
+        );
     }
 
     fn report_pane_context(&self) -> Result<()> {
         self.synchronize_pane_context();
         if let Some(event) = crate::pane_context::event() {
-            self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(None, None, event)]))?;
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Update(vec![(None, None, event)]))?;
         }
         Ok(())
     }
@@ -8020,6 +8178,11 @@ impl Screen {
         pid: u32,
         loading_indication: LoadingIndication,
     ) -> bool {
+        if loading_indication.is_error() {
+            if let Some(modal) = self.modal_overlay_owners.borrow_mut().get_mut(&pid) {
+                modal.disable();
+            }
+        }
         let all_tabs = self.get_tabs_mut();
         let mut found_plugin = false;
         for tab in all_tabs.values_mut() {
@@ -8226,14 +8389,26 @@ impl Screen {
         if subscriptions.contains(&EventType::CustomMessage) {
             self.synchronize_pane_context();
             if let Some(event) = crate::pane_context::event() {
-                self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
-                    Some(plugin_id), Some(client_id), event,
-                )]))?;
+                self.bus
+                    .senders
+                    .send_to_plugin(PluginInstruction::Update(vec![(
+                        Some(plugin_id),
+                        Some(client_id),
+                        event,
+                    )]))?;
             }
-            let colors = self.terminal_colors.get(&client_id).cloned().unwrap_or_default();
-            self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
-                Some(plugin_id), Some(client_id), colors.event(),
-            )]))?;
+            let colors = self
+                .terminal_colors
+                .get(&client_id)
+                .cloned()
+                .unwrap_or_default();
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Update(vec![(
+                    Some(plugin_id),
+                    Some(client_id),
+                    colors.event(),
+                )]))?;
         }
         let topology_event_count = usize::from(subscriptions.contains(&EventType::PaneUpdate))
             + usize::from(subscriptions.contains(&EventType::TabUpdate));
@@ -8243,7 +8418,11 @@ impl Screen {
             for tab in self.tabs.values() {
                 pane_manifest.panes.insert(tab.position, tab.pane_infos());
             }
-            topology.push((Some(plugin_id), Some(client_id), Event::PaneUpdate(pane_manifest)));
+            topology.push((
+                Some(plugin_id),
+                Some(client_id),
+                Event::PaneUpdate(pane_manifest),
+            ));
         }
         if subscriptions.contains(&EventType::TabUpdate) {
             let mut tab_infos = Vec::with_capacity(self.tabs.len());
@@ -8262,10 +8441,16 @@ impl Screen {
                 }
             }
             tab_infos.sort_by_key(|info| info.position);
-            topology.push((Some(plugin_id), Some(client_id), Event::TabUpdate(tab_infos)));
+            topology.push((
+                Some(plugin_id),
+                Some(client_id),
+                Event::TabUpdate(tab_infos),
+            ));
         }
         if !topology.is_empty() {
-            self.bus.senders.send_to_plugin(PluginInstruction::Update(topology))?;
+            self.bus
+                .senders
+                .send_to_plugin(PluginInstruction::Update(topology))?;
         }
         for tab in self.tabs.values() {
             let panes = tab
@@ -8276,11 +8461,13 @@ impl Screen {
             for pane in panes {
                 if let PaneId::Terminal(pid) = pane.pid() {
                     let records = pane.program_status();
-                    self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
-                        Some(plugin_id),
-                        Some(client_id),
-                        crate::panes::program_status::status_event(pid, &records)?,
-                    )]))?;
+                    self.bus
+                        .senders
+                        .send_to_plugin(PluginInstruction::Update(vec![(
+                            Some(plugin_id),
+                            Some(client_id),
+                            crate::panes::program_status::status_event(pid, &records)?,
+                        )]))?;
                 }
             }
         }
@@ -10074,6 +10261,26 @@ pub(crate) fn screen_thread_main(
                 screen.render(None)?;
                 screen.log_and_report_session_state()?;
             },
+            ScreenInstruction::SetPluginSelectable(plugin_id, selectable, client_id) => {
+                if !screen.active_tab_ids.contains_key(&client_id) {
+                    continue;
+                }
+                let mut found_plugin = false;
+                for tab in screen.get_tabs_mut().values_mut() {
+                    if tab.has_plugin(plugin_id) {
+                        tab.set_plugin_selectable(plugin_id, selectable, client_id);
+                        found_plugin = true;
+                        break;
+                    }
+                }
+                if !found_plugin {
+                    pending_events_waiting_for_tab.push(ScreenInstruction::SetPluginSelectable(
+                        plugin_id, selectable, client_id,
+                    ));
+                }
+                screen.render(None)?;
+                screen.log_and_report_session_state()?;
+            },
             ScreenInstruction::ShowPluginCursor(pid, client_id, cursor_position) => {
                 let all_tabs = screen.get_tabs_mut();
                 let mut found_plugin = false;
@@ -10622,7 +10829,11 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::ForwardHostQuery { pane_id, query } => {
                 screen.forward_host_query(pane_id, query);
             },
-            ScreenInstruction::ClipboardPaste { client_id, context, bytes } => {
+            ScreenInstruction::ClipboardPaste {
+                client_id,
+                context,
+                bytes,
+            } => {
                 screen.handle_clipboard_paste(client_id, context, bytes);
             },
             ScreenInstruction::NestedSessionMessageFromPane { pane_id, message } => {
@@ -11014,7 +11225,9 @@ pub(crate) fn screen_thread_main(
                             None => {
                                 // no corresponding tab exists, we'll create it
                                 crate::pane_context::prepare_layout(
-                                    tab_layout_info.tab_index, &tab_layout_info.tiled_layout);
+                                    tab_layout_info.tab_index,
+                                    &tab_layout_info.tiled_layout,
+                                );
                                 processed_tab_layouts.push(tab_layout_info);
                                 continue;
                             },
@@ -11429,6 +11642,12 @@ pub(crate) fn screen_thread_main(
                     screen.render(None)?;
                 }
                 screen.log_and_report_session_state()?;
+            },
+            ScreenInstruction::PluginUnloaded(plugin_id) => {
+                if let Some(modal) = screen.modal_overlay_owners.borrow_mut().get_mut(&plugin_id) {
+                    modal.disable();
+                }
+                screen.render(None)?;
             },
             ScreenInstruction::UpdatePluginLoadingStage(pid, loading_indication) => {
                 let found_plugin =

@@ -62,6 +62,146 @@ fn create_pane_geom(x: usize, y: usize, cols: usize, rows: usize) -> PaneGeom {
 }
 
 #[test]
+fn modal_overlay_hidden_layer_does_not_occlude_or_paint_the_other_client() {
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(2),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        Some(FloatingPanesStack {
+            layers: vec![create_pane_geom(0, 0, 10, 10)],
+        }),
+    );
+    output.set_floating_layer_visibility(1, 1, true);
+    output.set_floating_layer_visibility(2, 1, false);
+    let app = create_character_chunk_from_str("UNDER", 0, 0);
+    output
+        .add_character_chunks_to_multiple_clients(vec![app.clone()], [1, 2].into_iter(), None)
+        .unwrap();
+    output
+        .add_character_chunks_to_multiple_clients(
+            vec![create_character_chunk_from_str("MODAL", 0, 0)],
+            [1, 2].into_iter(),
+            Some(1),
+        )
+        .unwrap();
+    assert_eq!(output.client_character_chunks[&1].len(), 1);
+    assert_eq!(output.client_character_chunks[&2].len(), 1);
+    assert_eq!(
+        output.client_character_chunks[&2][0].terminal_characters,
+        app.terminal_characters
+    );
+}
+
+#[test]
+fn modal_overlay_dims_only_other_layers_for_its_client_without_mutating_source() {
+    use crate::panes::terminal_character::LinkAnchor;
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(2),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        None,
+    );
+    output.set_modal_overlay(1, Some(2));
+    let mut original = create_character_chunk_from_str("app", 0, 0);
+    original.terminal_characters[0].styles.update(|styles| {
+        styles.foreground = Some(AnsiCode::ColorIndex(4));
+        styles.background = Some(AnsiCode::ColorIndex(0));
+        styles.bold = Some(AnsiCode::On);
+        styles.underline = Some(AnsiCode::On);
+        styles.link_anchor = Some(LinkAnchor::Start(7));
+    });
+    for z_index in [None, Some(1), Some(2), Some(3)] {
+        output
+            .add_character_chunks_to_multiple_clients(
+                vec![original.clone()],
+                [1, 2].into_iter(),
+                z_index,
+            )
+            .unwrap();
+    }
+    for (index, chunk) in output.client_character_chunks[&1].iter().enumerate() {
+        for (column, character) in chunk.terminal_characters.iter().enumerate() {
+            let mut expected = *original.terminal_characters[column].styles;
+            if index != 2 {
+                expected.dim = Some(AnsiCode::On);
+            }
+            assert_eq!(*character.styles, expected);
+        }
+    }
+    for chunk in &output.client_character_chunks[&2] {
+        assert_eq!(chunk.terminal_characters, original.terminal_characters);
+    }
+    assert_ne!(
+        original.terminal_characters[0].styles.dim,
+        Some(AnsiCode::On)
+    );
+}
+
+#[test]
+fn modal_overlay_restoration_preserves_independent_application_faint_style() {
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(1),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        None,
+    );
+    let plain = create_character_chunk_from_str("plain", 0, 0);
+    let mut faint = create_character_chunk_from_str("faint", 0, 1);
+    for character in &mut faint.terminal_characters {
+        character
+            .styles
+            .update(|styles| styles.dim = Some(AnsiCode::On));
+    }
+    output.set_modal_overlay(1, Some(1));
+    output
+        .add_character_chunks_to_client(1, vec![plain.clone(), faint.clone()], None)
+        .unwrap();
+    output.set_modal_overlay(1, None);
+    output
+        .add_character_chunks_to_client(1, vec![plain.clone(), faint.clone()], None)
+        .unwrap();
+    let rendered = &output.client_character_chunks[&1];
+    assert_eq!(rendered[2].terminal_characters, plain.terminal_characters);
+    assert_eq!(rendered[3].terminal_characters, faint.terminal_characters);
+    assert!(rendered[0]
+        .terminal_characters
+        .iter()
+        .all(|character| character.styles.dim == Some(AnsiCode::On)));
+}
+
+#[test]
+fn modal_overlay_topmost_layer_and_client_ownership_are_independent() {
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(2),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        None,
+    );
+    output.set_modal_overlay(1, Some(2));
+    output.set_modal_overlay(2, Some(1));
+    let chunk = create_character_chunk_from_str("modal", 0, 0);
+    output
+        .add_character_chunks_to_multiple_clients(vec![chunk.clone()], [1, 2].into_iter(), Some(1))
+        .unwrap();
+    output.set_modal_overlay(1, Some(1));
+    output
+        .add_character_chunks_to_client(1, vec![chunk.clone()], Some(1))
+        .unwrap();
+    assert_eq!(
+        output.client_character_chunks[&2][0].terminal_characters,
+        chunk.terminal_characters
+    );
+    assert_eq!(
+        output.client_character_chunks[&1][1].terminal_characters,
+        chunk.terminal_characters
+    );
+    assert!(output.client_character_chunks[&1][0]
+        .terminal_characters
+        .iter()
+        .all(|character| character.styles.dim == Some(AnsiCode::On)));
+}
+
+#[test]
 fn test_output_new() {
     let output = create_test_output();
 
@@ -1049,21 +1189,43 @@ fn test_output_buffer_changed_chunks_in_viewport_partial() {
 #[test]
 fn passive_popup_damage_preserves_wide_combining_cells_background_and_pending_rows() {
     use zellij_utils::pane_size::Viewport;
-    let mut row = Row::from_columns(
-        "a界\u{301}bc".chars().map(TerminalCharacter::new).collect());
+    let mut row = Row::from_columns("a界\u{301}bc".chars().map(TerminalCharacter::new).collect());
     row.bg_color = Some(AnsiCode::ColorIndex(25));
-    row.columns[1].styles.update(|styles| styles.foreground = Some(AnsiCode::ColorIndex(196)));
+    row.columns[1]
+        .styles
+        .update(|styles| styles.foreground = Some(AnsiCode::ColorIndex(196)));
     let expected_wide = vec![row.columns[1].clone(), row.columns[2].clone()];
-    let viewport = vec![row, Row::from_columns(
-        "PENDING".chars().map(TerminalCharacter::new).collect())];
+    let viewport = vec![
+        row,
+        Row::from_columns("PENDING".chars().map(TerminalCharacter::new).collect()),
+    ];
     let mut buffer = OutputBuffer::default();
     buffer.clear();
-    buffer.update_region(Viewport { x: 2, y: 0, cols: 1, rows: 1 });
-    buffer.update_region(Viewport { x: 7, y: 0, cols: 2, rows: 1 });
-    buffer.update_region(Viewport { x: 2, y: 1, cols: 1, rows: 1 });
+    buffer.update_region(Viewport {
+        x: 2,
+        y: 0,
+        cols: 1,
+        rows: 1,
+    });
+    buffer.update_region(Viewport {
+        x: 7,
+        y: 0,
+        cols: 2,
+        rows: 1,
+    });
+    buffer.update_region(Viewport {
+        x: 2,
+        y: 1,
+        cols: 1,
+        rows: 1,
+    });
     buffer.update_line(1);
     let chunks = buffer.changed_chunks_in_viewport(&viewport, 300, 90, 4, 6);
-    assert_eq!(chunks.len(), 3, "ordinary dirty rows supersede overlapping damage spans");
+    assert_eq!(
+        chunks.len(),
+        3,
+        "ordinary dirty rows supersede overlapping damage spans"
+    );
     assert_eq!((chunks[0].x, chunks[0].y, chunks[0].width()), (4, 7, 300));
     assert_eq!((chunks[1].x, chunks[1].y, chunks[1].width()), (5, 6, 2));
     assert_eq!(chunks[1].terminal_characters, expected_wide);
@@ -1072,9 +1234,14 @@ fn passive_popup_damage_preserves_wide_combining_cells_background_and_pending_ro
         assert_eq!(character.character, ' ');
         assert_eq!(character.styles.background, Some(AnsiCode::ColorIndex(25)));
     }
-    assert_eq!(buffer.changed_rects_in_viewport(90), HashMap::from([(0, 2)]));
+    assert_eq!(
+        buffer.changed_rects_in_viewport(90),
+        HashMap::from([(0, 2)])
+    );
     buffer.clear();
-    assert!(buffer.changed_chunks_in_viewport(&viewport, 300, 90, 4, 6).is_empty());
+    assert!(buffer
+        .changed_chunks_in_viewport(&viewport, 300, 90, 4, 6)
+        .is_empty());
 }
 
 #[test]
@@ -1084,7 +1251,11 @@ fn passive_popup_frame_span_keeps_complete_wide_glyphs() {
     assert_eq!(chunk.x, 11);
     assert_eq!(chunk.width(), 2);
     assert_eq!(
-        chunk.terminal_characters.iter().map(|character| character.character).collect::<String>(),
+        chunk
+            .terminal_characters
+            .iter()
+            .map(|character| character.character)
+            .collect::<String>(),
         "界\u{301}"
     );
 }
@@ -1094,25 +1265,40 @@ fn passive_popup_occlusion_preserves_wide_prefix_and_split_cell_background() {
     let background = Some(AnsiCode::ColorIndex(25));
     let mut chunk = create_character_chunk_from_str(&"a界bc".repeat(24), 0, 5);
     for character in &mut chunk.terminal_characters {
-        character.styles.update(|styles| styles.background = background);
+        character
+            .styles
+            .update(|styles| styles.background = background);
     }
-    let stack = FloatingPanesStack { layers: vec![create_pane_geom(12, 5, 24, 1)] };
+    let stack = FloatingPanesStack {
+        layers: vec![create_pane_geom(12, 5, 24, 1)],
+    };
     let visible = stack.visible_character_chunks(vec![chunk], None).unwrap();
     let left = visible.iter().find(|chunk| chunk.x == 0).unwrap();
     assert_eq!(left.width(), 12);
     assert_eq!(
-        left.terminal_characters.iter().map(|character| character.character).collect::<String>(),
+        left.terminal_characters
+            .iter()
+            .map(|character| character.character)
+            .collect::<String>(),
         "a界bca界bca "
     );
-    assert_eq!(left.terminal_characters.last().unwrap().styles.background, background);
+    assert_eq!(
+        left.terminal_characters.last().unwrap().styles.background,
+        background
+    );
     let right = visible.iter().find(|chunk| chunk.x == 36).unwrap();
     assert_eq!(right.width(), 84);
     assert_eq!(right.terminal_characters[0].character, '界');
     for width in [1, 2] {
         let mut chunk = create_character_chunk_from_str("界bc", 0, 5);
-        chunk.terminal_characters[0].styles.update(|styles| styles.background = background);
+        chunk.terminal_characters[0]
+            .styles
+            .update(|styles| styles.background = background);
         let drained: Vec<_> = chunk.drain_by_width(width).collect();
-        assert_eq!(drained.iter().map(TerminalCharacter::width).sum::<usize>(), width);
+        assert_eq!(
+            drained.iter().map(TerminalCharacter::width).sum::<usize>(),
+            width
+        );
         assert_eq!(chunk.width(), 4 - width);
         if width == 1 {
             assert_eq!(drained[0].styles.background, background);
@@ -1120,8 +1306,6 @@ fn passive_popup_occlusion_preserves_wide_prefix_and_split_cell_background() {
         }
     }
 }
-
-
 
 #[test]
 fn test_pane_defaults_preserved_when_middle_covered() {

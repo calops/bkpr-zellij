@@ -427,6 +427,8 @@ pub(crate) fn plugin_thread_main(
             },
             PluginInstruction::Unload(pid) => {
                 wasm_bridge.unload_plugin(pid)?;
+                bus.senders
+                    .send_to_screen(ScreenInstruction::PluginUnloaded(pid))?;
             },
             PluginInstruction::Reload(
                 should_float,

@@ -58,6 +58,68 @@ fn coordinate_viewport(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ModalOverlay {
+    pub owner: ClientId,
+    // Ownership is shared by focused modals and passive client-only overlays.
+    pub modal: bool,
+    pub enabled: bool,
+    pub visible: bool,
+}
+
+impl ModalOverlay {
+    pub fn new(owner: ClientId) -> Self {
+        Self {
+            owner,
+            modal: true,
+            enabled: true,
+            visible: false,
+        }
+    }
+    pub fn passive(owner: ClientId) -> Self {
+        Self {
+            modal: false,
+            ..Self::new(owner)
+        }
+    }
+    pub fn disable(&mut self) {
+        self.enabled = false;
+        self.visible = false;
+    }
+}
+
+pub(crate) type ModalOverlayRegistry = Rc<RefCell<HashMap<u32, ModalOverlay>>>;
+
+#[derive(Clone, Copy)]
+struct FloatingLayerState {
+    fullscreen: Option<PaneId>,
+    tiled_covers_ui: bool,
+    panes_visible: bool,
+}
+
+impl FloatingLayerState {
+    fn includes(self, pane: &dyn Pane, is_modal: bool) -> bool {
+        is_modal
+            || (!self.tiled_covers_ui
+                && self.fullscreen.map_or_else(
+                    || self.panes_visible || pane.position_and_size().is_pinned,
+                    |fullscreen| fullscreen == pane.pid(),
+                ))
+    }
+}
+
+fn ordered_layer_ids(
+    fullscreen: Option<PaneId>,
+    z_indices: &[PaneId],
+) -> impl Iterator<Item = PaneId> + '_ {
+    fullscreen.into_iter().chain(
+        z_indices
+            .iter()
+            .copied()
+            .filter(move |pane_id| Some(*pane_id) != fullscreen),
+    )
+}
+
 pub struct FloatingPanes {
     panes: BTreeMap<PaneId, Box<dyn Pane>>,
     display_area: Rc<RefCell<Size>>,
@@ -79,6 +141,7 @@ pub struct FloatingPanes {
     senders: ThreadSenders,
     window_title: Option<String>,
     dimmed_clients: HashSet<ClientId>,
+    modal_overlays: ModalOverlayRegistry,
     fullscreen_covers_ui: Rc<RefCell<bool>>,
     fullscreen_pane_id: Option<PaneId>,
     floating_fullscreen_covers_ui: bool,
@@ -122,6 +185,7 @@ impl FloatingPanes {
             senders,
             window_title: None,
             dimmed_clients: HashSet::new(),
+            modal_overlays: Rc::new(RefCell::new(HashMap::new())),
             fullscreen_covers_ui,
             fullscreen_pane_id: None,
             floating_fullscreen_covers_ui: false,
@@ -141,6 +205,103 @@ impl FloatingPanes {
             self.dimmed_clients.remove(&client_id);
         }
         self.set_force_render();
+    }
+    pub(crate) fn set_modal_overlay_registry(&mut self, registry: ModalOverlayRegistry) {
+        self.modal_overlays = registry;
+    }
+    pub(crate) fn modal_overlay(&self, pane_id: PaneId) -> Option<ModalOverlay> {
+        match pane_id {
+            PaneId::Plugin(plugin_id) => self.modal_overlays.borrow().get(&plugin_id).copied(),
+            _ => None,
+        }
+    }
+    pub(crate) fn show_passive_overlay(&mut self, pane_id: PaneId) {
+        if let PaneId::Plugin(plugin_id) = pane_id {
+            if let Some(overlay) = self.modal_overlays.borrow_mut().get_mut(&plugin_id) {
+                if !overlay.modal && overlay.enabled {
+                    overlay.visible = true;
+                }
+            }
+        }
+    }
+    fn layer_state(&self) -> FloatingLayerState {
+        FloatingLayerState {
+            fullscreen: self.fullscreen_pane_id,
+            tiled_covers_ui: *self.fullscreen_covers_ui.borrow(),
+            panes_visible: self.panes_are_visible(),
+        }
+    }
+    fn layer_pane_ids(&self) -> impl Iterator<Item = PaneId> + '_ {
+        let state = self.layer_state();
+        let modals = self.modal_overlays.borrow();
+        ordered_layer_ids(state.fullscreen, &self.z_indices).filter(move |pane_id| {
+            self.panes.get(pane_id).is_some_and(|pane| {
+                state.includes(
+                    pane.as_ref(),
+                    matches!(pane_id, PaneId::Plugin(id) if modals.get(id).is_some_and(|overlay| overlay.modal)),
+                )
+            })
+        })
+    }
+
+    pub fn pane_is_visible_to_client(&self, pane_id: PaneId, client_id: ClientId) -> bool {
+        if let Some(overlay) = self.modal_overlay(pane_id) {
+            if overlay.owner != client_id || !overlay.enabled || !overlay.visible {
+                return false;
+            }
+            if overlay.modal {
+                return true;
+            }
+        }
+        if *self.fullscreen_covers_ui.borrow() {
+            return false;
+        }
+        if self
+            .fullscreen_pane_id
+            .is_some_and(|fullscreen| fullscreen != pane_id)
+        {
+            return false;
+        }
+        self.panes
+            .get(&pane_id)
+            .is_some_and(|pane| self.show_panes || pane.position_and_size().is_pinned)
+    }
+    pub fn panes_are_visible_for_client(&self, client_id: ClientId) -> bool {
+        (!*self.fullscreen_covers_ui.borrow() && self.show_panes)
+            || self.active_panes.get(&client_id).is_some_and(|pane_id| {
+                self.modal_overlay(*pane_id)
+                    .is_some_and(|modal| modal.owner == client_id && modal.enabled && modal.visible)
+            })
+    }
+    pub fn hide_modal_overlays_for_client(&mut self, client_id: ClientId) -> bool {
+        let mut changed = false;
+        for (plugin_id, modal) in self.modal_overlays.borrow_mut().iter_mut() {
+            if modal.modal
+                && modal.owner == client_id
+                && self.panes.contains_key(&PaneId::Plugin(*plugin_id))
+            {
+                changed |= modal.visible;
+                modal.visible = false;
+            }
+        }
+        if changed {
+            self.set_force_render();
+        }
+        changed
+    }
+    pub fn configure_client_output(&self, output: &mut Output, clients: &HashSet<ClientId>) {
+        if self.modal_overlays.borrow().is_empty() {
+            return;
+        }
+        for (index, pane_id) in self.layer_pane_ids().enumerate() {
+            for client_id in clients {
+                output.set_floating_layer_visibility(
+                    *client_id,
+                    index + 1,
+                    self.pane_is_visible_to_client(pane_id, *client_id),
+                );
+            }
+        }
     }
     pub fn collect_ui_overlay_geometries(&self, geometries: &mut Vec<(PaneId, PaneGeom)>) {
         for (id, pane) in &self.panes {
@@ -165,20 +326,17 @@ impl FloatingPanes {
             })
     }
     pub fn render_region(&mut self, region: Viewport, output: &mut Output) -> Result<()> {
-        let visible = self.panes_are_visible();
+        let state = self.layer_state();
+        let modals = self.modal_overlays.borrow();
         let mut z_index = 0;
-        for pane_id in &self.z_indices {
-            let pane = match self.panes.get_mut(pane_id) {
-                Some(pane) => pane,
-                None => continue,
+        for pane_id in ordered_layer_ids(state.fullscreen, &self.z_indices) {
+            let Some(pane) = self.panes.get_mut(&pane_id) else {
+                continue;
             };
-            if self
-                .fullscreen_pane_id
-                .is_some_and(|fullscreen| fullscreen != *pane_id)
-                || (self.fullscreen_pane_id.is_none()
-                    && !visible
-                    && !pane.position_and_size().is_pinned)
-            {
+            if !state.includes(
+                pane.as_ref(),
+                matches!(pane_id, PaneId::Plugin(id) if modals.get(&id).is_some_and(|overlay| overlay.modal)),
+            ) {
                 continue;
             }
             z_index += 1;
@@ -188,43 +346,19 @@ impl FloatingPanes {
     }
 
     pub fn stack(&self) -> Option<FloatingPanesStack> {
-        if *self.fullscreen_covers_ui.borrow() {
-            return None;
-        }
-        if let Some(fullscreen_pane_id) = self.fullscreen_pane_id {
-            return self
-                .panes
-                .get(&fullscreen_pane_id)
-                .map(|p| FloatingPanesStack {
-                    layers: vec![p.current_geom()],
-                });
-        }
-        if self.panes_are_visible() {
-            let layers: Vec<PaneGeom> = self
-                .z_indices
-                .iter()
-                .filter_map(|pane_id| self.panes.get(pane_id).map(|p| p.position_and_size()))
-                .collect();
-            if layers.is_empty() {
-                None
-            } else {
-                Some(FloatingPanesStack { layers })
-            }
-        } else if self.has_pinned_panes() {
-            let layers = self
-                .z_indices
-                .iter()
-                .filter_map(|pane_id| {
-                    self.panes
-                        .get(pane_id)
-                        .map(|p| p.position_and_size())
-                        .and_then(|p| if p.is_pinned { Some(p) } else { None })
+        let layers: Vec<_> = self
+            .layer_pane_ids()
+            .filter_map(|pane_id| {
+                self.panes.get(&pane_id).map(|pane| {
+                    if Some(pane_id) == self.fullscreen_pane_id {
+                        pane.current_geom()
+                    } else {
+                        pane.position_and_size()
+                    }
                 })
-                .collect();
-            Some(FloatingPanesStack { layers })
-        } else {
-            None
-        }
+            })
+            .collect();
+        (!layers.is_empty()).then_some(FloatingPanesStack { layers })
     }
     pub fn has_pinned_panes(&self) -> bool {
         self.panes
@@ -315,6 +449,11 @@ impl FloatingPanes {
         removed_pane
     }
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<Box<dyn Pane>> {
+        if let PaneId::Plugin(plugin_id) = pane_id {
+            if let Some(modal) = self.modal_overlays.borrow_mut().get_mut(&plugin_id) {
+                modal.visible = false;
+            }
+        }
         self.z_indices.retain(|p_id| *p_id != pane_id);
         self.desired_pane_positions.remove(&pane_id);
         self.panes.remove(&pane_id)
@@ -347,7 +486,12 @@ impl FloatingPanes {
             .and_then(|active_pane_id| self.panes.get_mut(active_pane_id))
     }
     pub fn panes_are_visible(&self) -> bool {
-        self.show_panes && !*self.fullscreen_covers_ui.borrow()
+        !*self.fullscreen_covers_ui.borrow()
+            && (self.show_panes
+                || self.panes.keys().any(|pane_id| {
+                    self.modal_overlay(*pane_id)
+                        .is_some_and(|modal| modal.modal && modal.enabled && modal.visible)
+                }))
     }
     pub fn panes_are_shown(&self) -> bool {
         self.show_panes
@@ -363,6 +507,11 @@ impl FloatingPanes {
     }
     pub fn get_pane_z_index(&self, pane_id: PaneId) -> Option<usize> {
         self.z_indices.iter().position(|id| id == &pane_id)
+    }
+    pub fn visible_pane_z_index(&self, pane_id: PaneId) -> Option<usize> {
+        self.layer_pane_ids()
+            .position(|id| id == pane_id)
+            .map(|index| index + 1)
     }
     pub fn active_pane_id_or_focused_pane_id(&self, client_id: Option<ClientId>) -> Option<PaneId> {
         // returns the focused pane of any client_id - should be safe because the way things are
@@ -561,11 +710,9 @@ impl FloatingPanes {
         }
 
         let connected_clients: Vec<ClientId> = connected_clients.into_iter().collect();
-        let active_panes = if self.panes_are_visible() {
-            self.active_panes.clone_active_panes()
-        } else {
-            Default::default()
-        };
+        let mut active_panes = self.active_panes.clone_active_panes();
+        active_panes
+            .retain(|client_id, pane_id| self.pane_is_visible_to_client(*pane_id, *client_id));
 
         for (kind, pane) in &self.panes {
             if let Some(fullscreen_pane_id) = self.fullscreen_pane_id {
@@ -590,6 +737,12 @@ impl FloatingPanes {
                 },
                 PaneId::Plugin(_) => {
                     for client_id in &connected_clients {
+                        if self
+                            .modal_overlay(*kind)
+                            .is_some_and(|overlay| overlay.owner != *client_id || !overlay.enabled)
+                        {
+                            continue;
+                        }
                         output.add_pane_contents(
                             &[*client_id],
                             pane.pid(),
@@ -612,27 +765,31 @@ impl FloatingPanes {
         let regular_fullscreen =
             fullscreen_pane_id.is_some() && !self.floating_fullscreen_covers_ui;
         let pane_frame_style = self.pane_frame_style;
-        let mut floating_panes: Vec<_> = if let Some(fullscreen_pane_id) = fullscreen_pane_id {
-            self.panes
-                .iter_mut()
-                .filter(|(id, _)| **id == fullscreen_pane_id)
-                .collect()
-        } else if self.panes_are_visible() {
-            self.panes.iter_mut().collect()
-        } else if self.has_pinned_panes() {
-            self.panes
-                .iter_mut()
-                .filter(|(_, p)| p.position_and_size().is_pinned)
-                .collect()
-        } else {
-            vec![]
-        };
+        let layer_state = self.layer_state();
+        let modal_overlays = self.modal_overlays.borrow();
+        let ordinary_panes_shown = self.show_panes;
+        let mut floating_panes: Vec<_> = self.panes.iter_mut().filter(|(id, pane)| {
+            let is_modal = matches!(**id, PaneId::Plugin(plugin_id) if modal_overlays.get(&plugin_id).is_some_and(|overlay| overlay.modal));
+            layer_state.includes(pane.as_ref(), is_modal)
+        }).collect();
         floating_panes.sort_by(|(a_id, _a_pane), (b_id, _b_pane)| {
             let a_pos = self.z_indices.iter().position(|id| id == *a_id);
             let b_pos = self.z_indices.iter().position(|id| id == *b_id);
-            a_pos.cmp(&b_pos)
+            (Some(**b_id) == fullscreen_pane_id)
+                .cmp(&(Some(**a_id) == fullscreen_pane_id))
+                .then_with(|| a_pos.cmp(&b_pos))
         });
         for (z_index, (kind, pane)) in floating_panes.iter_mut().enumerate() {
+            let modal = match **kind {
+                PaneId::Plugin(plugin_id) => modal_overlays.get(&plugin_id).copied(),
+                _ => None,
+            };
+            let ordinary_visible = ordinary_panes_shown || pane.position_and_size().is_pinned;
+            let visible_to_client = |client_id: &ClientId| {
+                modal
+                    .map(|modal| modal.enabled && modal.visible && modal.owner == *client_id)
+                    .unwrap_or(ordinary_visible)
+            };
             let mut active_panes = active_panes.clone();
             let multiple_users_exist_in_session =
                 { self.connected_clients_in_app.borrow().len() > 1 };
@@ -667,7 +824,10 @@ impl FloatingPanes {
                 mouse_hover_tips,
                 self.dimmed_clients.clone(),
             );
-            for client_id in &connected_clients {
+            for client_id in connected_clients
+                .iter()
+                .filter(|client| visible_to_client(client))
+            {
                 let client_mode = self
                     .mode_info
                     .borrow()
@@ -709,9 +869,13 @@ impl FloatingPanes {
             if let PaneId::Terminal(..) = kind {
                 if pane_has_guest_modal {
                     let (modal_clients, plain_clients): (Vec<ClientId>, Vec<ClientId>) =
-                        connected_clients.iter().copied().partition(|client_id| {
-                            pane_contents_and_ui.client_has_guest_modal(*client_id)
-                        });
+                        connected_clients
+                            .iter()
+                            .copied()
+                            .filter(visible_to_client)
+                            .partition(|client_id| {
+                                pane_contents_and_ui.client_has_guest_modal(*client_id)
+                            });
                     if !plain_clients.is_empty() {
                         pane_contents_and_ui
                             .render_pane_contents_to_multiple_clients(plain_clients.iter().copied())
@@ -726,7 +890,9 @@ impl FloatingPanes {
                     }
                 } else {
                     pane_contents_and_ui
-                        .render_pane_contents_to_multiple_clients(connected_clients.iter().copied())
+                        .render_pane_contents_to_multiple_clients(
+                            connected_clients.iter().copied().filter(visible_to_client),
+                        )
                         .with_context(err_context)?;
                 }
             }
@@ -1012,20 +1178,27 @@ impl FloatingPanes {
                     && self
                         .panes
                         .get(last_pane_id)
-                        .map(|p| p.selectable())
+                        .map(|p| p.selectable_for_client(client_id))
                         .unwrap_or(false)
             });
-        let target_pane_id = last_pane_id
-            .or_else(|| self.most_recently_active_selectable_pane(currently_active_pane_id));
+        let target_pane_id = last_pane_id.or_else(|| {
+            self.most_recently_active_selectable_pane(currently_active_pane_id, client_id)
+        });
         if let Some(target_pane_id) = target_pane_id {
             self.focus_pane(target_pane_id, client_id);
             self.set_force_render();
         }
     }
-    fn most_recently_active_selectable_pane(&self, exclude: Option<PaneId>) -> Option<PaneId> {
+    fn most_recently_active_selectable_pane(
+        &self,
+        exclude: Option<PaneId>,
+        client_id: ClientId,
+    ) -> Option<PaneId> {
         self.panes
             .iter()
-            .filter(|(pane_id, pane)| Some(**pane_id) != exclude && pane.selectable())
+            .filter(|(pane_id, pane)| {
+                Some(**pane_id) != exclude && pane.selectable_for_client(client_id)
+            })
             .max_by_key(|(_pane_id, pane)| pane.active_at())
             .map(|(pane_id, _pane)| *pane_id)
     }
@@ -1224,50 +1397,102 @@ impl FloatingPanes {
         let active_panes: Vec<(ClientId, PaneId)> = self
             .active_panes
             .iter()
-            .map(|(cid, pid)| (*cid, *pid))
+            .map(|(client, pane)| (*client, *pane))
             .collect();
-
-        // find the most recently active pane
-        let mut next_active_pane_candidates: Vec<(&PaneId, &Box<dyn Pane>)> = self
+        for (client_id, active_pane_id) in active_panes {
+            if active_pane_id != pane_id {
+                continue;
+            }
+            let mut candidates: Vec<_> = self
+                .panes
+                .iter()
+                .filter(|(id, pane)| {
+                    **id != pane_id
+                        && pane.selectable_for_client(client_id)
+                        && self
+                            .modal_overlay(**id)
+                            .map(|modal| modal.enabled && modal.owner == client_id)
+                            .unwrap_or(true)
+                })
+                .map(|(id, pane)| (*id, pane.active_at()))
+                .collect();
+            candidates.sort_by_key(|(_, active_at)| *active_at);
+            let next = candidates.last().map(|(id, _)| *id);
+            let previous = candidates.iter().rev().nth(1).map(|(id, _)| *id);
+            if let Some(next) = next {
+                self.focus_pane(next, client_id);
+                if let Some(previous) = previous {
+                    self.active_panes.set_last_pane(client_id, previous);
+                }
+            } else {
+                self.defocus_pane(client_id);
+            }
+        }
+    }
+    pub fn move_client_out_of_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
+        if self.active_panes.get(&client_id).copied() != Some(pane_id) {
+            return;
+        }
+        self.hide_modal_overlays_for_client(client_id);
+        let replacement = self
             .panes
             .iter()
-            .filter(|(_p_id, p)| p.selectable())
-            .collect();
-        next_active_pane_candidates.sort_by(|(_pane_id_a, pane_a), (_pane_id_b, pane_b)| {
-            pane_a.active_at().cmp(&pane_b.active_at())
-        });
-        let next_active_pane_id = next_active_pane_candidates
-            .last()
-            .map(|(pane_id, _pane)| **pane_id);
-        let last_active_pane_id = next_active_pane_candidates
-            .iter()
-            .rev()
-            .nth(1)
-            .map(|(pane_id, _pane)| **pane_id);
-
-        for (client_id, active_pane_id) in active_panes {
-            if active_pane_id == pane_id {
-                match next_active_pane_id {
-                    Some(next_active_pane_id) => {
-                        self.active_panes
-                            .insert(client_id, next_active_pane_id, &mut self.panes);
-                        self.focus_pane(next_active_pane_id, client_id);
-                        if let Some(last_active_pane_id) = last_active_pane_id {
-                            self.active_panes
-                                .set_last_pane(client_id, last_active_pane_id);
-                        }
-                    },
-                    None => {
-                        self.defocus_pane(client_id);
-                    },
+            .filter(|(id, pane)| {
+                **id != pane_id
+                    && pane.selectable_for_client(client_id)
+                    && self
+                        .modal_overlay(**id)
+                        .map(|modal| modal.enabled && modal.owner == client_id)
+                        .unwrap_or(true)
+            })
+            .max_by_key(|(_, pane)| pane.active_at())
+            .map(|(id, _)| *id);
+        if let Some(replacement) = replacement {
+            if let PaneId::Plugin(plugin_id) = replacement {
+                if let Some(modal) = self.modal_overlays.borrow_mut().get_mut(&plugin_id) {
+                    modal.visible = true;
                 }
             }
+            self.active_panes
+                .insert(client_id, replacement, &mut self.panes);
+        } else {
+            self.active_panes.remove(&client_id, &mut self.panes);
+        }
+        self.set_force_render();
+    }
+    pub fn clear_client_selectability(&mut self, client_id: ClientId) {
+        for pane in self.panes.values_mut() {
+            pane.clear_client_selectability(client_id);
         }
     }
     pub fn focus_pane_for_all_clients(&mut self, pane_id: PaneId) {
         let connected_clients: Vec<ClientId> =
             self.connected_clients.borrow().iter().copied().collect();
         for client_id in connected_clients {
+            if !self
+                .panes
+                .get(&pane_id)
+                .is_some_and(|pane| pane.selectable_for_client(client_id))
+            {
+                continue;
+            }
+            if let Some(modal) = self.modal_overlay(pane_id) {
+                if !modal.enabled || modal.owner != client_id {
+                    continue;
+                }
+                if let PaneId::Plugin(plugin_id) = pane_id {
+                    self.modal_overlays
+                        .borrow_mut()
+                        .get_mut(&plugin_id)
+                        .unwrap()
+                        .visible = true;
+                }
+            } else if self.active_panes.get(&client_id).is_some_and(|active| {
+                self.modal_overlay(*active)
+                    .is_some_and(|modal| modal.enabled && modal.visible)
+            }) {
+                continue;
+            }
             self.active_panes
                 .insert(client_id, pane_id, &mut self.panes);
         }
@@ -1370,6 +1595,10 @@ impl FloatingPanes {
         }
     }
     pub fn toggle_pane_fullscreen(&mut self, pane_id: PaneId) {
+        // Focused modals keep their framework-owned geometry; fullscreen is shared.
+        if self.modal_overlay(pane_id).is_some() {
+            return;
+        }
         if self.fullscreen_pane_id.is_some() {
             let was_no_ui = self.floating_fullscreen_covers_ui;
             self.unset_fullscreen();
@@ -1381,6 +1610,9 @@ impl FloatingPanes {
         }
     }
     pub fn toggle_pane_no_ui_fullscreen(&mut self, pane_id: PaneId) {
+        if self.modal_overlay(pane_id).is_some() {
+            return;
+        }
         if self.fullscreen_pane_id.is_some() {
             let was_no_ui = self.floating_fullscreen_covers_ui;
             self.unset_fullscreen();
@@ -1392,6 +1624,13 @@ impl FloatingPanes {
         }
     }
     pub fn toggle_active_pane_fullscreen(&mut self, client_id: ClientId) {
+        if self
+            .active_panes
+            .get(&client_id)
+            .is_some_and(|pane_id| self.modal_overlay(*pane_id).is_some())
+        {
+            return;
+        }
         if let Some(active_pane_id) = self
             .fullscreen_pane_id
             .or_else(|| self.get_active_pane_id(client_id))
@@ -1400,6 +1639,13 @@ impl FloatingPanes {
         }
     }
     pub fn toggle_active_pane_no_ui_fullscreen(&mut self, client_id: ClientId) {
+        if self
+            .active_panes
+            .get(&client_id)
+            .is_some_and(|pane_id| self.modal_overlay(*pane_id).is_some())
+        {
+            return;
+        }
         if let Some(active_pane_id) = self
             .fullscreen_pane_id
             .or_else(|| self.get_active_pane_id(client_id))
@@ -1408,6 +1654,15 @@ impl FloatingPanes {
         }
     }
     pub fn focus_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
+        if self
+            .modal_overlay(pane_id)
+            .is_some_and(|modal| !modal.enabled || modal.owner != client_id)
+        {
+            return;
+        }
+        if self.active_panes.get(&client_id).copied() != Some(pane_id) {
+            self.hide_modal_overlays_for_client(client_id);
+        }
         if let Some(focused_pane) = self.active_panes.get(&client_id) {
             if pane_id != *focused_pane {
                 self.active_panes.set_last_pane(client_id, *focused_pane);
@@ -1416,7 +1671,7 @@ impl FloatingPanes {
         let pane_is_selectable = self
             .panes
             .get(&pane_id)
-            .map(|p| p.selectable())
+            .map(|p| p.selectable_for_client(client_id))
             .unwrap_or(false);
         if !pane_is_selectable {
             log::error!("Cannot focus pane {:?} as it is not selectable!", pane_id);
@@ -1436,7 +1691,18 @@ impl FloatingPanes {
         match self.active_panes.get(&client_id) {
             Some(already_focused_pane_id) => self.focus_pane(*already_focused_pane_id, client_id),
             None => {
-                if let Some(first_pane_id) = self.panes.iter().next().map(|(p_id, _)| *p_id) {
+                if let Some(first_pane_id) = self
+                    .panes
+                    .iter()
+                    .find(|(pane_id, pane)| {
+                        pane.selectable_for_client(client_id)
+                            && self
+                                .modal_overlay(**pane_id)
+                                .map(|modal| modal.enabled && modal.owner == client_id)
+                                .unwrap_or(true)
+                    })
+                    .map(|(pane_id, _)| *pane_id)
+                {
                     self.focus_pane(first_pane_id, client_id);
                 }
             },
@@ -1456,12 +1722,16 @@ impl FloatingPanes {
         &self,
         point: &Position,
         search_selectable: bool,
+        client_id: ClientId,
     ) -> Result<Option<PaneId>> {
         let _err_context = || format!("failed to determine floating pane at point {point:?}");
 
         // TODO: better - loop through z-indices and check each one if it contains the point
         let mut panes: Vec<_> = if search_selectable {
-            self.panes.iter().filter(|(_, p)| p.selectable()).collect()
+            self.panes
+                .iter()
+                .filter(|(_, p)| p.selectable_for_client(client_id))
+                .collect()
         } else {
             self.panes.iter().collect()
         };
@@ -1482,20 +1752,23 @@ impl FloatingPanes {
         });
         Ok(panes
             .iter()
-            .find(|(_, p)| p.contains(point))
+            .find(|(pane_id, pane)| {
+                pane.contains(point) && self.pane_is_visible_to_client(**pane_id, client_id)
+            })
             .map(|(&id, _)| id))
     }
     pub fn get_pinned_pane_id_at(
         &self,
         point: &Position,
         search_selectable: bool,
+        client_id: ClientId,
     ) -> Result<Option<PaneId>> {
         let _err_context = || format!("failed to determine floating pane at point {point:?}");
 
         let mut panes: Vec<_> = if search_selectable {
             self.panes
                 .iter()
-                .filter(|(_, p)| p.selectable())
+                .filter(|(_, p)| p.selectable_for_client(client_id))
                 .filter(|(_, p)| p.current_geom().is_pinned)
                 .collect()
         } else {
@@ -1521,7 +1794,9 @@ impl FloatingPanes {
         });
         Ok(panes
             .iter()
-            .find(|(_, p)| p.contains(point))
+            .find(|(pane_id, pane)| {
+                pane.contains(point) && self.pane_is_visible_to_client(**pane_id, client_id)
+            })
             .map(|(&id, _)| id))
     }
     pub fn has_pinned_pane_at(&self, point: &Position) -> bool {
@@ -1551,8 +1826,9 @@ impl FloatingPanes {
         &mut self,
         position: &Position,
         search_selectable: bool,
+        client_id: ClientId,
     ) -> Option<&mut Box<dyn Pane>> {
-        self.get_pane_id_at(position, search_selectable)
+        self.get_pane_id_at(position, search_selectable, client_id)
             .ok()?
             .and_then(|pane_id| self.panes.get_mut(&pane_id))
     }
@@ -1599,19 +1875,30 @@ impl FloatingPanes {
         self.set_force_render();
         true
     }
-    pub fn move_pane_with_mouse(&mut self, position: Position, search_selectable: bool) -> bool {
+    pub fn move_pane_with_mouse(
+        &mut self,
+        position: Position,
+        search_selectable: bool,
+        client_id: ClientId,
+    ) -> bool {
         // true => handled, false => not handled (eg. no pane at this position)
         if *self.fullscreen_covers_ui.borrow() || self.fullscreen_pane_id.is_some() {
             return false;
         }
-        let show_panes = self.show_panes;
+        let show_panes = self.panes_are_visible_for_client(client_id);
+        if self
+            .pane_being_moved_with_mouse
+            .is_some_and(|(pane_id, _, _)| !self.pane_is_visible_to_client(pane_id, client_id))
+        {
+            return false;
+        }
         if self.pane_being_moved_with_mouse.is_some() {
             if self.move_pane_to_position(&position) {
                 // pane was moved to a new position
                 self.set_force_render();
                 return true;
             }
-        } else if let Some(pane) = self.get_pane_at_mut(&position, search_selectable) {
+        } else if let Some(pane) = self.get_pane_at_mut(&position, search_selectable, client_id) {
             let clicked_on_frame = pane.position_is_on_frame(&position);
             if (show_panes || pane.position_and_size().is_pinned) && clicked_on_frame {
                 let pid = pane.pid();
@@ -1729,7 +2016,12 @@ impl FloatingPanes {
             .map(|(id, _)| *id)
     }
     pub fn focus_pane_if_exists(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
-        if self.panes.get(&pane_id).is_some() {
+        if self.panes.contains_key(&pane_id)
+            && self
+                .modal_overlay(pane_id)
+                .map(|modal| modal.enabled && modal.owner == client_id)
+                .unwrap_or(true)
+        {
             self.focus_pane(pane_id, client_id);
             Ok(())
         } else {

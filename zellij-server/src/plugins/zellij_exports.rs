@@ -813,9 +813,14 @@ fn subscribe(env: &PluginEnv, event_list: HashSet<EventType>) -> Result<()> {
         .extend(event_list.clone());
     if event_list.contains(&EventType::CustomMessage)
         && (env.plugin.is_builtin()
-            || env.permissions.lock().to_anyhow()?.as_ref().is_some_and(|permissions| {
-                permissions.contains(&PermissionType::ReadApplicationState)
-            }))
+            || env
+                .permissions
+                .lock()
+                .to_anyhow()?
+                .as_ref()
+                .is_some_and(|permissions| {
+                    permissions.contains(&PermissionType::ReadApplicationState)
+                }))
     {
         env.senders
             .send_to_screen(ScreenInstruction::BootstrapProgramStatuses(
@@ -883,9 +888,10 @@ fn unsubscribe(env: &PluginEnv, event_list: HashSet<EventType>) -> Result<()> {
 
 fn set_selectable(env: &PluginEnv, selectable: bool) {
     env.senders
-        .send_to_screen(ScreenInstruction::SetSelectable(
-            PaneId::Plugin(env.plugin_id),
+        .send_to_screen(ScreenInstruction::SetPluginSelectable(
+            env.plugin_id,
             selectable,
+            env.client_id,
         ))
         .with_context(|| {
             format!(
@@ -2548,8 +2554,7 @@ fn exec_cmd(env: &PluginEnv, mut command_line: Vec<String>) {
     }
 
     // Here, we don't wait the command to finish
-    crate::pane_context::clear_environment(process::Command::new(command)
-        .args(command_line))
+    crate::pane_context::clear_environment(process::Command::new(command).args(command_line))
         .spawn()
         .with_context(err_context)
         .non_fatal();
@@ -2625,7 +2630,10 @@ fn post_message_to_plugin(env: &PluginEnv, plugin_message: PluginMessage) -> Res
     if plugin_message.name == "bkpr_context_owner_restart" {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Restart { session_id: String, closed_owner: u32 }
+        struct Restart {
+            session_id: String,
+            closed_owner: u32,
+        }
         let configuration = env.plugin.initial_userspace_configuration.inner();
         let request: Restart = serde_json::from_str(&plugin_message.payload)?;
         if configuration.get("role").map(String::as_str) != Some("sidebar")
@@ -2633,24 +2641,45 @@ fn post_message_to_plugin(env: &PluginEnv, plugin_message: PluginMessage) -> Res
         {
             return Err(anyhow!("Rejected foreign native owner restart"));
         }
-        if let Some(owner) = crate::pane_context::restart_owner(&request.session_id, request.closed_owner, &env.plugin.location) {
-            env.senders.send_to_plugin(PluginInstruction::LoadBackgroundPlugin(owner, env.client_id))?;
+        if let Some(owner) = crate::pane_context::restart_owner(
+            &request.session_id,
+            request.closed_owner,
+            &env.plugin.location,
+        ) {
+            env.senders
+                .send_to_plugin(PluginInstruction::LoadBackgroundPlugin(
+                    owner,
+                    env.client_id,
+                ))?;
         }
         return Ok(());
     }
     if plugin_message.name == "bkpr_context_update" {
         let configuration = env.plugin.initial_userspace_configuration.inner();
         let authorized = configuration.get("role").map(String::as_str) == Some("native-owner")
-            && env.permissions.lock().to_anyhow()?.as_ref().is_some_and(|permissions|
-                permissions.contains(&PermissionType::ChangeApplicationState));
-        let token = configuration.get("context_owner").map(String::as_str).unwrap_or("");
-        if !authorized || plugin_message.payload.len() > 1_048_576
+            && env
+                .permissions
+                .lock()
+                .to_anyhow()?
+                .as_ref()
+                .is_some_and(|permissions| {
+                    permissions.contains(&PermissionType::ChangeApplicationState)
+                });
+        let token = configuration
+            .get("context_owner")
+            .map(String::as_str)
+            .unwrap_or("");
+        if !authorized
+            || plugin_message.payload.len() > 1_048_576
             || !crate::pane_context::update(env.plugin_id, token, &plugin_message.payload)
         {
-            return Err(anyhow!("Rejected unauthorized or stale native context update"));
+            return Err(anyhow!(
+                "Rejected unauthorized or stale native context update"
+            ));
         }
         if let Some(event) = crate::pane_context::event() {
-            env.senders.send_to_plugin(PluginInstruction::Update(vec![(None, None, event)]))?;
+            env.senders
+                .send_to_plugin(PluginInstruction::Update(vec![(None, None, event)]))?;
         }
         return Ok(());
     }
@@ -4139,9 +4168,10 @@ fn enumerate_drives() -> Vec<(PathBuf, Option<zellij_utils::data::FileMetadata>)
 fn enumerate_wsl_distributions() -> Vec<(PathBuf, Option<zellij_utils::data::FileMetadata>)> {
     // read_dir on \\wsl.localhost\ or \\wsl$\ can fail with OS error 64/67
     // even when WSL is running, so enumerate distros via `wsl -l -q` instead.
-    let output = match crate::pane_context::clear_environment(std::process::Command::new("wsl")
-        .args(["-l", "-q"]))
-        .output()
+    let output = match crate::pane_context::clear_environment(
+        std::process::Command::new("wsl").args(["-l", "-q"]),
+    )
+    .output()
     {
         Ok(o) if o.status.success() => o,
         _ => return vec![],

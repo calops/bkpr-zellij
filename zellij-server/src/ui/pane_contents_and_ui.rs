@@ -320,6 +320,7 @@ impl<'a> PaneContentsAndUi<'a> {
         pane_is_selectable: bool,
     ) -> Result<()> {
         let err_context = || format!("failed to render pane frame for client {client_id}");
+        let pane_is_selectable = pane_is_selectable && self.pane.selectable_for_client(client_id);
 
         let pane_focused_for_client_id = self.focused_clients.contains(&client_id);
         let other_focused_clients: Vec<ClientId> = self
