@@ -1182,6 +1182,131 @@ fn occluded_cursor_stays_at_active_terminal() {
     assert_eq!(stored_cursor, Some((12, 5)));
 }
 
+fn assert_host_cursor(rendered: &str, size: Size, expected: (usize, usize), visible: bool) {
+    let (_, visible_cursor) =
+        take_snapshot_and_cursor_position(rendered, size.rows, size.cols, Palette::default());
+    assert_eq!(visible_cursor, visible.then_some(expected));
+    let (_, stored_cursor) = take_snapshot_and_cursor_position(
+        &format!("{rendered}\x1b[?25h"),
+        size.rows,
+        size.cols,
+        Palette::default(),
+    );
+    assert_eq!(stored_cursor, Some(expected));
+}
+
+#[test]
+fn cursorless_plugin_redraws_preserve_visible_and_hidden_application_anchors() {
+    let size = Size { cols: 121, rows: 20 };
+    for application_cursor_visible in [false, true] {
+        let (mut tab, _receiver) =
+            create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+        tab.set_pane_frames(PaneFrameStyle::None);
+        tab.new_pane(
+            PaneId::Plugin(2), None, None, false, false,
+            NewPanePlacement::Tiled { direction: None, borderless: Some(true) },
+            Some(1), None,
+        ).unwrap();
+        tab.tiled_panes.focus_pane(PaneId::Terminal(1), 1);
+        let visibility = if application_cursor_visible { "\x1b[?25h" } else { "\x1b[?25l" };
+        tab.handle_pty_bytes(1, format!("\x1b[6;13H{visibility}").into_bytes()).unwrap();
+        passive_popup_render(&mut tab);
+        // A hidden application's cursor can move after the last visible cursor update.
+        tab.handle_pty_bytes(1, b"\x1b[7;14H".to_vec()).unwrap();
+        passive_popup_render(&mut tab);
+        let (x, y, _) = tab.get_active_terminal_cursor_position(1).unwrap();
+        tab.tiled_panes.focus_pane(PaneId::Plugin(2), 1);
+        tab.show_plugin_cursor(2, 1, None);
+        for text in [b"SIDEBAR".to_vec(), b"\x1b[19;30HREDRAW".to_vec()] {
+            tab.handle_plugin_bytes(2, 1, text).unwrap();
+            let rendered = passive_popup_render(&mut tab).remove(&1).unwrap();
+            assert_host_cursor(&rendered, size, (x, y), false);
+        }
+        tab.new_floating_pane(PaneId::Plugin(3), None, None, false, false, None, None)
+            .unwrap();
+        tab.set_pane_selectable(PaneId::Plugin(3), false);
+        tab.change_floating_pane_coordinates(
+            &PaneId::Plugin(3), passive_popup_coordinates(40, 3, 20, 5),
+        ).unwrap();
+        tab.handle_plugin_bytes(3, 1, b"PASSIVE CARD".to_vec()).unwrap();
+        let rendered = passive_popup_render(&mut tab).remove(&1).unwrap();
+        assert_eq!(tab.get_active_pane_id(1), Some(PaneId::Plugin(2)));
+        assert_host_cursor(&rendered, size, (x, y), false);
+        tab.suppress_pane(PaneId::Plugin(3), Some(1));
+        let rendered = passive_popup_render(&mut tab).remove(&1).unwrap();
+        assert_host_cursor(&rendered, size, (x, y), false);
+        tab.tiled_panes.focus_pane(PaneId::Terminal(1), 1);
+        let rendered = passive_popup_render(&mut tab).remove(&1).unwrap();
+        assert_host_cursor(&rendered, size, (x, y), application_cursor_visible);
+    }
+}
+
+#[test]
+fn focused_plugin_input_cursor_handoffs_keep_the_requested_position() {
+    let size = Size { cols: 121, rows: 20 };
+    let (mut tab, _receiver) =
+        create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    tab.new_pane(
+        PaneId::Plugin(2), None, None, false, false,
+        NewPanePlacement::Tiled { direction: None, borderless: Some(true) },
+        Some(1), None,
+    ).unwrap();
+    tab.tiled_panes.focus_pane(PaneId::Plugin(2), 1);
+    tab.show_plugin_cursor(2, 1, None);
+    let pane = tab.get_pane_info(PaneId::Plugin(2)).unwrap();
+    let rendered = passive_popup_render(&mut tab).remove(&1).unwrap();
+    assert_host_cursor(&rendered, size, (pane.pane_x, pane.pane_y), false);
+    for requested in [Some((3, 2)), Some((4, 2)), None, Some((4, 2))] {
+        tab.show_plugin_cursor(2, 1, requested);
+        tab.handle_plugin_bytes(2, 1, b"\x1b[10;20HMODAL".to_vec()).unwrap();
+        let expected = requested
+            .map(|(x, y)| (pane.pane_x + x, pane.pane_y + y))
+            .unwrap_or((pane.pane_x + 4, pane.pane_y + 2));
+        let rendered = passive_popup_render(&mut tab).remove(&1).unwrap();
+        assert_host_cursor(&rendered, size, expected, requested.is_some());
+    }
+}
+
+#[test]
+fn cursorless_plugin_anchors_are_client_local_and_clamped_after_resize() {
+    let size = Size { cols: 121, rows: 20 };
+    let (mut tab, _receiver) =
+        create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+    tab.set_pane_frames(PaneFrameStyle::None);
+    tab.new_pane(
+        PaneId::Plugin(2), None, None, false, false,
+        NewPanePlacement::Tiled { direction: None, borderless: Some(true) },
+        Some(1), None,
+    ).unwrap();
+    tab.add_client(2, None).unwrap();
+    for client in [1, 2] {
+        tab.tiled_panes.focus_pane(PaneId::Plugin(2), client);
+        tab.show_plugin_cursor(2, client, Some((client as usize + 2, 18)));
+        tab.handle_plugin_bytes(2, client, b"INPUT".to_vec()).unwrap();
+    }
+    passive_popup_render(&mut tab);
+    let pane = tab.get_pane_info(PaneId::Plugin(2)).unwrap();
+    for client in [1, 2] {
+        tab.show_plugin_cursor(2, client, None);
+        tab.handle_plugin_bytes(2, client, b"\x1b[2;2HPASSIVE".to_vec()).unwrap();
+    }
+    for (client, rendered) in passive_popup_render(&mut tab) {
+        assert_host_cursor(
+            &rendered, size, (pane.pane_x + client as usize + 2, pane.pane_y + 18), false,
+        );
+    }
+    let smaller = Size { cols: 80, rows: 12 };
+    tab.resize_whole_tab(smaller).unwrap();
+    for (client, rendered) in passive_popup_render(&mut tab) {
+        assert_host_cursor(
+            &rendered, smaller,
+            ((pane.pane_x + client as usize + 2).min(smaller.cols - 1), smaller.rows - 1),
+            false,
+        );
+    }
+}
+
 fn passive_popup_mouse_updates(
     receiver: &Receiver<(PluginInstruction, ErrorContext)>,
 ) -> Vec<(Option<u32>, Option<ClientId>, zellij_utils::data::Mouse)> {
