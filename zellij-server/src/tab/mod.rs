@@ -233,9 +233,7 @@ pub(crate) struct Tab {
     terminal_emulator_colors: Rc<RefCell<Palette>>,
     terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
     pids_waiting_resize: HashSet<u32>, // u32 is the terminal_id
-    cursor_positions_and_shape: HashMap<ClientId, (usize, usize, String)>, // (x_position,
-    // y_position,
-    // cursor_shape_csi)
+    cursor_positions_and_shape: HashMap<ClientId, (usize, usize, Option<String>)>,
     is_pending: bool, // a pending tab is one that is still being loaded or otherwise waiting
     pending_instructions: Vec<BufferedTabInstruction>, // instructions that came while the tab was
     // pending and need to be re-applied
@@ -5108,7 +5106,7 @@ impl Tab {
                             .map(|(previous_x, previous_y, previous_shape)| {
                                 previous_x != &cursor_position_x
                                     || previous_y != &cursor_position_y
-                                    || previous_shape != &desired_cursor_shape
+                                    || previous_shape.as_ref() != Some(&desired_cursor_shape)
                             })
                             .unwrap_or(true);
                         if output.is_dirty() || cursor_changed_position_or_shape {
@@ -5126,7 +5124,7 @@ impl Tab {
                             output.add_post_vte_instruction_to_client(client_id, show_cursor);
                             self.cursor_positions_and_shape.insert(
                                 client_id,
-                                (cursor_position_x, cursor_position_y, desired_cursor_shape),
+                                (cursor_position_x, cursor_position_y, Some(desired_cursor_shape)),
                             );
                         }
                     } else {
@@ -5140,11 +5138,27 @@ impl Tab {
                         );
                         output.add_post_vte_instruction_to_client(client_id, hide_cursor);
                         output.add_post_vte_instruction_to_client(client_id, goto_cursor_position);
+                        self.cursor_positions_and_shape.insert(
+                            client_id,
+                            (cursor_position_x, cursor_position_y, None),
+                        );
                     }
                 },
                 None => {
-                    let hide_cursor = "\u{1b}[?25l";
-                    output.add_post_vte_instruction_to_client(client_id, hide_cursor);
+                    // A cursorless plugin must not leave the hardware cursor at its last paint.
+                    let (x, y) = self
+                        .cursor_positions_and_shape
+                        .get(&client_id)
+                        .map(|(x, y, _)| (*x, *y))
+                        .or_else(|| self.get_active_pane(client_id).map(|pane| (pane.x(), pane.y())))
+                        .unwrap_or_default();
+                    let display_area = self.display_area.borrow();
+                    let x = x.min(display_area.cols.saturating_sub(1));
+                    let y = y.min(display_area.rows.saturating_sub(1));
+                    let goto_cursor_position = format!("\u{1b}[{};{}H", y + 1, x + 1);
+                    output.add_post_vte_instruction_to_client(client_id, "\u{1b}[?25l");
+                    output.add_post_vte_instruction_to_client(client_id, &goto_cursor_position);
+                    self.cursor_positions_and_shape.insert(client_id, (x, y, None));
                 },
             }
         }

@@ -30,6 +30,14 @@ fn read_fixture(fixture_name: &str) -> Vec<u8> {
 }
 
 #[test]
+fn rendering_character_chunks_does_not_emit_empty_raw_output() {
+    let mut grid = create_grid_with_size_and_raw(5, 20, b"CONTENT");
+    let (chunks, raw_output, _, _) = grid.render(10, 3, &Style::default()).unwrap().unwrap();
+    assert!(!chunks.is_empty());
+    assert!(raw_output.is_none());
+}
+
+#[test]
 fn vttest1_0() {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
