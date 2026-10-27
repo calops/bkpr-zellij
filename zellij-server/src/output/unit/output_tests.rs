@@ -7,12 +7,13 @@ use crate::panes::kitty_graphics::parser::{
 };
 use crate::panes::kitty_graphics::store::{InternalImageId, KittyImageStore};
 use crate::panes::sixel::SixelImageStore;
-use crate::panes::terminal_character::AnsiCode;
-use crate::panes::{LinkHandler, PaneId, Row, TerminalCharacter};
+use crate::panes::terminal_character::{AnsiCode, RESET_STYLES};
+use crate::panes::{Grid, LinkHandler, PaneId, Row, TerminalCharacter};
 use crate::ClientId;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use zellij_utils::data::{Palette, Style};
 use zellij_utils::pane_size::{Dimension, PaneGeom, Size, SizeInPixels};
 
 /// Helper to create a simple Output instance for testing
@@ -99,6 +100,104 @@ fn background_dimming_preserves_the_focused_layer_other_clients_and_source_style
         output.client_character_chunks[&1][2].terminal_characters[0].styles.dim,
         None,
     );
+}
+
+fn parse_serialized_characters(serialized: &str) -> Vec<TerminalCharacter> {
+    let mut grid = Grid::new(
+        1,
+        80,
+        Rc::new(RefCell::new(Palette::default())),
+        Rc::new(RefCell::new(HashMap::new())),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        Rc::new(RefCell::new(None)),
+        Rc::new(RefCell::new(SixelImageStore::default())),
+        Rc::new(RefCell::new(KittyImageStore::default())),
+        Style::default(),
+        false,
+        true,
+        true,
+        true,
+        false,
+    );
+    vte::Parser::new().advance(&mut grid, serialized.as_bytes());
+    grid.as_character_lines().remove(0)
+}
+
+#[test]
+fn serialized_output_preserves_all_bold_and_dim_transitions() {
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(1),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        None,
+    );
+    let intensities = [
+        (AnsiCode::Reset, AnsiCode::Reset),
+        (AnsiCode::On, AnsiCode::Reset),
+        (AnsiCode::Reset, AnsiCode::On),
+        (AnsiCode::On, AnsiCode::On),
+    ];
+    let mut characters = vec![];
+    let mut expected = vec![];
+    for from in intensities {
+        for to in intensities {
+            for (character, (bold, dim)) in [('a', from), ('b', to)] {
+                let styles = RESET_STYLES.bold(Some(bold)).dim(Some(dim));
+                characters.push(TerminalCharacter::new_styled(character, styles.into()));
+                expected.push((character, bold, dim));
+            }
+        }
+    }
+    output
+        .add_character_chunks_to_client(1, vec![CharacterChunk::new(characters, 0, 0)], None)
+        .unwrap();
+    let serialized = output.serialize().unwrap().remove(&1).unwrap();
+    let parsed = parse_serialized_characters(&serialized);
+    for (index, (character, bold, dim)) in expected.into_iter().enumerate() {
+        assert_eq!(parsed[index].character, character);
+        assert_eq!(parsed[index].styles.bold, Some(bold), "span {index}");
+        assert_eq!(parsed[index].styles.dim, Some(dim), "span {index}");
+    }
+}
+
+#[test]
+fn serialized_dimmed_background_remains_faint_after_bold_spans() {
+    let mut output = create_test_output();
+    output.add_clients(
+        &create_test_clients(1),
+        Rc::new(RefCell::new(LinkHandler::new())),
+        None,
+    );
+    output.set_background_dimming(1, Some(2));
+    let characters = "aBcdEf"
+        .chars()
+        .map(|character| {
+            let bold = if character.is_uppercase() {
+                AnsiCode::On
+            } else {
+                AnsiCode::Reset
+            };
+            TerminalCharacter::new_styled(character, RESET_STYLES.bold(Some(bold)).into())
+        })
+        .collect();
+    output
+        .add_character_chunks_to_client(1, vec![CharacterChunk::new(characters, 0, 0)], None)
+        .unwrap();
+    let serialized = output.serialize().unwrap().remove(&1).unwrap();
+    let parsed = parse_serialized_characters(&serialized);
+    for (index, character) in "aBcdEf".chars().enumerate() {
+        assert_eq!(parsed[index].character, character);
+        assert_eq!(parsed[index].styles.dim, Some(AnsiCode::On), "span {index}");
+        assert_eq!(
+            parsed[index].styles.bold,
+            Some(if character.is_uppercase() {
+                AnsiCode::On
+            } else {
+                AnsiCode::Reset
+            }),
+            "span {index}",
+        );
+    }
 }
 
 #[test]

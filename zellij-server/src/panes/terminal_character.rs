@@ -368,6 +368,11 @@ impl CharacterStyles {
         if self.dim != new_styles.dim {
             diff.dim = new_styles.dim;
         }
+        // SGR 22 clears both intensities, so carry the full target pair when resetting either.
+        if diff.bold == Some(AnsiCode::Reset) || diff.dim == Some(AnsiCode::Reset) {
+            diff.bold = new_styles.bold;
+            diff.dim = new_styles.dim;
+        }
         if self.italic != new_styles.italic {
             diff.italic = new_styles.italic;
         }
@@ -687,16 +692,15 @@ impl Display for CharacterStyles {
                 _ => {},
             }
         }
-        if let Some(ansi_code) = self.bold {
-            match ansi_code {
-                AnsiCode::On => {
-                    write!(f, "\u{1b}[1m")?;
-                },
-                AnsiCode::Reset => {
-                    write!(f, "\u{1b}[22m")?;
-                },
-                _ => {},
-            }
+        // Reset both intensities before applying either: SGR 22 clears bold and dim together.
+        if self.bold == Some(AnsiCode::Reset) || self.dim == Some(AnsiCode::Reset) {
+            write!(f, "\u{1b}[22m")?;
+        }
+        if self.bold == Some(AnsiCode::On) {
+            write!(f, "\u{1b}[1m")?;
+        }
+        if self.dim == Some(AnsiCode::On) {
+            write!(f, "\u{1b}[2m")?;
         }
         if let Some(ansi_code) = self.underline {
             match ansi_code {
@@ -728,21 +732,6 @@ impl Display for CharacterStyles {
             }
         }
 
-        if let Some(ansi_code) = self.dim {
-            match ansi_code {
-                AnsiCode::On => {
-                    write!(f, "\u{1b}[2m")?;
-                },
-                AnsiCode::Reset => {
-                    write!(f, "\u{1b}[22m")?;
-                    // ⬑ this SGR also clears bold, so reapply it
-                    if let Some(AnsiCode::On) = self.bold {
-                        write!(f, "\u{1b}[1m")?;
-                    }
-                },
-                _ => {},
-            }
-        }
         if let Some(ansi_code) = self.italic {
             match ansi_code {
                 AnsiCode::On => {
