@@ -9,6 +9,8 @@ pub enum TerminalColorUpdate {
     Ansi(Vec<(usize, String)>),
     Truecolor(bool),
     ResetPalette,
+    KittyGraphics(bool),
+    CellPixels(Option<[usize; 2]>),
     Batch {
         metadata: zellij_utils::ipc::TerminalColorsUpdate,
         ansi: Vec<(usize, String)>,
@@ -19,6 +21,8 @@ pub enum TerminalColorUpdate {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TerminalColors {
     truecolor: bool,
+    kitty_graphics: bool,
+    cell_pixels: Option<[usize; 2]>,
     foreground: Option<[u8; 3]>,
     background: Option<[u8; 3]>,
     ansi: [Option<[u8; 3]>; 16],
@@ -27,6 +31,12 @@ pub struct TerminalColors {
 impl TerminalColors {
     pub fn update(&mut self, update: TerminalColorUpdate) -> bool {
         match update {
+            TerminalColorUpdate::KittyGraphics(value) => {
+                std::mem::replace(&mut self.kitty_graphics, value) != value
+            },
+            TerminalColorUpdate::CellPixels(value) => {
+                std::mem::replace(&mut self.cell_pixels, value) != value
+            },
             TerminalColorUpdate::Batch { metadata, ansi } => {
                 // A reset+replacement is atomic to consumers. Retain the small
                 // fixed-size previous value only when needed to dedupe it.

@@ -6781,6 +6781,29 @@ fn kitty_cursor_advances_after_display() {
 }
 
 #[test]
+fn plugin_graphics_frames_keep_cursor_order_and_reuse_uploaded_images() {
+    use crate::panes::plugin_pane::advance_plugin_frame;
+    let (mut grid, _store) = new_kitty_grid(20, 40);
+    let mut parser = vte::Parser::new();
+    advance_plugin_frame(&mut parser, &mut grid, b"\x1b[3;5H\x1b_Ga=t,f=32,s=1,v=1,i=1,q=2;/////w==\x1b\\\x1b_Ga=p,i=1,c=2,r=1,C=1,q=2\x1b\\  ");
+    assert_eq!(grid.kitty_placement_count(), 1);
+    let (x, y, _) = grid.cursor_coordinates().unwrap();
+    assert_eq!((x, y), (6, 2));
+    grid.delete_viewport_and_scroll();
+    grid.reset_cursor_position();
+    grid.render_full_viewport();
+    advance_plugin_frame(&mut parser, &mut grid, b"\x1b_Ga=d,d=a,q=2\x1b\\\x1b[2;3H\x1b_Ga=p,i=1,c=2,r=1,C=1,q=2\x1b\\  ");
+    assert_eq!(grid.kitty_placement_count(), 1);
+    let (x, y, _) = grid.cursor_coordinates().unwrap();
+    assert_eq!((x, y), (4, 1));
+    let (_, _, _, images) = grid.render(0, 0, &Style::default()).unwrap().unwrap();
+    assert_eq!(images.len(), 1);
+    assert_eq!((images[0].cell_x, images[0].cell_y), (2, 1));
+    advance_plugin_frame(&mut parser, &mut grid, b"\x1b_Ga=d,d=a,q=2\x1b\\");
+    assert_eq!(grid.kitty_placement_count(), 0);
+}
+
+#[test]
 fn kitty_cursor_unmoved_with_c1() {
     let (mut grid, _kitty_image_store) = new_kitty_grid(20, 40);
     let mut vte_parser = vte::Parser::new();

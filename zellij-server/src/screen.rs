@@ -1565,6 +1565,7 @@ pub(crate) struct Screen {
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
     mode_info: BTreeMap<ClientId, ModeInfo>,
     terminal_colors: BTreeMap<ClientId, crate::terminal_colors::TerminalColors>,
+    client_pixel_dimensions: BTreeMap<ClientId, PixelDimensions>,
     default_mode_info: ModeInfo, // TODO: restructure ModeInfo to prevent this duplication
     style: Style,
     pane_frame_style: PaneFrameStyle,
@@ -1830,6 +1831,7 @@ impl Screen {
             pane_history: BTreeMap::new(),
             mode_info: BTreeMap::new(),
             terminal_colors: BTreeMap::new(),
+            client_pixel_dimensions: BTreeMap::new(),
             default_mode_info: mode_info,
             pane_frame_style,
             auto_layout,
@@ -5490,6 +5492,7 @@ impl Screen {
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
         self.terminal_colors.remove(&client_id);
+        self.client_pixel_dimensions.remove(&client_id);
         let _ = self.bus.senders.send_to_server(
             ServerInstruction::SetClipboardPasteMode(client_id, None),
         );
@@ -10591,6 +10594,29 @@ pub(crate) fn screen_thread_main(
                 }
             },
             ScreenInstruction::TerminalPixelDimensions(client_id, pixel_dimensions) => {
+                // Publish dimensions from this client only. The shared grid's cell size
+                // may belong to another attachment and must never size its SVGs.
+                let dimensions = screen.client_pixel_dimensions.entry(client_id).or_default();
+                dimensions.merge(pixel_dimensions);
+                // A fresh text-area report invalidates an older explicit cell report.
+                if pixel_dimensions.text_area_size.is_some()
+                    && pixel_dimensions.character_cell_size.is_none()
+                {
+                    dimensions.character_cell_size = None;
+                }
+                let cell = dimensions.character_cell_size.or_else(|| {
+                    let area = dimensions.text_area_size?;
+                    let size = screen.client_sizes.get(&client_id)?;
+                    (size.cols > 0 && size.rows > 0).then(|| SizeInPixels {
+                        width: area.width / size.cols,
+                        height: area.height / size.rows,
+                    })
+                });
+                let cell = cell.filter(|cell| cell.width > 0 && cell.height > 0)
+                    .map(|cell| [cell.width, cell.height]);
+                screen.update_client_terminal_colors(
+                    client_id, crate::terminal_colors::TerminalColorUpdate::CellPixels(cell),
+                )?;
                 let character_cell_size_changed =
                     screen.update_pixel_dimensions(client_id, pixel_dimensions);
                 if character_cell_size_changed {
@@ -10614,6 +10640,12 @@ pub(crate) fn screen_thread_main(
                 supported,
             } => {
                 screen.update_kitty_graphics_support(client_id, supported);
+                screen.update_client_terminal_colors(
+                    client_id,
+                    crate::terminal_colors::TerminalColorUpdate::KittyGraphics(
+                        supported && screen.support_kitty_graphics_protocol,
+                    ),
+                )?;
             },
             ScreenInstruction::SetSixelSupport {
                 client_id,

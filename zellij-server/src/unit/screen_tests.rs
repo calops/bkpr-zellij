@@ -14887,6 +14887,33 @@ fn clipboard_cancellation_retires_only_its_owner_without_inventing_contents() {
 }
 
 #[test]
+fn graphics_metadata_is_client_scoped_and_survives_palette_reset() {
+    use crate::terminal_colors::TerminalColorUpdate;
+    let (mut screen, capture) = create_new_screen_with_theme_capture(Size { cols: 80, rows: 24 });
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::KittyGraphics(true)).unwrap();
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::CellPixels(Some([9, 18]))).unwrap();
+    screen.update_client_terminal_colors(2, TerminalColorUpdate::CellPixels(Some([12, 24]))).unwrap();
+    let mut updates = Vec::new();
+    while let Ok((instruction, _)) = capture.plugin_rx.try_recv() {
+        if let PluginInstruction::Update(events) = instruction {
+            updates.extend(events);
+        }
+    }
+    assert_eq!(updates.len(), 3);
+    assert_eq!(updates.iter().map(|(_, client, _)| *client).collect::<Vec<_>>(), vec![Some(1), Some(1), Some(2)]);
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::ResetPalette).unwrap();
+    for (client, size) in [(1, [9, 18]), (2, [12, 24])] {
+        let value = serde_json::to_value(&screen.terminal_colors[&client]).unwrap();
+        assert_eq!(value["cell_pixels"], serde_json::json!(size));
+        assert_eq!(value["kitty_graphics"], client == 1);
+    }
+    // An identical capability report causes no redundant publication.
+    while capture.plugin_rx.try_recv().is_ok() {}
+    screen.update_client_terminal_colors(1, TerminalColorUpdate::KittyGraphics(true)).unwrap();
+    assert!(capture.plugin_rx.try_recv().is_err());
+}
+
+#[test]
 fn terminal_palette_updates_and_bootstrap_are_client_scoped() {
     use crate::terminal_colors::TerminalColorUpdate;
     use zellij_utils::data::EventType;

@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::output::{CharacterChunk, KittyImageChunk, SixelImageChunk};
 use crate::panes::{
     grid::Grid,
-    kitty_graphics::KittyImageStore,
+    kitty_graphics::{InterceptorResult, KittyApcInterceptor, KittyImageStore},
     sixel::SixelImageStore,
     terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END},
     LinkHandler, PaneId,
@@ -35,6 +35,25 @@ use zellij_utils::{
     pane_size::PaneGeom,
     shared::make_terminal_title,
 };
+
+/// Plugin renders are complete frames. Share the bounded Kitty decoder with
+/// terminal panes, preserving the ordering of text/cursor commands and images.
+pub(super) fn advance_plugin_frame(parser: &mut vte::Parser, grid: &mut Grid, bytes: &[u8]) {
+    let mut interceptor = KittyApcInterceptor::new();
+    let mut text = Vec::with_capacity(bytes.len());
+    for byte in bytes {
+        match interceptor.advance(*byte) {
+            InterceptorResult::Forward(bytes) => text.extend_from_slice(bytes.as_slice()),
+            InterceptorResult::Swallow => {},
+            InterceptorResult::Captured(command) => {
+                parser.advance(grid, &text);
+                text.clear();
+                grid.handle_kitty_apc(&command);
+            },
+        }
+    }
+    parser.advance(grid, &text);
+}
 
 macro_rules! style {
     ($fg:expr) => {
@@ -251,7 +270,7 @@ impl Pane for PluginPane {
             .entry(client_id)
             .or_insert_with(|| vte::Parser::new());
 
-        vte_parser.advance(grid, &vte_bytes);
+        advance_plugin_frame(vte_parser, grid, &vte_bytes);
 
         self.should_render.insert(client_id, true);
     }
