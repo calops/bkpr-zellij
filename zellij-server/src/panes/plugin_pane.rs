@@ -411,11 +411,12 @@ impl Pane for PluginPane {
         }
         if !self.borderless {
             for (client_id, frame) in &self.frame {
-                output.add_character_chunks_to_client(
+                let chunks = output.recessed_frame_region(
                     *client_id,
-                    frame.render_region(region)?,
-                    z_index,
+                    self.pid(),
+                    || frame.render_region(region),
                 )?;
+                output.add_character_chunks_to_client(*client_id, chunks, z_index)?;
             }
         }
         Ok(())

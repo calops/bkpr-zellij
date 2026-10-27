@@ -29,6 +29,13 @@ pub struct TerminalColors {
 }
 
 impl TerminalColors {
+    pub(crate) fn frame_colors(&self) -> Option<([usize; 2], [u8; 3], [u8; 3])> {
+        if !self.truecolor || !self.kitty_graphics {
+            return None;
+        }
+        Some((self.cell_pixels?, self.foreground?, self.background?))
+    }
+
     pub fn update(&mut self, update: TerminalColorUpdate) -> bool {
         match update {
             TerminalColorUpdate::KittyGraphics(value) => {

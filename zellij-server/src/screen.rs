@@ -1565,6 +1565,7 @@ pub(crate) struct Screen {
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
     mode_info: BTreeMap<ClientId, ModeInfo>,
     terminal_colors: BTreeMap<ClientId, crate::terminal_colors::TerminalColors>,
+    recessed_frames: Rc<RefCell<crate::output::recessed_frames::FrameCache>>,
     client_pixel_dimensions: BTreeMap<ClientId, PixelDimensions>,
     default_mode_info: ModeInfo, // TODO: restructure ModeInfo to prevent this duplication
     style: Style,
@@ -1831,6 +1832,7 @@ impl Screen {
             pane_history: BTreeMap::new(),
             mode_info: BTreeMap::new(),
             terminal_colors: BTreeMap::new(),
+            recessed_frames: Rc::new(RefCell::new(Default::default())),
             client_pixel_dimensions: BTreeMap::new(),
             default_mode_info: mode_info,
             pane_frame_style,
@@ -2895,6 +2897,11 @@ impl Screen {
     ) -> Result<()> {
         let colors = self.terminal_colors.entry(client_id).or_default();
         if colors.update(update) {
+            if self.recessed_frames.borrow_mut().update(client_id, colors) {
+                for tab in self.tabs.values_mut() {
+                    tab.set_force_render();
+                }
+            }
             self.bus.senders.send_to_plugin(PluginInstruction::Update(vec![(
                 None, Some(client_id), colors.event(),
             )]))?;
@@ -4580,6 +4587,7 @@ impl Screen {
                 self.sixel_host_capabilities.clone(),
             );
 
+            output.recessed_frames = Some(self.recessed_frames.clone());
             output.collect_ansi_pane_contents =
                 self.pane_render_subscribers.values().any(|s| s.ansi);
 
@@ -5492,6 +5500,7 @@ impl Screen {
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
         self.terminal_colors.remove(&client_id);
+        self.recessed_frames.borrow_mut().remove_client(client_id);
         self.client_pixel_dimensions.remove(&client_id);
         let _ = self.bus.senders.send_to_server(
             ServerInstruction::SetClipboardPasteMode(client_id, None),
