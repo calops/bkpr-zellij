@@ -21,10 +21,10 @@ away from its foreground by six percent of their relative luminance difference.
 The pane interior retains the terminal background. A single integer pixel
 thickness is used for every edge: half the cell width, rounded up, bounded to
 leave one pixel for the interior on short cells. Corners span two columns of
-the top/bottom frame strip for a larger curve with mirrored sample coordinates,
-including for odd cell dimensions. Excess cell height becomes darker outer
-margin above/below the pane, keeping the light inner inset as small as on its
-sides. The vertical corner radius fits that remaining inner strip. All pixels fit inside
+the top/bottom frame strip for a larger circular curve with mirrored sample
+coordinates, including for odd cell dimensions. Horizontal and vertical edges
+use exactly the same pixel thickness. Spare frame-row height stays
+content-colored, since terminal text cannot occupy fractional rows. All pixels fit inside
 reserved frame cells; PTY geometry, input and hit testing remain native.
 
 ## Integration
@@ -37,7 +37,7 @@ sidebar; terminal titles and application content are unaffected. Cursor handling
 focus, input and floating-pane clipping remain native.
 Watcher output, which does not serialize Kitty images, retains ordinary frames.
 Eight edge/corner tiles share one RGBA atlas. Cache keys include cell dimensions,
-background/surface colors, thickness, radius and outer margin. Each key is rasterized once
+background/surface colors, thickness and radius. Each key is rasterized once
 and held by a reference in the native image store. Earlier resolutions and
 palettes remain available when clients change font size or theme. The image
 store also caches base64, while the existing per-client host state uploads each

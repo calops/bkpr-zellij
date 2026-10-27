@@ -19,7 +19,6 @@ struct TileKey {
     surface: [u8; 3],
     thickness: usize,
     radius: usize,
-    vertical_margin: usize,
 }
 
 #[derive(Debug, Default)]
@@ -58,9 +57,6 @@ impl FrameCache {
                     surface: surface(foreground, background),
                     thickness,
                     radius,
-                    // A tall terminal cell should add outer surface margin,
-                    // rather than extra background padding inside the pane.
-                    vertical_margin: height.saturating_sub(width),
                 })
             });
         if let Some(key) = next {
@@ -136,15 +132,13 @@ fn rasterize(key: TileKey) -> Vec<u8> {
                         }
                         let t = key.thickness as f64;
                         let r = key.radius as f64;
-                        let top = t + key.vertical_margin as f64;
-                        let vertical_radius = r.min(key.height as f64 - top);
                         let content = match tile {
-                            1 | 6 => py >= top,
+                            1 | 6 => py >= t,
                             3 | 4 => px >= t,
                             _ => {
-                                let dx = (t + r - px).max(0.0) / r;
-                                let dy = (top + vertical_radius - py).max(0.0) / vertical_radius;
-                                px >= t && py >= top && dx * dx + dy * dy <= 1.0
+                                let dx = (t + r - px).max(0.0);
+                                let dy = (t + r - py).max(0.0);
+                                px >= t && py >= t && dx * dx + dy * dy <= r * r
                             },
                         };
                         inside += u16::from(content);
