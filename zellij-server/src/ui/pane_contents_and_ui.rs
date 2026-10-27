@@ -427,10 +427,8 @@ impl<'a> PaneContentsAndUi<'a> {
             .frame_geom_override
             .unwrap_or_else(|| self.pane.current_geom());
         let mut frame = self
-            .output
-            .render_recessed_frame(client_id, frame_geom, recessed, || {
-                self.pane.render_frame(client_id, frame_params, client_mode)
-            })
+            .pane
+            .render_frame(client_id, frame_params, client_mode)
             .with_context(err_context)?;
         self.output.recessed_pane_frame(
             client_id,

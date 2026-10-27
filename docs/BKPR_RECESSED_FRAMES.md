@@ -19,22 +19,22 @@ ui {
 The surface matches Bkpr's sidebar: the reported terminal background is shifted
 away from its foreground by six percent of their relative luminance difference.
 The pane interior retains the terminal background. A single integer pixel
-thickness is used for every edge. Corners use a circular curve with mirrored
-sample coordinates, including for odd cell dimensions. All pixels fit inside
+thickness is used for every edge: half the cell width, rounded up, bounded to
+leave one pixel for the interior on short cells. Corners span two columns of
+the top/bottom frame strip for a larger circular curve with mirrored sample
+coordinates, including for odd cell dimensions. All pixels fit inside
 reserved frame cells; PTY geometry, input and hit testing remain native.
 
 ## Integration
 
 The implementation lives in `zellij-server/src/output/recessed_frames.rs`.
 Small hooks connect terminal metadata, shared frame rendering, partial frame
-repaints and final output serialization. Existing frame titles, focus colors,
-cursor handling and floating-pane clipping remain in their current paths.
+repaints and final output serialization. Recessed frames clear native frame
+text, including the title/CWD and bottom hover hints. Labels remain in the
+sidebar; terminal titles and application content are unaffected. Cursor handling,
+focus, input and floating-pane clipping remain native.
 Watcher output, which does not serialize Kitty images, retains ordinary frames.
-Native boundary tokens are blanked inside a scoped frame-builder context;
-arbitrary characters in pane titles are preserved. The context restores itself
-on scope exit, including unwinding, and never wraps terminal output parsing.
-
-Eight one-cell tiles share one RGBA atlas. Cache keys include cell dimensions,
+Eight edge/corner tiles share one RGBA atlas. Cache keys include cell dimensions,
 background/surface colors, thickness and radius. Each key is rasterized once
 and held by a reference in the native image store. Earlier resolutions and
 palettes remain available when clients change font size or theme. The image

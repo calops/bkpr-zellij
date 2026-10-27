@@ -1,56 +1,11 @@
-//! Pixel-aligned rounded frames. Geometry, focus, titles and input remain native.
+//! Pixel-aligned rounded frames. Geometry, focus and input remain native.
 //!
-//! Eight one-cell tiles share an atlas. The cache owns one store reference per
-//! atlas, so ordinary image eviction cannot cause a second rasterization. The
+//! Eight edge/corner tiles share an atlas. Corners span two columns. The cache
+//! owns one store reference per atlas, preventing repeated rasterization. The
 //! existing Kitty serializer caches base64 and uploads independently per client.
 use super::*;
 use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
-use std::cell::Cell;
-
-thread_local! {
-    // Scoped to native frame construction, never application/plugin parsing.
-    static PIXEL_FRAME: Cell<bool> = const { Cell::new(false) };
-}
-
-fn with_pixel_frame<T>(enabled: bool, render: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            PIXEL_FRAME.with(|flag| flag.set(self.0));
-        }
-    }
-    let _restore = Restore(PIXEL_FRAME.with(|flag| flag.replace(enabled)));
-    render()
-}
-
-/// Called at the native frame builder's glyph source. Padded title strings,
-/// including user titles containing box drawings, pass through unchanged.
-pub(crate) fn frame_glyph(glyph: &str) -> &str {
-    if PIXEL_FRAME.with(Cell::get)
-        && matches!(
-            glyph,
-            "─" | "│"
-                | "┌"
-                | "┐"
-                | "└"
-                | "┘"
-                | "╭"
-                | "╮"
-                | "╰"
-                | "╯"
-                | "┤"
-                | "├"
-                | "┬"
-                | "┴"
-                | "┼"
-        )
-    {
-        " "
-    } else {
-        glyph
-    }
-}
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 // Grid placement IDs grow from one. Reserve the upper half for native frames.
@@ -91,13 +46,17 @@ impl FrameCache {
                 if !(2..=512).contains(&width) || !(2..=512).contains(&height) {
                     return None;
                 }
+                // Round half a cell to whole pixels once for all four edges.
+                // Let the curve fill the remaining corner area without seams.
+                let thickness = width.div_ceil(2).min(height - 1);
+                let radius = (width * 2 - thickness).min(height - thickness);
                 Some(TileKey {
                     width,
                     height,
                     background,
                     surface: surface(foreground, background),
-                    thickness: (width.min(height) / 4).max(1),
-                    radius: width.min(height) / 2,
+                    thickness,
+                    radius,
                 })
             });
         if let Some(key) = next {
@@ -116,14 +75,14 @@ impl FrameCache {
         if let Some(id) = self.atlases.get(&key) {
             return Some(*id);
         }
-        let bytes = key.width * key.height * 8 * 4;
+        let bytes = key.width * 2 * key.height * 8 * 4;
         if self.bytes + bytes > MAX_BYTES {
             return None;
         }
         let id = store
             .store_image(DecodedImage {
                 bytes: rasterize(key),
-                width: (key.width * 8) as u32,
+                width: (key.width * 2 * 8) as u32,
                 height: key.height as u32,
                 format: KittyFormat::Rgba32,
             })
@@ -155,17 +114,18 @@ fn surface(foreground: [u8; 3], background: [u8; 3]) -> [u8; 3] {
 // TL, top, TR, left, right, BL, bottom, BR. Mirror sample coordinates,
 // rather than rounding two independent curves on odd-sized cells.
 fn rasterize(key: TileKey) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(key.width * key.height * 8 * 4);
+    let stride = key.width * 2;
+    let mut rgba = Vec::with_capacity(stride * key.height * 8 * 4);
     for y in 0..key.height {
         for tile in 0..8 {
-            for x in 0..key.width {
+            for x in 0..stride {
                 let mut inside = 0;
                 for sy in 0..4 {
                     for sx in 0..4 {
                         let mut px = x as f64 + (sx as f64 + 0.5) / 4.0;
                         let mut py = y as f64 + (sy as f64 + 0.5) / 4.0;
                         if matches!(tile, 2 | 4 | 7) {
-                            px = key.width as f64 - px;
+                            px = stride as f64 - px;
                         }
                         if matches!(tile, 5..=7) {
                             py = key.height as f64 - py;
@@ -207,23 +167,13 @@ impl Output {
         enabled: bool,
     ) -> Option<(TileKey, InternalImageId)> {
         let cache = self.recessed_frames.as_ref()?;
-        let key = (enabled && geom.cols.as_usize() >= 3 && geom.rows.as_usize() >= 3)
+        let key = (enabled && geom.cols.as_usize() >= 4 && geom.rows.as_usize() >= 3)
             .then(|| cache.borrow().clients.get(&client_id).copied())
             .flatten()?;
         let id = cache
             .borrow_mut()
             .atlas(key, &mut self.kitty_image_store.borrow_mut())?;
         Some((key, id))
-    }
-
-    pub(crate) fn render_recessed_frame<T>(
-        &self,
-        client_id: ClientId,
-        geom: PaneGeom,
-        enabled: bool,
-        render: impl FnOnce() -> T,
-    ) -> T {
-        with_pixel_frame(self.frame_atlas(client_id, geom, enabled).is_some(), render)
     }
 
     pub(crate) fn recessed_frame_region(
@@ -239,7 +189,7 @@ impl Output {
                 .get(&(client_id, pane_id))
                 .cloned()
         });
-        let mut chunks = with_pixel_frame(request.is_some(), render)?;
+        let mut chunks = render()?;
         if let Some(mut request) = request {
             if let Some((key, _)) = request.atlas {
                 decorate_characters(&mut chunks, key);
@@ -350,22 +300,22 @@ impl Output {
             let horizontal = (0..width).flat_map(|x| [(x, 0), (x, height - 1)]);
             let vertical = (1..height - 1).flat_map(|y| [(0, y), (width - 1, y)]);
             for (x, y) in horizontal.chain(vertical) {
-                let tile = match (x, y) {
-                    (0, 0) => 0,
-                    (_, 0) if x + 1 == width => 2,
-                    (_, 0) => 1,
-                    (0, _) if y + 1 == height => 5,
-                    (_, _) if y + 1 == height && x + 1 == width => 7,
-                    (_, _) if y + 1 == height => 6,
-                    (0, _) => 3,
-                    (_, _) if x + 1 == width => 4,
+                let (tile, column) = match (x, y) {
+                    (_, 0) if x < 2 => (0, x),
+                    (_, 0) if x + 2 >= width => (2, x + 2 - width),
+                    (_, 0) => (1, 0),
+                    (_, _) if y + 1 == height && x < 2 => (5, x),
+                    (_, _) if y + 1 == height && x + 2 >= width => (7, x + 2 - width),
+                    (_, _) if y + 1 == height => (6, 0),
+                    (0, _) => (3, 0),
+                    (_, _) if x + 1 == width => (4, 1),
                     _ => continue,
                 };
                 frame_images.push(KittyImageChunk {
                     cell_x: geom.x + x,
                     cell_y: geom.y + y,
                     internal_image_id: id,
-                    source_px_x: tile * key.width,
+                    source_px_x: (tile * 2 + column) * key.width,
                     source_px_y: 0,
                     source_px_width: key.width,
                     source_px_height: key.height,
@@ -403,11 +353,15 @@ impl Output {
 }
 
 fn decorate_characters(chunks: &mut [CharacterChunk], key: TileKey) {
+    let blank = TerminalCharacter::new_styled(
+        ' ',
+        DEFAULT_STYLES
+            .background(Some(AnsiCode::RgbCode(key.background.into())))
+            .into(),
+    );
     for chunk in chunks {
-        for character in &mut chunk.terminal_characters {
-            character.styles.update(|style| {
-                style.background = Some(AnsiCode::RgbCode(key.background.into()));
-            });
-        }
+        // Labels live in the sidebar. Clear complete physical columns, including
+        // wide titles and hover hints, so all edges stay uninterrupted surfaces.
+        chunk.terminal_characters = vec![blank.clone(); chunk.width()];
     }
 }

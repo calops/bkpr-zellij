@@ -31,7 +31,6 @@ fn styled_characters(
 }
 
 fn foreground_color(characters: &str, color: Option<PaletteColor>) -> Vec<TerminalCharacter> {
-    let characters = crate::output::recessed_frames::frame_glyph(characters);
     styled_characters(characters, |styles| {
         styles.bold = Some(AnsiCode::On);
         if let Some(palette_color) = color {
