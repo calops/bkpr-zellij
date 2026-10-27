@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+pub(crate) mod recessed_frames;
+
 use crate::panes::Row;
 
 use crate::panes::Selection;
@@ -628,6 +630,8 @@ fn serialize_kitty_frame(kitty_input: KittyFrameInput) -> Result<String> {
 
 #[derive(Clone, Debug, Default)]
 pub struct Output {
+    pub(crate) recessed_frames: Option<Rc<RefCell<recessed_frames::FrameCache>>>,
+    recessed_frame_requests: HashMap<(ClientId, PaneId), recessed_frames::FrameRequest>,
     pre_vte_instructions: HashMap<ClientId, Vec<String>>,
     post_vte_instructions: HashMap<ClientId, Vec<String>>,
     client_character_chunks: HashMap<ClientId, Vec<CharacterChunk>>,
@@ -895,6 +899,7 @@ impl Output {
         self.client_kitty_visible_panes.insert(client_id, pane_ids);
     }
     pub fn serialize(&mut self) -> Result<HashMap<ClientId, String>> {
+        self.finish_recessed_frames();
         let err_context = || "failed to serialize output to clients".to_string();
 
         let mut serialized_render_instructions = HashMap::new();

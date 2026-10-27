@@ -418,11 +418,27 @@ impl<'a> PaneContentsAndUi<'a> {
             }
         };
 
-        if let Some((mut frame_terminal_characters, vte_output)) = self
+        let recessed = self.style.rounded_corners
+            && self.should_draw_pane_frames
+            && !self.pane.borderless()
+            && !self.omit_title
+            && !pane_is_stacked;
+        let frame_geom = self
+            .frame_geom_override
+            .unwrap_or_else(|| self.pane.current_geom());
+        let mut frame = self
             .pane
             .render_frame(client_id, frame_params, client_mode)
-            .with_context(err_context)?
-        {
+            .with_context(err_context)?;
+        self.output.recessed_pane_frame(
+            client_id,
+            self.pane.pid(),
+            frame_geom,
+            recessed,
+            self.z_index,
+            frame.as_mut().map(|(characters, _)| characters),
+        );
+        if let Some((mut frame_terminal_characters, vte_output)) = frame {
             if self.frame_is_dimmed_for_client(client_id) {
                 dim_character_chunks(&mut frame_terminal_characters);
             }
