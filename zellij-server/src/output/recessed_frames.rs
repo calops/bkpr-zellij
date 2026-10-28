@@ -429,7 +429,10 @@ impl Output {
                     scaled_px: None,
                     placement_uid: FRAME_UID + (y * width + x) as u64,
                 };
-                if !key.compact || compact::clip_shared_cell(&mut image, geom, &neighbors, key) {
+                if !key.compact
+                    || (compact::align_horizontal_edge(&mut image, geom, &neighbors, key)
+                        && compact::clip_shared_cell(&mut image, geom, &neighbors, key))
+                {
                     frame_images.push(image);
                 }
             }

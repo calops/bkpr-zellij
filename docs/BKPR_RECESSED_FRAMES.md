@@ -18,6 +18,13 @@ shared left/top cell; the other pane gains its former right/bottom frame cell as
 actual PTY content. Frame geometry expands into the shared cell while content,
 cursor and mouse coordinates follow native content offsets.
 
+Visible horizontal strips match the unchanged vertical strip's cell-width in
+physical pixels. Outer horizontal edges move away from content by the cell-height
+minus cell-width difference; shared edges split that adjustment with complementary
+rounding, preserving an exact cell-width dark separator at odd pixel sizes.
+Translations crop the existing cached atlas instead of creating raster variants.
+The reserved one-row separator and native content geometry are unchanged.
+
 Shared spacing requires confirmed graphics metadata for every regular client.
 Unsupported attachments, stacks, small panes, reserved headers and fullscreen
 use ordinary native frame spacing. The prototype lives in `recessed_frames/compact.rs`
