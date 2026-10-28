@@ -114,6 +114,14 @@ pub(super) fn bevel_width(key: TileKey) -> f64 {
 }
 
 pub(super) fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3] {
+    let nx =
+        opening_distance(key, tile, px + 0.25, py) - opening_distance(key, tile, px - 0.25, py);
+    let ny =
+        opening_distance(key, tile, px, py + 0.25) - opening_distance(key, tile, px, py - 0.25);
+    bevel_normal(key, distance, nx, ny)
+}
+
+pub(super) fn bevel_normal(key: TileKey, distance: f64, nx: f64, ny: f64) -> [f64; 3] {
     // A narrow facet on the surrounding lip, not a halo. The recessed upper/
     // left face is shaded; the lower/right face catches the same upper-left
     // light responsible for the cast shadow inside the opening.
@@ -130,10 +138,6 @@ pub(super) fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) 
     }
     // The gradient of the actual circular mask supplies continuous normals
     // through the corners and identical lighting on straight edges.
-    let nx =
-        opening_distance(key, tile, px + 0.25, py) - opening_distance(key, tile, px - 0.25, py);
-    let ny =
-        opening_distance(key, tile, px, py + 0.25) - opening_distance(key, tile, px, py - 0.25);
     let length = nx.hypot(ny).max(f64::EPSILON);
     let orientation = if key.raised { 1.0 } else { -1.0 };
     let light =

@@ -22,7 +22,8 @@ impl FloatingPanes {
             let Some(config) = plugin.get_configuration() else {
                 continue;
             };
-            if config.inner().get("bkpr_surface").map(String::as_str) != Some("raised-outline") {
+            let style = config.inner().get("bkpr_surface").map(String::as_str);
+            if !matches!(style, Some("raised-outline" | "raised-joined")) {
                 continue;
             }
             let geom = pane.current_geom();
@@ -35,6 +36,14 @@ impl FloatingPanes {
                     .surface_presentation(client)
                     .cloned()
                     .unwrap_or_default();
+                if style == Some("raised-joined")
+                    && presentation.attachment.as_ref().is_none_or(|rect| {
+                        let area = self.display_area.borrow();
+                        rect.x + rect.columns > area.cols || rect.y + rect.rows > area.rows
+                    })
+                {
+                    continue;
+                }
                 changed |= output.register_raised_popup(client, *id, geom, layer + 1, presentation);
             }
             if changed {

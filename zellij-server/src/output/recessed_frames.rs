@@ -11,7 +11,10 @@ use crate::terminal_colors::TerminalColors;
 mod clipping;
 mod colors;
 pub(crate) mod compact;
+mod contour;
 mod depth;
+mod joined;
+mod patches;
 mod placements;
 pub(crate) mod raised;
 mod raster;
@@ -89,6 +92,11 @@ pub(crate) struct FrameCache {
     worker: Option<raster::Worker>,
     rasterizer: raster::Rasterizer,
     requested: HashSet<TileKey>,
+    patch_images: HashMap<patches::Key, patches::Images>,
+    patch_requested: HashSet<patches::Key>,
+    patch_rasterizer: patches::Rasterizer,
+    joined_regions: HashMap<(ClientId, PaneId), [usize; 8]>,
+    joined_layouts: std::collections::VecDeque<Rc<joined::Layout>>,
     bytes: usize,
 }
 
@@ -106,6 +114,7 @@ pub(super) struct FrameRequest {
     z_index: Option<usize>,
     changed: bool,
     atlas: Option<(TileKey, InternalImageId)>,
+    images_override: Option<Rc<Vec<KittyImageChunk>>>,
 }
 
 impl FrameCache {
@@ -149,6 +158,8 @@ impl FrameCache {
     pub(crate) fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
         self.accents.remove(&client_id);
+        self.joined_regions
+            .retain(|(client, _), _| *client != client_id);
         self.host_backgrounds.remove(&client_id);
         self.active_frames
             .retain(|(client, _), _| *client != client_id);
@@ -176,6 +187,10 @@ impl FrameCache {
             if let Some(key) = self.raised_key(client, accent) {
                 self.request(key);
             }
+        }
+        if let Some(mut key) = self.raised_key(client, None) {
+            key.background = colors::lift(key.background, key.foreground);
+            self.request(key);
         }
     }
 
@@ -227,17 +242,73 @@ impl FrameCache {
         Some(id)
     }
 
-    fn atlas(&mut self, key: TileKey, store: &mut KittyImageStore) -> Option<InternalImageId> {
+    fn poll(&mut self, store: &mut KittyImageStore) {
         let completed = self
             .worker
             .as_ref()
             .map(|worker| worker.completed())
             .unwrap_or_default();
-        for (key, prepared) in completed {
-            if let Some(prepared) = prepared {
-                self.install(key, prepared, store);
+        for result in completed {
+            match result {
+                raster::Completed::Atlas(key, Some(prepared)) => {
+                    self.install(key, prepared, store);
+                },
+                raster::Completed::Patch(key, Some(prepared)) => {
+                    self.install_patch(key, prepared, store);
+                },
+                _ => {},
             }
         }
+    }
+
+    fn install_patch(
+        &mut self,
+        key: patches::Key,
+        prepared: patches::Prepared,
+        store: &mut KittyImageStore,
+    ) -> Option<patches::Images> {
+        let body = store
+            .store_native_image(prepared.body.image, prepared.body.compressed)
+            .ok()?;
+        store.add_placement_ref(body);
+        let shadow =
+            match store.store_native_image(prepared.shadow.image, prepared.shadow.compressed) {
+                Ok(id) => id,
+                Err(_) => {
+                    store.remove_placement_ref(body);
+                    return None;
+                },
+            };
+        store.add_placement_ref(shadow);
+        let images = patches::Images { body, shadow };
+        self.patch_images.insert(key, images);
+        Some(images)
+    }
+
+    fn patch(
+        &mut self,
+        key: &patches::Key,
+        store: &mut KittyImageStore,
+    ) -> Option<patches::Images> {
+        if let Some(images) = self.patch_images.get(key) {
+            return Some(*images);
+        }
+        if self.patch_requested.contains(key) || self.bytes + key.bytes() > MAX_BYTES {
+            return None;
+        }
+        self.bytes += key.bytes();
+        self.patch_requested.insert(key.clone());
+        if let Some(worker) = &self.worker {
+            worker.queue_patch(key.clone());
+            None
+        } else {
+            let prepared = self.patch_rasterizer.prepare(key)?;
+            self.install_patch(key.clone(), prepared, store)
+        }
+    }
+
+    fn atlas(&mut self, key: TileKey, store: &mut KittyImageStore) -> Option<InternalImageId> {
+        self.poll(store);
         if let Some(id) = self.atlases.get(&key) {
             return Some(*id);
         }
@@ -399,6 +470,7 @@ impl Output {
             z_index,
             changed,
             atlas,
+            images_override: None,
         };
         if atlas.is_some() {
             cache
@@ -499,7 +571,9 @@ impl Output {
                     })
                     .map(|cached| cached.images.clone())
             });
-            let frame_images = if let Some(images) = cached {
+            let frame_images = if let Some(images) = request.images_override.clone() {
+                images
+            } else if let Some(images) = cached {
                 images
             } else {
                 let mut frame_images = vec![];
@@ -536,7 +610,7 @@ impl Output {
                 frame_images
             };
             let positioned;
-            let frame_images = if key.raised {
+            let frame_images = if key.raised && request.images_override.is_none() {
                 positioned = frame_images
                     .iter()
                     .filter_map(|image| raised::position(*image, key))

@@ -21,6 +21,14 @@ fn luminance(rgb: [f64; 3]) -> f64 {
     rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722
 }
 
+// Lift raised details toward the confirmed terminal foreground, preserving
+// the palette's hue and its light/dark contrast direction.
+pub(super) fn lift(background: [u8; 3], foreground: [u8; 3]) -> [u8; 3] {
+    std::array::from_fn(|channel| {
+        encoded(linear(background[channel]) * 0.94 + linear(foreground[channel]) * 0.06)
+    })
+}
+
 pub(super) fn tint(background: [u8; 3], accent: [u8; 3]) -> [u8; 3] {
     let base = background.map(linear);
     let accent = accent.map(linear);

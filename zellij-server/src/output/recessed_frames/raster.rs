@@ -14,7 +14,7 @@ pub(super) struct EncodedImage {
 }
 
 impl EncodedImage {
-    fn new(image: DecodedImage) -> Option<Self> {
+    pub(super) fn new(image: DecodedImage) -> Option<Self> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&image.bytes).ok()?;
         let compressed = STANDARD.encode(encoder.finish().ok()?);
@@ -34,6 +34,7 @@ pub(super) struct Rasterizer {
     // alpha. Keep more precision than the final eight-bit RGBA transport.
     basis: HashMap<TileKey, Vec<[u16; 4]>>,
     bytes: usize,
+    patches: super::patches::Rasterizer,
 }
 
 impl Rasterizer {
@@ -55,23 +56,7 @@ impl Rasterizer {
             self.basis.insert(geometry, basis(geometry));
             self.bytes += bytes;
         }
-        let highlight: [u8; 3] =
-            std::array::from_fn(|c| key.foreground[c].max(key.background[c]).max(key.surface[c]));
-        let mut bytes = Vec::with_capacity(width * height * 4);
-        for weights in &self.basis[&geometry] {
-            let alpha = (f64::from(weights[3]) * 255.0 / 65535.0).round() as u8;
-            if alpha == 0 {
-                bytes.extend_from_slice(&[0; 4]);
-                continue;
-            }
-            for channel in 0..3 {
-                let value = f64::from(weights[0]) * f64::from(key.background[channel])
-                    + f64::from(weights[1]) * f64::from(key.surface[channel])
-                    + f64::from(weights[2]) * f64::from(highlight[channel]);
-                bytes.push((value / f64::from(weights[3])).round().clamp(0.0, 255.0) as u8);
-            }
-            bytes.push(alpha);
-        }
+        let bytes = colorize(key, &self.basis[&geometry]);
         let strips = strips::prepare(key, &bytes)
             .into_iter()
             .map(EncodedImage::new)
@@ -84,6 +69,27 @@ impl Rasterizer {
         })?;
         Some(Prepared { atlas, strips })
     }
+}
+
+pub(super) fn colorize(key: TileKey, basis: &[[u16; 4]]) -> Vec<u8> {
+    let highlight: [u8; 3] =
+        std::array::from_fn(|c| key.foreground[c].max(key.background[c]).max(key.surface[c]));
+    let mut bytes = Vec::with_capacity(basis.len() * 4);
+    for weights in basis {
+        let alpha = (f64::from(weights[3]) * 255.0 / 65535.0).round() as u8;
+        if alpha == 0 {
+            bytes.extend_from_slice(&[0; 4]);
+            continue;
+        }
+        for c in 0..3 {
+            let value = f64::from(weights[0]) * f64::from(key.background[c])
+                + f64::from(weights[1]) * f64::from(key.surface[c])
+                + f64::from(weights[2]) * f64::from(highlight[c]);
+            bytes.push((value / f64::from(weights[3])).round().clamp(0.0, 255.0) as u8);
+        }
+        bytes.push(alpha);
+    }
+    bytes
 }
 
 fn basis(key: TileKey) -> Vec<[u16; 4]> {
@@ -134,8 +140,17 @@ fn basis(key: TileKey) -> Vec<[u16; 4]> {
 
 #[derive(Debug)]
 pub(super) struct Worker {
-    jobs: mpsc::Sender<TileKey>,
-    results: mpsc::Receiver<(TileKey, Option<Prepared>)>,
+    jobs: mpsc::Sender<Job>,
+    results: mpsc::Receiver<Completed>,
+}
+
+enum Job {
+    Atlas(TileKey),
+    Patch(super::patches::Key),
+}
+pub(super) enum Completed {
+    Atlas(TileKey, Option<Prepared>),
+    Patch(super::patches::Key, Option<super::patches::Prepared>),
 }
 
 impl Worker {
@@ -146,13 +161,28 @@ impl Worker {
             .name("surface-raster".into())
             .spawn(move || {
                 let mut rasterizer = Rasterizer::default();
-                while let Ok(key) = requests.recv() {
-                    let prepared = rasterizer.prepare(key);
-                    if complete.send((key, prepared)).is_err() {
+                let mut pending = None;
+                let mut wake = std::time::Instant::now();
+                loop {
+                    let Some(job) = pending.take().or_else(|| requests.recv().ok()) else {
+                        break;
+                    };
+                    let result = match job {
+                        Job::Atlas(key) => Completed::Atlas(key, rasterizer.prepare(key)),
+                        Job::Patch(key) => {
+                            let prepared = rasterizer.patches.prepare(&key);
+                            Completed::Patch(key, prepared)
+                        },
+                    };
+                    if complete.send(result).is_err() {
                         break;
                     }
-                    if notify.send(ScreenInstruction::Render).is_err() {
-                        break;
+                    pending = requests.try_recv().ok();
+                    if pending.is_none() || wake.elapsed() >= std::time::Duration::from_millis(16) {
+                        if notify.send(ScreenInstruction::Render).is_err() {
+                            break;
+                        }
+                        wake = std::time::Instant::now();
                     }
                 }
             })
@@ -161,10 +191,14 @@ impl Worker {
     }
 
     pub fn queue(&self, key: TileKey) -> bool {
-        self.jobs.send(key).is_ok()
+        self.jobs.send(Job::Atlas(key)).is_ok()
     }
 
-    pub fn completed(&self) -> Vec<(TileKey, Option<Prepared>)> {
+    pub fn queue_patch(&self, key: super::patches::Key) -> bool {
+        self.jobs.send(Job::Patch(key)).is_ok()
+    }
+
+    pub fn completed(&self) -> Vec<Completed> {
         self.results.try_iter().collect()
     }
 }
