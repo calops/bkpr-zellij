@@ -6,8 +6,10 @@ This experimental branch enables the spacing prototype for fresh native
 processes; `BKPR_COMPACT_FRAMES=0` restores the original profile. It retains one cell at the outside and shares a single
 separator cell between neighboring tiled panes. The opening reaches the content
 boundary, giving the surrounding surface the full reserved margin. Circular
-corners, bevels and shadows can extend below foreground glyphs into the content
-background. Three-cell tiles retain the circular radius and smooth shadow tails;
+corners, bevels and shadows compose above application content: shadows shade
+backgrounds and glyphs together, and the rounded rim crops glyphs outside the
+opening. Native floating-pane clipping keeps popups above the underlying pane's
+frame. Three-cell tiles retain the circular radius and smooth shadow tails;
 the normal profile retains its original two-cell tiles and cache behavior.
 
 Each side clips its image to its own portion of a shared cell in physical pixels,
@@ -59,8 +61,9 @@ gradient. Straight edges use the continuous Gaussian integral; corners integrate
 over the circular opening with 64 samples and an analytic horizontal integral.
 This avoids the visible terraces of a sparse binary-mask blur at large fonts.
 Final output still has eight-bit RGBA precision. Transparent black pixels can extend
-into one adjacent content row/column, below glyphs and composited over the
-application background. The opaque frame and PTY geometry are unchanged.
+into adjacent content rows/columns, composited over both glyphs and application
+backgrounds. Placements use the highest Kitty image z-index and are clipped
+against native floating panes. The opaque frame and PTY geometry are unchanged.
 
 A narrow bevel on the surrounding lip shares the same light direction: the
 upper/left facet is shaded and the lower/right facet catches a fine highlight.
@@ -118,5 +121,5 @@ Frames and content are composed after both rendering paths have finished.
 Frame placements reserve the upper half of the placement UID space, and a
 frame-only redraw preserves existing application image placements. Partial
 repaints after popup dismissal use the same cached frame presentation. Native
-frame images sit below text and are clipped against floating panes using the
+frame images sit above pane content and are clipped against floating panes using the
 destination client's cell dimensions.

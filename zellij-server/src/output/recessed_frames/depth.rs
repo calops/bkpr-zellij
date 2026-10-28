@@ -142,8 +142,9 @@ fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3]
     })
 }
 
-// Premultiplied RGBA. Beyond the reserved frame cells only translucent black
-// shadow pixels are emitted, composited below text over the application's bg.
+// Premultiplied RGBA. Inside the opening, translucent black shadow pixels
+// shade both application backgrounds and glyphs. The opaque rounded rim also
+// masks glyphs outside the opening when it reaches into content cells.
 pub(super) fn sample(key: TileKey, tile: usize, px: f64, py: f64) -> [f64; 4] {
     let distance = opening_distance(key, tile, px, py);
     if distance >= 0.0 {

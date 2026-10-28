@@ -1,7 +1,7 @@
 //! Pixel-aligned rounded frames. Geometry, focus and input remain native.
 //!
 //! Eight edge/corner tiles share an atlas. Each spans two rows/columns so a
-//! translucent inset shadow can extend below content glyphs. The cache
+//! translucent inset shadow can extend over content glyphs. The cache
 //! owns one store reference per atlas, preventing repeated rasterization. The
 //! existing Kitty serializer caches base64 and uploads independently per client.
 use super::*;
@@ -14,6 +14,9 @@ mod depth;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 // Grid placement IDs grow from one. Reserve the upper half for native frames.
 const FRAME_UID: u64 = 1 << 63;
+// Composite the rim and translucent shadow over pane text and application
+// images. Native floating-pane clipping is applied before serialization.
+const FRAME_Z_INDEX: i32 = i32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TileKey {
@@ -421,7 +424,7 @@ impl Output {
                     source_px_height: key.height,
                     cell_offset_x: 0,
                     cell_offset_y: 0,
-                    z_index: -1,
+                    z_index: FRAME_Z_INDEX,
                     dest_cells: (0, 0),
                     scaled_px: None,
                     placement_uid: FRAME_UID + (y * width + x) as u64,
