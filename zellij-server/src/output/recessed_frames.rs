@@ -8,6 +8,7 @@ use super::*;
 use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
 
+pub(crate) mod compact;
 mod depth;
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -23,6 +24,17 @@ struct TileKey {
     foreground: [u8; 3],
     thickness: usize,
     radius: usize,
+    compact: bool,
+}
+
+impl TileKey {
+    fn tile_cells(self) -> usize {
+        if self.compact {
+            3
+        } else {
+            2
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -54,7 +66,12 @@ impl FrameCache {
                 // Round half a cell to whole pixels once for all four edges.
                 // Let the curve fill the remaining corner area without seams.
                 let thickness = width.div_ceil(2).min(height - 1);
-                let radius = (width * 2 - thickness).min(height - thickness);
+                let compact = compact::requested();
+                let radius = if compact {
+                    (width * 3 / 2).min(2 * width).min(2 * height)
+                } else {
+                    (width * 2 - thickness).min(height - thickness)
+                };
                 Some(TileKey {
                     width,
                     height,
@@ -63,6 +80,7 @@ impl FrameCache {
                     foreground,
                     thickness,
                     radius,
+                    compact,
                 })
             });
         if let Some(key) = next {
@@ -82,15 +100,16 @@ impl FrameCache {
         if let Some(id) = self.atlases.get(&key) {
             return Some(*id);
         }
-        let bytes = key.width * 2 * key.height * 2 * 8 * 4;
+        let tile_cells = key.tile_cells();
+        let bytes = key.width * tile_cells * key.height * tile_cells * 8 * 4;
         if self.bytes + bytes > MAX_BYTES {
             return None;
         }
         let id = store
             .store_image(DecodedImage {
                 bytes: rasterize(key),
-                width: (key.width * 2 * 8) as u32,
-                height: (key.height * 2) as u32,
+                width: (key.width * tile_cells * 8) as u32,
+                height: (key.height * tile_cells) as u32,
                 format: KittyFormat::Rgba32,
             })
             .ok()?;
@@ -121,9 +140,10 @@ fn surface(foreground: [u8; 3], background: [u8; 3]) -> [u8; 3] {
 // TL, top, TR, left, right, BL, bottom, BR. Mirror sample coordinates,
 // rather than rounding two independent curves on odd-sized cells.
 fn rasterize(key: TileKey) -> Vec<u8> {
-    let stride = key.width * 2;
-    let mut rgba = Vec::with_capacity(stride * key.height * 2 * 8 * 4);
-    for y in 0..key.height * 2 {
+    let tile_cells = key.tile_cells();
+    let stride = key.width * tile_cells;
+    let mut rgba = Vec::with_capacity(stride * key.height * tile_cells * 8 * 4);
+    for y in 0..key.height * tile_cells {
         for tile in 0..8 {
             for x in 0..stride {
                 let mut channels = [0.0; 4];
@@ -213,9 +233,14 @@ impl Output {
         enabled: bool,
     ) -> Option<(TileKey, InternalImageId)> {
         let cache = self.recessed_frames.as_ref()?;
-        let key = (enabled && geom.cols.as_usize() >= 4 && geom.rows.as_usize() >= 4)
+        let key = enabled
             .then(|| cache.borrow().clients.get(&client_id).copied())
             .flatten()?;
+        if geom.cols.as_usize() < key.tile_cells() * 2
+            || geom.rows.as_usize() < key.tile_cells() * 2
+        {
+            return None;
+        }
         let id = cache
             .borrow_mut()
             .atlas(key, &mut self.kitty_image_store.borrow_mut())?;
@@ -342,30 +367,55 @@ impl Output {
             let geom = request.geom;
             let width = geom.cols.as_usize();
             let height = geom.rows.as_usize();
+            let tile_cells = key.tile_cells();
+            let neighbors: Vec<_> = if key.compact && request.z_index.is_none() {
+                self.recessed_frames
+                    .as_ref()
+                    .map(|cache| {
+                        cache
+                            .borrow()
+                            .active_frames
+                            .iter()
+                            .filter(|((client, pane), frame)| {
+                                *client == client_id && *pane != pane_id && frame.z_index.is_none()
+                            })
+                            .map(|(_, frame)| frame.geom)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
             let mut frame_images = Vec::with_capacity((width + height) * 4);
-            let horizontal =
-                (0..width).flat_map(|x| [(x, 0), (x, 1), (x, height - 2), (x, height - 1)]);
-            let vertical =
-                (2..height - 2).flat_map(|y| [(0, y), (1, y), (width - 2, y), (width - 1, y)]);
+            let horizontal = (0..width).flat_map(|x| {
+                (0..tile_cells).flat_map(move |y| [(x, y), (x, height - tile_cells + y)])
+            });
+            let vertical = (tile_cells..height - tile_cells).flat_map(|y| {
+                (0..tile_cells).flat_map(move |x| [(x, y), (width - tile_cells + x, y)])
+            });
             for (x, y) in horizontal.chain(vertical) {
                 let (tile, column, row) = match (x, y) {
-                    (_, _) if y < 2 && x < 2 => (0, x, y),
-                    (_, _) if y < 2 && x + 2 >= width => (2, x + 2 - width, y),
-                    (_, _) if y < 2 => (1, 0, y),
-                    (_, _) if y + 2 >= height && x < 2 => (5, x, y + 2 - height),
-                    (_, _) if y + 2 >= height && x + 2 >= width => {
-                        (7, x + 2 - width, y + 2 - height)
+                    (_, _) if y < tile_cells && x < tile_cells => (0, x, y),
+                    (_, _) if y < tile_cells && x + tile_cells >= width => {
+                        (2, x + tile_cells - width, y)
                     },
-                    (_, _) if y + 2 >= height => (6, 0, y + 2 - height),
-                    (_, _) if x < 2 => (3, x, 0),
-                    (_, _) if x + 2 >= width => (4, x + 2 - width, 0),
+                    (_, _) if y < tile_cells => (1, 0, y),
+                    (_, _) if y + tile_cells >= height && x < tile_cells => {
+                        (5, x, y + tile_cells - height)
+                    },
+                    (_, _) if y + tile_cells >= height && x + tile_cells >= width => {
+                        (7, x + tile_cells - width, y + tile_cells - height)
+                    },
+                    (_, _) if y + tile_cells >= height => (6, 0, y + tile_cells - height),
+                    (_, _) if x < tile_cells => (3, x, 0),
+                    (_, _) if x + tile_cells >= width => (4, x + tile_cells - width, 0),
                     _ => continue,
                 };
-                frame_images.push(KittyImageChunk {
+                let mut image = KittyImageChunk {
                     cell_x: geom.x + x,
                     cell_y: geom.y + y,
                     internal_image_id: id,
-                    source_px_x: (tile * 2 + column) * key.width,
+                    source_px_x: (tile * tile_cells + column) * key.width,
                     source_px_y: row * key.height,
                     source_px_width: key.width,
                     source_px_height: key.height,
@@ -375,7 +425,10 @@ impl Output {
                     dest_cells: (0, 0),
                     scaled_px: None,
                     placement_uid: FRAME_UID + (y * width + x) as u64,
-                });
+                };
+                if !key.compact || compact::clip_shared_cell(&mut image, geom, &neighbors, key) {
+                    frame_images.push(image);
+                }
             }
             if let Some(stack) = &self.floating_panes_stack {
                 frame_images = stack.visible_kitty_image_chunks(

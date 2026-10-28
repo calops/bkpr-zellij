@@ -1,5 +1,27 @@
 # Recessed pane frames
 
+## Shared-cell spacing prototype
+
+This experimental branch enables the spacing prototype for fresh native
+processes; `BKPR_COMPACT_FRAMES=0` restores the original profile. It retains one cell at the outside and shares a single
+separator cell between neighboring tiled panes. The opening reaches the content
+boundary, giving the surrounding surface the full reserved margin. Circular
+corners, bevels and shadows can extend below foreground glyphs into the content
+background. Three-cell tiles retain the circular radius and smooth shadow tails;
+the normal profile retains its original two-cell tiles and cache behavior.
+
+Each side clips its image to its own portion of a shared cell in physical pixels,
+including at junctions and odd pixel sizes. The neighboring pane reserves the
+shared left/top cell; the other pane gains its former right/bottom frame cell as
+actual PTY content. Frame geometry expands into the shared cell while content,
+cursor and mouse coordinates follow native content offsets.
+
+Shared spacing requires confirmed graphics metadata for every regular client.
+Unsupported attachments, stacks, small panes, reserved headers and fullscreen
+use ordinary native frame spacing. The prototype lives in `recessed_frames/compact.rs`
+and `tiled_panes/recessed.rs`. Use Bkpr's local-runtime devshell and `just run`
+to launch this branch; the normal devshell retains the pinned runtime.
+
 Full frames with `ui.pane_frames.rounded_corners` enabled use pixel-rendered
 edges on clients with confirmed Kitty graphics, truecolor, cell dimensions and
 terminal foreground/background responses. Other clients use ordinary native
