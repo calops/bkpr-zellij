@@ -129,6 +129,7 @@ pub(crate) struct PluginPane {
     should_be_suppressed: bool,
     text_being_pasted: Option<Vec<u8>>,
     supports_mouse_selection: bool,
+    surface_presentations: HashMap<ClientId, super::surface::SurfacePresentation>,
 }
 
 impl PluginPane {
@@ -188,6 +189,7 @@ impl PluginPane {
             should_be_suppressed: false,
             text_being_pasted: None,
             supports_mouse_selection: false,
+            surface_presentations: HashMap::new(),
         };
         for client_id in currently_connected_clients {
             plugin.handle_plugin_bytes(client_id, initial_loading_message.as_bytes().to_vec());
@@ -248,6 +250,13 @@ impl Pane for PluginPane {
         self.set_should_render(true);
     }
     fn handle_plugin_bytes(&mut self, client_id: ClientId, bytes: VteBytes) {
+        if let Some(presentation) = super::surface::SurfacePresentation::from_frame(&bytes)
+            .filter(|_| self.requesting_permissions.is_none())
+        {
+            self.surface_presentations.insert(client_id, presentation);
+        } else {
+            self.surface_presentations.remove(&client_id);
+        }
         self.set_client_should_render(client_id, true);
 
         let mut vte_bytes = bytes;
@@ -827,6 +836,12 @@ impl Pane for PluginPane {
     }
     fn invoked_with(&self) -> &Option<Run> {
         &self.invoked_with
+    }
+    fn surface_presentation(
+        &self,
+        client: ClientId,
+    ) -> Option<&super::surface::SurfacePresentation> {
+        self.surface_presentations.get(&client)
     }
     fn set_title(&mut self, title: String) {
         self.pane_title = title;

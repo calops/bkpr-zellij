@@ -1,4 +1,5 @@
 pub mod floating_pane_grid;
+mod raised;
 use zellij_utils::{
     data::{Direction, FloatingPaneCoordinates, PaneInfo, ResizeStrategy},
     position::Position,

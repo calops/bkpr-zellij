@@ -21,10 +21,10 @@ pub(super) fn bytes(key: TileKey) -> usize {
     STRIP_PIXELS * key.tile_cells() * (key.height + key.width) * 2 * 4
 }
 
-pub(super) fn create(key: TileKey, raster: &[u8], store: &mut KittyImageStore) -> Option<Strips> {
+pub(super) fn prepare(key: TileKey, raster: &[u8]) -> Vec<DecodedImage> {
     let span = key.tile_cells();
     let atlas_width = key.width * span * 8;
-    let mut ids = Vec::with_capacity(4);
+    let mut images = Vec::with_capacity(4);
     for tile in [1, 6, 3, 4] {
         let horizontal = matches!(tile, 1 | 6);
         let width = if horizontal {
@@ -46,12 +46,23 @@ pub(super) fn create(key: TileKey, raster: &[u8], store: &mut KittyImageStore) -
                 bytes.extend_from_slice(&raster[offset..offset + 4]);
             }
         }
-        let result = store.store_image(DecodedImage {
+        images.push(DecodedImage {
             bytes,
             width: width as u32,
             height: height as u32,
             format: KittyFormat::Rgba32,
         });
+    }
+    images
+}
+
+pub(super) fn install(
+    images: Vec<super::raster::EncodedImage>,
+    store: &mut KittyImageStore,
+) -> Option<Strips> {
+    let mut ids = Vec::with_capacity(4);
+    for image in images {
+        let result = store.store_native_image(image.image, image.compressed);
         let Ok(id) = result else {
             for id in ids {
                 store.remove_placement_ref(id);

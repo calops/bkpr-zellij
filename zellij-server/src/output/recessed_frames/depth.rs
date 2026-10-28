@@ -15,35 +15,32 @@ fn local_position(key: TileKey, tile: usize, mut px: f64, mut py: f64) -> (f64, 
     (px, py)
 }
 
-fn opening_distance(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
+pub(super) fn opening_distance(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
     let (px, py) = local_position(key, tile, px, py);
     let (inset_x, inset_y) = insets(key);
-    let radius = key.radius as f64;
     // Positive distance is inside the opening. This is the actual circular mask,
     // shared by the visible edge and the shifted shadow caster.
     match tile {
         1 | 6 => py - inset_y,
         3 | 4 => px - inset_x,
-        _ => {
-            let qx = inset_x + radius - px;
-            let qy = inset_y + radius - py;
-            let dx = qx.max(0.0);
-            let dy = qy.max(0.0);
-            let length = dx.hypot(dy);
-            radius - length - qx.max(qy).min(0.0)
-        },
+        _ => corner_distance(key, px, py),
     }
+}
+
+pub(super) fn corner_distance(key: TileKey, px: f64, py: f64) -> f64 {
+    let (inset_x, inset_y) = insets(key);
+    let radius = key.radius as f64;
+    let qx = inset_x + radius - px;
+    let qy = inset_y + radius - py;
+    radius - qx.max(0.0).hypot(qy.max(0.0)) - qx.max(qy).min(0.0)
 }
 
 fn insets(key: TileKey) -> (f64, f64) {
-    if key.compact {
-        (key.width as f64, key.height as f64)
-    } else {
-        (key.thickness as f64, key.thickness as f64)
-    }
+    let (x, y) = key.insets();
+    (x as f64, y as f64)
 }
 
-fn cast_shadow(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
+pub(super) fn blurred_outside(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
     // Offset the surrounding surface's mask down/right, then blur that mask.
     // Translating in screen coordinates before mirroring makes the direction
     // consistent across all eight tiles; this is not a uniform edge gradient.
@@ -58,7 +55,7 @@ fn cast_shadow(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
         return 0.0;
     }
     if distance <= -support {
-        return SHADOW_OPACITY;
+        return 1.0;
     }
     let (x, y) = local_position(key, tile, x, y);
     let (inset_x, inset_y) = insets(key);
@@ -75,7 +72,7 @@ fn cast_shadow(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
             let low = inset_y.max(y - support);
             let high = y + support;
             if high <= low {
-                return SHADOW_OPACITY;
+                return 1.0;
             }
             let step = (high - low) / 64.0;
             let radius = key.radius as f64;
@@ -93,7 +90,7 @@ fn cast_shadow(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
             1.0 - inside
         },
     };
-    SHADOW_OPACITY * outside.clamp(0.0, 1.0)
+    outside.clamp(0.0, 1.0)
 }
 
 // Standard normal CDF, with absolute error below 8e-8. Continuous at every
@@ -112,14 +109,24 @@ fn normal_cdf(value: f64) -> f64 {
     }
 }
 
-fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3] {
+pub(super) fn bevel_width(key: TileKey) -> f64 {
+    (key.width as f64 * 0.12).clamp(0.75, 2.0)
+}
+
+pub(super) fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3] {
     // A narrow facet on the surrounding lip, not a halo. The recessed upper/
     // left face is shaded; the lower/right face catches the same upper-left
     // light responsible for the cast shadow inside the opening.
-    let width = (key.width as f64 * 0.12).clamp(0.75, 2.0);
-    let weight = (1.0 + distance / width).clamp(0.0, 1.0);
+    let width = bevel_width(key);
+    let signed_distance = if key.raised { -distance } else { distance };
+    let weight = (1.0 + signed_distance / width).clamp(0.0, 1.0);
+    let base = if key.raised {
+        key.background
+    } else {
+        key.surface
+    };
     if weight == 0.0 {
-        return key.surface.map(f64::from);
+        return base.map(f64::from);
     }
     // The gradient of the actual circular mask supplies continuous normals
     // through the corners and identical lighting on straight edges.
@@ -128,9 +135,11 @@ fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3]
     let ny =
         opening_distance(key, tile, px, py + 0.25) - opening_distance(key, tile, px, py - 0.25);
     let length = nx.hypot(ny).max(f64::EPSILON);
-    let light = (-(nx + ny) * std::f64::consts::FRAC_1_SQRT_2 / length).clamp(-1.0, 1.0);
+    let orientation = if key.raised { 1.0 } else { -1.0 };
+    let light =
+        (orientation * (nx + ny) * std::f64::consts::FRAC_1_SQRT_2 / length).clamp(-1.0, 1.0);
     std::array::from_fn(|channel| {
-        let surface = f64::from(key.surface[channel]);
+        let surface = f64::from(base[channel]);
         if light > 0.0 {
             let highlight = f64::from(
                 key.foreground[channel]
@@ -150,7 +159,7 @@ fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3]
 pub(super) fn sample(key: TileKey, tile: usize, px: f64, py: f64) -> [f64; 4] {
     let distance = opening_distance(key, tile, px, py);
     if distance >= 0.0 {
-        let shadow = cast_shadow(key, tile, px, py);
+        let shadow = SHADOW_OPACITY * blurred_outside(key, tile, px, py);
         let (x, y) = local_position(key, tile, px, py);
         let reserved = match tile {
             1 | 6 => y < key.height as f64,

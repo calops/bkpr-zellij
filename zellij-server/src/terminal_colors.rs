@@ -29,6 +29,9 @@ pub struct TerminalColors {
 }
 
 impl TerminalColors {
+    pub(crate) fn frame_accents(&self) -> [Option<[u8; 3]>; 16] {
+        self.ansi
+    }
     pub(crate) fn frame_colors(&self) -> Option<([usize; 2], [u8; 3], [u8; 3])> {
         if !self.truecolor || !self.kitty_graphics {
             return None;
