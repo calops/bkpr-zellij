@@ -1,8 +1,10 @@
 mod pane_resizer;
+mod recessed;
 mod stacked_panes;
 mod tiled_pane_grid;
 
 use crate::panes::kitty_graphics::KittyHostSupport;
+use crate::output::recessed_frames::compact;
 
 #[cfg(test)]
 #[path = "./unit/mock_pane.rs"]
@@ -82,6 +84,8 @@ pub struct TiledPanes {
     session_is_mirrored: bool,
     active_panes: ActivePanes,
     pane_frame_style: PaneFrameStyle,
+    compact_recessed_frames: bool,
+    compact_frame_layout: Vec<(PaneId, PaneGeom, Offset)>,
     panes_to_hide: HashSet<PaneId>,
     fullscreen_is_active: Option<PaneId>,
     fullscreen_covers_ui: Rc<RefCell<bool>>,
@@ -127,6 +131,8 @@ impl TiledPanes {
             session_is_mirrored,
             active_panes: ActivePanes::new(&os_api),
             pane_frame_style,
+            compact_recessed_frames: false,
+            compact_frame_layout: vec![],
             panes_to_hide: HashSet::new(),
             fullscreen_is_active: None,
             fullscreen_covers_ui,
@@ -656,6 +662,13 @@ impl TiledPanes {
         } else {
             self.reserved_top_rows.borrow().clone()
         };
+        let compact_geoms: Vec<_> = if self.compact_recessed_frames {
+            self.panes.values()
+                .filter(|pane| !pane.borderless() && !self.panes_to_hide.contains(&pane.pid()))
+                .map(|pane| pane.current_geom()).collect()
+        } else {
+            vec![]
+        };
         for pane in self.panes.values_mut() {
             if no_ui_fullscreen_pane_id == Some(pane.pid()) {
                 pane.set_frame(false);
@@ -692,7 +705,11 @@ impl TiledPanes {
                     });
                 }
             } else if draws_full_frames && !pane.borderless() {
-                pane.set_content_offset(Offset::frame(1));
+                pane.set_content_offset(if self.compact_recessed_frames {
+                    compact::content_offset(pane.current_geom(), &compact_geoms)
+                } else {
+                    Offset::frame(1)
+                });
             } else if (draws_full_frames && pane.borderless())
                 || !is_inside_viewport(pane_viewport, pane)
             {
@@ -1194,6 +1211,9 @@ impl TiledPanes {
         mouse_hover_tips: bool,
     ) -> Result<()> {
         let err_context = || "failed to render tiled panes";
+        if client_id_override.is_none() {
+            self.update_compact_frames(output);
+        }
 
         let mut connected_clients: HashSet<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
@@ -1293,7 +1313,9 @@ impl TiledPanes {
                 } else {
                     { self.reserved_top_rows.borrow().get(&pane.pid()).copied() }.unwrap_or(0)
                 };
-                let visible_member_frame_override = if reserved_rows_for_pane > 0 {
+                let visible_member_frame_override = if self.compact_recessed_frames && !pane.borderless() {
+                    Some(compact::frame_geom(pane.current_geom(), pane.get_content_offset()))
+                } else if reserved_rows_for_pane > 0 {
                     let mut geom = pane.current_geom();
                     geom.y += reserved_rows_for_pane;
                     geom.rows.decrease_inner(reserved_rows_for_pane);

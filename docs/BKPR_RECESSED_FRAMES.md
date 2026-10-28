@@ -1,5 +1,37 @@
 # Recessed pane frames
 
+## Shared-cell spacing prototype
+
+This experimental branch enables the spacing prototype for fresh native
+processes; `BKPR_COMPACT_FRAMES=0` restores the original profile. It retains one cell at the outside and shares a single
+separator cell between neighboring tiled panes. The opening reaches the content
+boundary, giving the surrounding surface the full reserved margin. Circular
+corners, bevels and shadows compose above application content: shadows shade
+backgrounds and glyphs together, and the rounded rim crops glyphs outside the
+opening. Native floating-pane clipping keeps popups above the underlying pane's
+frame. Tile coverage includes the radius, directional offset and five Gaussian
+standard deviations, so corner shadows converge to the exact straight-edge
+gradient before the join. This also applies to the normal spacing profile.
+
+Each side clips its image to its own portion of a shared cell in physical pixels,
+including at junctions and odd pixel sizes. The neighboring pane reserves the
+shared left/top cell; the other pane gains its former right/bottom frame cell as
+actual PTY content. Frame geometry expands into the shared cell while content,
+cursor and mouse coordinates follow native content offsets.
+
+Visible horizontal strips match the unchanged vertical strip's cell-width in
+physical pixels. Outer horizontal edges move away from content by the cell-height
+minus cell-width difference; shared edges split that adjustment with complementary
+rounding, preserving an exact cell-width dark separator at odd pixel sizes.
+Translations crop the existing cached atlas instead of creating raster variants.
+The reserved one-row separator and native content geometry are unchanged.
+
+Shared spacing requires confirmed graphics metadata for every regular client.
+Unsupported attachments, stacks, small panes, reserved headers and fullscreen
+use ordinary native frame spacing. The prototype lives in `recessed_frames/compact.rs`
+and `tiled_panes/recessed.rs`. Use Bkpr's local-runtime devshell and `just run`
+to launch this branch; the normal devshell retains the pinned runtime.
+
 Full frames with `ui.pane_frames.rounded_corners` enabled use pixel-rendered
 edges on clients with confirmed Kitty graphics, truecolor, cell dimensions and
 terminal foreground/background responses. Other clients use ordinary native
@@ -37,8 +69,9 @@ gradient. Straight edges use the continuous Gaussian integral; corners integrate
 over the circular opening with 64 samples and an analytic horizontal integral.
 This avoids the visible terraces of a sparse binary-mask blur at large fonts.
 Final output still has eight-bit RGBA precision. Transparent black pixels can extend
-into one adjacent content row/column, below glyphs and composited over the
-application background. The opaque frame and PTY geometry are unchanged.
+into adjacent content rows/columns, composited over both glyphs and application
+backgrounds. Placements use the highest Kitty image z-index and are clipped
+against native floating panes. The opaque frame and PTY geometry are unchanged.
 
 A narrow bevel on the surrounding lip shares the same light direction: the
 upper/left facet is shaded and the lower/right facet catches a fine highlight.
@@ -87,7 +120,15 @@ store also caches base64, while the existing per-client host state uploads each
 atlas only when that client needs it. Placement updates do not rasterize or
 re-encode images.
 
-The atlas cache admits up to 16 MiB of raw pixels. Once full, new keys fall back
+Straight-edge pixels are copied from the atlas into cached 1024-pixel strips.
+Adjacent crops coalesce into larger placements without scaling or changing
+pixel values. Corners coalesce into rectangles too. Region-local placement IDs
+remain stable across resizing, and unchanged pane/neighbor geometry reuses its
+placement list. Floating panes clip the merged rectangles in exact physical
+pixels, including translated sub-cell offsets. Layout adjacency is recalculated
+only when visible pane geometry or content offsets change.
+
+The atlas and strip cache admits up to 16 MiB of raw pixels. Once full, new keys fall back
 to ordinary frames; existing keys remain reusable. Cached images are not evicted
 and regenerated during the session. Client detach removes its geometry and
 capability state while retaining shared atlas entries.
@@ -96,5 +137,5 @@ Frames and content are composed after both rendering paths have finished.
 Frame placements reserve the upper half of the placement UID space, and a
 frame-only redraw preserves existing application image placements. Partial
 repaints after popup dismissal use the same cached frame presentation. Native
-frame images sit below text and are clipped against floating panes using the
+frame images sit above pane content and are clipped against floating panes using the
 destination client's cell dimensions.

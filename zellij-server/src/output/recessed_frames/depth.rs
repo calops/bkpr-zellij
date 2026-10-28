@@ -7,31 +7,39 @@ const BEVEL_SHADE: f64 = 0.24;
 
 fn local_position(key: TileKey, tile: usize, mut px: f64, mut py: f64) -> (f64, f64) {
     if matches!(tile, 2 | 4 | 7) {
-        px = (key.width * 2) as f64 - px;
+        px = (key.width * key.tile_cells()) as f64 - px;
     }
     if matches!(tile, 5..=7) {
-        py = (key.height * 2) as f64 - py;
+        py = (key.height * key.tile_cells()) as f64 - py;
     }
     (px, py)
 }
 
 fn opening_distance(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
     let (px, py) = local_position(key, tile, px, py);
-    let thickness = key.thickness as f64;
+    let (inset_x, inset_y) = insets(key);
     let radius = key.radius as f64;
     // Positive distance is inside the opening. This is the actual circular mask,
     // shared by the visible edge and the shifted shadow caster.
     match tile {
-        1 | 6 => py - thickness,
-        3 | 4 => px - thickness,
+        1 | 6 => py - inset_y,
+        3 | 4 => px - inset_x,
         _ => {
-            let qx = thickness + radius - px;
-            let qy = thickness + radius - py;
+            let qx = inset_x + radius - px;
+            let qy = inset_y + radius - py;
             let dx = qx.max(0.0);
             let dy = qy.max(0.0);
             let length = dx.hypot(dy);
             radius - length - qx.max(qy).min(0.0)
         },
+    }
+}
+
+fn insets(key: TileKey) -> (f64, f64) {
+    if key.compact {
+        (key.width as f64, key.height as f64)
+    } else {
+        (key.thickness as f64, key.thickness as f64)
     }
 }
 
@@ -53,28 +61,31 @@ fn cast_shadow(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
         return SHADOW_OPACITY;
     }
     let (x, y) = local_position(key, tile, x, y);
-    let thickness = key.thickness as f64;
+    let (inset_x, inset_y) = insets(key);
     let outside = match tile {
-        1 | 6 => normal_cdf((thickness - y) / sigma),
-        3 | 4 => normal_cdf((thickness - x) / sigma),
+        1 | 6 => normal_cdf((inset_y - y) / sigma),
+        3 | 4 => normal_cdf((inset_x - x) / sigma),
+        _ if x >= inset_x + key.radius as f64 + support => normal_cdf((inset_y - y) / sigma),
+        _ if y >= inset_y + key.radius as f64 + support => normal_cdf((inset_x - x) / sigma),
         _ => {
             // Integrate the Gaussian over the actual rounded opening. The
             // horizontal integral is analytic; only the curved boundary needs
             // quadrature. Sparse point samples of a binary mask leave terraces
             // as their spacing grows with the font size.
-            let low = thickness.max(y - support);
+            let low = inset_y.max(y - support);
             let high = y + support;
             if high <= low {
                 return SHADOW_OPACITY;
             }
             let step = (high - low) / 64.0;
             let radius = key.radius as f64;
-            let center = thickness + radius;
+            let center_x = inset_x + radius;
+            let center_y = inset_y + radius;
             let mut inside = 0.0;
             for index in 0..64 {
                 let sample_y = low + (index as f64 + 0.5) * step;
-                let dy = (center - sample_y).max(0.0);
-                let boundary_x = center - (radius * radius - dy * dy).max(0.0).sqrt();
+                let dy = (center_y - sample_y).max(0.0);
+                let boundary_x = center_x - (radius * radius - dy * dy).max(0.0).sqrt();
                 let z = (sample_y - y) / sigma;
                 let density = (-0.5 * z * z).exp() / (sigma * (2.0 * std::f64::consts::PI).sqrt());
                 inside += density * normal_cdf((x - boundary_x) / sigma) * step;
@@ -133,8 +144,9 @@ fn bevel(key: TileKey, tile: usize, px: f64, py: f64, distance: f64) -> [f64; 3]
     })
 }
 
-// Premultiplied RGBA. Beyond the reserved frame cells only translucent black
-// shadow pixels are emitted, composited below text over the application's bg.
+// Premultiplied RGBA. Inside the opening, translucent black shadow pixels
+// shade both application backgrounds and glyphs. The opaque rounded rim also
+// masks glyphs outside the opening when it reaches into content cells.
 pub(super) fn sample(key: TileKey, tile: usize, px: f64, py: f64) -> [f64; 4] {
     let distance = opening_distance(key, tile, px, py);
     if distance >= 0.0 {
