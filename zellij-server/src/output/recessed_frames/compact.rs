@@ -43,13 +43,13 @@ pub(super) fn align_horizontal_edge(
     geom: PaneGeom,
     neighbors: &[PaneGeom],
     key: TileKey,
-) -> bool {
+) -> Option<KittyImageChunk> {
     let row = image.cell_y - geom.y;
     let height = geom.rows.as_usize();
     let top = row < key.tile_cells();
     let bottom = row + key.tile_cells() >= height;
     if !top && !bottom {
-        return true;
+        return None;
     }
     let shared = neighbors.iter().any(|other| {
         image.cell_x >= other.x
@@ -76,13 +76,38 @@ pub(super) fn align_horizontal_edge(
     let raster_height = (key.height * key.tile_cells()) as isize;
     let crop_top = (-source_y).max(0) as usize;
     let crop_bottom = (source_y + image.source_px_height as isize - raster_height).max(0) as usize;
-    if crop_top + crop_bottom >= image.source_px_height {
-        return false;
-    }
+    // Translating a corner must not shorten the vertical strip where it joins
+    // the straight side. Continue that strip from the same atlas's side tile.
+    let continuation = if crop_top + crop_bottom > 0 {
+        let column = image.cell_x - geom.x;
+        let width = geom.cols.as_usize();
+        let side = if column < key.tile_cells() {
+            Some((3, column))
+        } else if column + key.tile_cells() >= width {
+            Some((4, column + key.tile_cells() - width))
+        } else {
+            None
+        };
+        side.map(|(tile, column)| {
+            let mut strip = *image;
+            strip.source_px_x = (tile * key.tile_cells() + column) * key.width;
+            strip.source_px_y = 0;
+            strip.source_px_height = crop_top + crop_bottom;
+            strip.cell_offset_y += if crop_bottom > 0 {
+                (image.source_px_height - crop_bottom) as u32
+            } else {
+                0
+            };
+            strip.placement_uid += (width * height) as u64;
+            strip
+        })
+    } else {
+        None
+    };
     image.source_px_y = (source_y + crop_top as isize) as usize;
     image.source_px_height -= crop_top + crop_bottom;
     image.cell_offset_y += crop_top as u32;
-    true
+    continuation
 }
 
 pub(super) fn clip_shared_cell(

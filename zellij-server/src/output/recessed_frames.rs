@@ -429,11 +429,15 @@ impl Output {
                     scaled_px: None,
                     placement_uid: FRAME_UID + (y * width + x) as u64,
                 };
-                if !key.compact
-                    || (compact::align_horizontal_edge(&mut image, geom, &neighbors, key)
-                        && compact::clip_shared_cell(&mut image, geom, &neighbors, key))
-                {
-                    frame_images.push(image);
+                let continuation = if key.compact {
+                    compact::align_horizontal_edge(&mut image, geom, &neighbors, key)
+                } else {
+                    None
+                };
+                for mut part in std::iter::once(image).chain(continuation) {
+                    if !key.compact || compact::clip_shared_cell(&mut part, geom, &neighbors, key) {
+                        frame_images.push(part);
+                    }
                 }
             }
             if let Some(stack) = &self.floating_panes_stack {
