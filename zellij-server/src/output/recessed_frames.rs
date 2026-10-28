@@ -9,11 +9,16 @@ use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
 
 mod clipping;
+mod colors;
 pub(crate) mod compact;
 mod depth;
+mod placements;
+pub(crate) mod raised;
+mod raster;
 mod strips;
 
-const MAX_BYTES: usize = 16 * 1024 * 1024;
+// Includes queued variants: prewarming cannot overrun the admission budget.
+const MAX_BYTES: usize = 64 * 1024 * 1024;
 // Grid placement IDs grow from one. Reserve the upper half for native frames.
 const FRAME_UID: u64 = 1 << 63;
 // Composite the rim and translucent shadow over pane text and application
@@ -30,17 +35,42 @@ struct TileKey {
     thickness: usize,
     radius: usize,
     compact: bool,
+    raised: bool,
 }
 
 impl TileKey {
-    fn tile_cells(self) -> usize {
-        let blur = (self.width as f64 * 0.30).max(0.75) * 5.0;
-        let tail = self.radius as f64 + self.width as f64 * 0.35 + blur + 1.0;
-        let (x, y) = if self.compact {
+    fn raised_padding(self) -> (usize, usize) {
+        let support = (self.width as f64 * 0.30).max(0.75) * 5.0;
+        let margin = (self.width as f64 * 0.35 + support + 1.0).ceil() as usize;
+        (
+            margin.div_ceil(self.width) * self.width,
+            margin.div_ceil(self.height) * self.height,
+        )
+    }
+
+    fn raised_margins(self) -> (usize, usize) {
+        // Hints retain their existing rows and two-column inset. Place the
+        // surface half a cell-width away from that content on every side.
+        let padding = self.width.div_ceil(2).min(self.height);
+        (self.width * 2 - padding, self.height - padding)
+    }
+
+    fn insets(self) -> (usize, usize) {
+        if self.raised {
+            let (x, y) = self.raised_padding();
+            let (margin_x, margin_y) = self.raised_margins();
+            (x + margin_x, y + margin_y)
+        } else if self.compact {
             (self.width, self.height)
         } else {
             (self.thickness, self.thickness)
-        };
+        }
+    }
+
+    fn tile_cells(self) -> usize {
+        let blur = (self.width as f64 * 0.30).max(0.75) * 5.0;
+        let tail = self.radius as f64 + self.width as f64 * 0.35 + blur + 1.0;
+        let (x, y) = self.insets();
         (((x as f64 + tail) / self.width as f64).ceil() as usize)
             .max(((y as f64 + tail) / self.height as f64).ceil() as usize)
     }
@@ -49,11 +79,16 @@ impl TileKey {
 #[derive(Debug, Default)]
 pub(crate) struct FrameCache {
     clients: HashMap<ClientId, TileKey>,
+    accents: HashMap<ClientId, [Option<[u8; 3]>; 16]>,
     atlases: HashMap<TileKey, InternalImageId>,
     strips: HashMap<TileKey, strips::Strips>,
     geometry: HashMap<(ClientId, PaneId), CachedGeometry>,
+    raised_masks: HashMap<(ClientId, PaneId), Rc<raised::Surface>>,
     active_frames: HashMap<(ClientId, PaneId), FrameRequest>,
     host_backgrounds: HashMap<ClientId, zellij_utils::ipc::TerminalBackground>,
+    worker: Option<raster::Worker>,
+    rasterizer: raster::Rasterizer,
+    requested: HashSet<TileKey>,
     bytes: usize,
 }
 
@@ -75,6 +110,8 @@ pub(super) struct FrameRequest {
 
 impl FrameCache {
     pub(crate) fn update(&mut self, client_id: ClientId, colors: &TerminalColors) -> bool {
+        let accents = colors.frame_accents();
+        let accents_changed = self.accents.insert(client_id, accents) != Some(accents);
         let previous = self.clients.remove(&client_id);
         let next = colors
             .frame_colors()
@@ -100,39 +137,84 @@ impl FrameCache {
                     thickness,
                     radius,
                     compact,
+                    raised: false,
                 })
             });
         if let Some(key) = next {
             self.clients.insert(client_id, key);
         }
-        previous != next
+        previous != next || accents_changed
     }
 
     pub(crate) fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
+        self.accents.remove(&client_id);
         self.host_backgrounds.remove(&client_id);
         self.active_frames
             .retain(|(client, _), _| *client != client_id);
         self.geometry.retain(|(client, _), _| *client != client_id);
+        self.raised_masks
+            .retain(|(client, _), _| *client != client_id);
     }
 
-    fn atlas(&mut self, key: TileKey, store: &mut KittyImageStore) -> Option<InternalImageId> {
-        if let Some(id) = self.atlases.get(&key) {
-            return Some(*id);
+    pub(crate) fn warm_up(
+        &mut self,
+        client: ClientId,
+        notify: Option<zellij_utils::channels::SenderWithContext<crate::screen::ScreenInstruction>>,
+    ) {
+        let Some(base) = self.clients.get(&client).copied() else {
+            return;
+        };
+        if self.worker.is_none() {
+            self.worker = notify.and_then(raster::Worker::start);
         }
-        let tile_cells = key.tile_cells();
-        let bytes = key.width * tile_cells * key.height * tile_cells * 8 * 4 + strips::bytes(key);
-        if self.bytes + bytes > MAX_BYTES {
-            return None;
+        if self.worker.is_none() {
+            return;
         }
-        let raster = rasterize(key);
-        let edge_strips = strips::create(key, &raster, store)?;
-        let id = match store.store_image(DecodedImage {
-            bytes: raster,
-            width: (key.width * tile_cells * 8) as u32,
-            height: (key.height * tile_cells) as u32,
-            format: KittyFormat::Rgba32,
+        self.request(base);
+        for accent in [None, Some(3), Some(4)] {
+            if let Some(key) = self.raised_key(client, accent) {
+                self.request(key);
+            }
+        }
+    }
+
+    fn raised_key(&self, client: ClientId, accent: Option<u8>) -> Option<TileKey> {
+        let mut key = *self.clients.get(&client)?;
+        key.raised = true;
+        key.compact = false;
+        if let Some(accent) = accent.and_then(|index| {
+            self.accents
+                .get(&client)
+                .and_then(|colors| colors.get(usize::from(index)).copied().flatten())
         }) {
+            key.background = colors::tint(key.background, accent);
+        }
+        Some(key)
+    }
+
+    fn request(&mut self, key: TileKey) -> bool {
+        if self.requested.contains(&key) {
+            return false;
+        }
+        let span = key.tile_cells();
+        let bytes = key.width * span * key.height * span * 8 * 4 + strips::bytes(key);
+        if self.bytes + bytes > MAX_BYTES {
+            return false;
+        }
+        self.requested.insert(key);
+        self.bytes += bytes;
+        self.worker.as_ref().is_none_or(|worker| worker.queue(key))
+    }
+
+    fn install(
+        &mut self,
+        key: TileKey,
+        prepared: raster::Prepared,
+        store: &mut KittyImageStore,
+    ) -> Option<InternalImageId> {
+        let edge_strips = strips::install(prepared.strips, store)?;
+        let id = match store.store_native_image(prepared.atlas.image, prepared.atlas.compressed) {
             Ok(id) => id,
             Err(_) => {
                 edge_strips.release(store);
@@ -142,8 +224,28 @@ impl FrameCache {
         store.add_placement_ref(id);
         self.atlases.insert(key, id);
         self.strips.insert(key, edge_strips);
-        self.bytes += bytes;
         Some(id)
+    }
+
+    fn atlas(&mut self, key: TileKey, store: &mut KittyImageStore) -> Option<InternalImageId> {
+        let completed = self
+            .worker
+            .as_ref()
+            .map(|worker| worker.completed())
+            .unwrap_or_default();
+        for (key, prepared) in completed {
+            if let Some(prepared) = prepared {
+                self.install(key, prepared, store);
+            }
+        }
+        if let Some(id) = self.atlases.get(&key) {
+            return Some(*id);
+        }
+        if self.request(key) && self.worker.is_none() {
+            let prepared = self.rasterizer.prepare(key)?;
+            return self.install(key, prepared, store);
+        }
+        None
     }
 }
 
@@ -162,43 +264,6 @@ fn surface(foreground: [u8; 3], background: [u8; 3]) -> [u8; 3] {
     }
     let offset = ((luminance(foreground) - luminance(background)) * 255.0 * 0.06).round() as i16;
     background.map(|channel| (i16::from(channel) - offset).clamp(0, 255) as u8)
-}
-
-// TL, top, TR, left, right, BL, bottom, BR. Mirror sample coordinates,
-// rather than rounding two independent curves on odd-sized cells.
-fn rasterize(key: TileKey) -> Vec<u8> {
-    let tile_cells = key.tile_cells();
-    let stride = key.width * tile_cells;
-    let mut rgba = Vec::with_capacity(stride * key.height * tile_cells * 8 * 4);
-    for y in 0..key.height * tile_cells {
-        for tile in 0..8 {
-            for x in 0..stride {
-                let mut channels = [0.0; 4];
-                for sy in 0..4 {
-                    for sx in 0..4 {
-                        let px = x as f64 + (sx as f64 + 0.5) / 4.0;
-                        let py = y as f64 + (sy as f64 + 0.5) / 4.0;
-                        let sample = depth::sample(key, tile, px, py);
-                        for (sum, channel) in channels.iter_mut().zip(sample) {
-                            *sum += channel;
-                        }
-                    }
-                }
-                // Kitty expects straight RGBA, while supersampling blends
-                // premultiplied channels to keep translucent shadow edges clean.
-                for channel in &channels[..3] {
-                    let value = if channels[3] > 0.0 {
-                        channel * 255.0 / channels[3]
-                    } else {
-                        0.0
-                    };
-                    rgba.push(value.round().clamp(0.0, 255.0) as u8);
-                }
-                rgba.push((channels[3] / 16.0).round().clamp(0.0, 255.0) as u8);
-            }
-        }
-    }
-    rgba
 }
 
 impl Output {
@@ -238,15 +303,16 @@ impl Output {
         client_id: ClientId,
     ) -> Option<zellij_utils::ipc::TerminalBackground> {
         let cache = self.recessed_frames.as_ref()?.borrow();
-        let key = cache
+        cache
             .active_frames
             .iter()
             .find_map(|((client, _), frame)| {
                 (*client == client_id)
                     .then_some(frame.atlas)
                     .flatten()
-                    .map(|(key, _)| key)
+                    .map(|_| ())
             })?;
+        let key = cache.clients.get(&client_id)?;
         Some(zellij_utils::ipc::TerminalBackground {
             original: key.background,
             surface: key.surface,
@@ -308,6 +374,13 @@ impl Output {
         z_index: Option<usize>,
         mut characters: Option<&mut Vec<CharacterChunk>>,
     ) {
+        if self
+            .recessed_frame_requests
+            .get(&(client_id, pane_id))
+            .is_some_and(|request| request.atlas.is_some_and(|(key, _)| key.raised))
+        {
+            return;
+        }
         let Some(cache) = self.recessed_frames.clone() else {
             return;
         };
@@ -357,6 +430,7 @@ impl Output {
             let mut cache = cache.borrow_mut();
             let live: HashSet<_> = cache.active_frames.keys().copied().collect();
             cache.geometry.retain(|pane, _| live.contains(pane));
+            cache.raised_masks.retain(|pane, _| live.contains(pane));
         }
         for ((client_id, pane_id), request) in std::mem::take(&mut self.recessed_frame_requests) {
             self.finish_recessed_frame(client_id, pane_id, request);
@@ -395,9 +469,6 @@ impl Output {
         };
         if let Some((key, id)) = request.atlas {
             let geom = request.geom;
-            let width = geom.cols.as_usize();
-            let height = geom.rows.as_usize();
-            let tile_cells = key.tile_cells();
             let mut neighbors: Vec<_> = if key.compact && request.z_index.is_none() {
                 self.recessed_frames
                     .as_ref()
@@ -431,46 +502,8 @@ impl Output {
             let frame_images = if let Some(images) = cached {
                 images
             } else {
-                let mut frame_images = Vec::with_capacity((width + height) * 4);
-                let horizontal = (0..width).flat_map(|x| {
-                    (0..tile_cells).flat_map(move |y| [(x, y), (x, height - tile_cells + y)])
-                });
-                let vertical = (tile_cells..height - tile_cells).flat_map(|y| {
-                    (0..tile_cells).flat_map(move |x| [(x, y), (width - tile_cells + x, y)])
-                });
-                for (x, y) in horizontal.chain(vertical) {
-                    let (tile, column, row) = match (x, y) {
-                        (_, _) if y < tile_cells && x < tile_cells => (0, x, y),
-                        (_, _) if y < tile_cells && x + tile_cells >= width => {
-                            (2, x + tile_cells - width, y)
-                        },
-                        (_, _) if y < tile_cells => (1, 0, y),
-                        (_, _) if y + tile_cells >= height && x < tile_cells => {
-                            (5, x, y + tile_cells - height)
-                        },
-                        (_, _) if y + tile_cells >= height && x + tile_cells >= width => {
-                            (7, x + tile_cells - width, y + tile_cells - height)
-                        },
-                        (_, _) if y + tile_cells >= height => (6, 0, y + tile_cells - height),
-                        (_, _) if x < tile_cells => (3, x, 0),
-                        (_, _) if x + tile_cells >= width => (4, x + tile_cells - width, 0),
-                        _ => continue,
-                    };
-                    let mut image = KittyImageChunk {
-                        cell_x: geom.x + x,
-                        cell_y: geom.y + y,
-                        internal_image_id: id,
-                        source_px_x: (tile * tile_cells + column) * key.width,
-                        source_px_y: row * key.height,
-                        source_px_width: key.width,
-                        source_px_height: key.height,
-                        cell_offset_x: 0,
-                        cell_offset_y: 0,
-                        z_index: FRAME_Z_INDEX,
-                        dest_cells: (0, 0),
-                        scaled_px: None,
-                        placement_uid: FRAME_UID + (y * width + x) as u64,
-                    };
+                let mut frame_images = vec![];
+                for mut image in placements::cells(key, id, geom) {
                     let continuation = if key.compact {
                         compact::align_horizontal_edge(&mut image, geom, &neighbors, key)
                     } else {
@@ -502,10 +535,27 @@ impl Output {
                     );
                 frame_images
             };
+            let positioned;
+            let frame_images = if key.raised {
+                positioned = frame_images
+                    .iter()
+                    .filter_map(|image| raised::position(*image, key))
+                    .collect::<Vec<_>>();
+                &positioned[..]
+            } else {
+                &frame_images[..]
+            };
+            let rounded_stack = self.raised_stack(client_id, request.z_index);
             images.extend(clipping::visible(
-                &frame_images,
-                self.floating_panes_stack.as_ref(),
-                request.z_index,
+                frame_images,
+                rounded_stack
+                    .as_ref()
+                    .or(self.floating_panes_stack.as_ref()),
+                if rounded_stack.is_some() {
+                    None
+                } else {
+                    request.z_index
+                },
                 key,
             ));
         }

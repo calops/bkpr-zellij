@@ -8,6 +8,7 @@ pub mod program_status;
 pub mod program_status_vte;
 pub mod selection;
 pub mod sixel;
+pub mod surface;
 pub mod terminal_character;
 
 mod active_panes;

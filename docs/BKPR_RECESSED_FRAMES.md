@@ -84,6 +84,51 @@ material; there is no focus glow or focus-dependent variant. Each resolution
 and palette is rasterized once and reused across panes and focus changes,
 without timers or changes to focus behavior.
 
+## Raised plugin surfaces
+
+Borderless, passive floating plugins can opt into `bkpr_surface="raised-outline"`
+through their existing userspace configuration. The plugin retains its outlined
+fallback frame, content, dimensions and lifecycle. On graphics-capable clients
+with rounded corners enabled, the native compositor uses the former outline
+and its padding as a margin, fills the inset surface with the original terminal
+background and casts a directional Gaussian shadow into that margin. Hint rows
+stay in their existing cells; the title and outline are omitted in fancy mode.
+Unsupported clients, watchers and the
+border toggle retain the plugin's original frame.
+
+Raised and recessed materials share one atlas cache, rounded-distance function,
+continuous blur, repeated straight-edge strips, placement coalescer and pixel
+clipper. Raised surfaces invert which side of the mask casts the shadow and
+reverse the shared bevel's normals: upper/left faces catch the light and
+lower/right faces are shaded. Their radius matches pane corners at the same cell resolution.
+Cached cell masks expose the underlying text and image cells at rounded cuts;
+opaque corner pixels cover the inside of those cells precisely. Native hit
+testing and popup focus remain rectangular and unchanged. Shadow placements can
+extend outside the rectangle without allocating cells or moving content. The
+surface sits half a cell-width from the hint text on every side in physical
+pixels, instead of touching the outer rectangle.
+
+Opted-in plugin frames can start with `OSC 7502;{JSON} BEL`, carrying version 1,
+and an optional ANSI accent index (0–15).
+The native plugin grid retains this bounded, validated presentation per client
+and replaces it on every complete frame. It never interprets it as a terminal
+title, focus request or harness status. Bkpr publishes neutral locked cards,
+terminal-yellow unlocked cards and terminal-blue sidebar-control cards. Only
+query-confirmed palette entries tint the original background. Accents are
+normalized to the locked surface's linear luminance before blending; gamut
+limits reduce hue strength instead of changing brightness. Missing entries
+leave it neutral. These material colors share the existing
+resolution/palette atlas cache. The host terminal background always comes from
+the original client palette, never a tinted popup material.
+
+The guide placement cache includes anchor readiness, so initial tab/pane
+metadata can activate its host without a hint change. New or changed native
+surface masks repaint the underlying cached grids as well as the popup and
+image placements: the earlier rectangular clip may have hidden a sidebar clear,
+leaving old fallback glyphs in newly exposed margins. This also applies
+when permissions or graphics capabilities arrive after the first
+plugin frame. No polling or animation timer is involved.
+
 ## Outer terminal background
 
 While recessed frames are active, the native client sets the host's default
@@ -128,7 +173,18 @@ placement list. Floating panes clip the merged rectangles in exact physical
 pixels, including translated sub-cell offsets. Layout adjacency is recalculated
 only when visible pane geometry or content offsets change.
 
-The atlas and strip cache admits up to 16 MiB of raw pixels. Once full, new keys fall back
+Once the actual terminal palette and cell size arrive, a single background
+worker pre-renders the pane material and all three popup variants. A color-free
+16-bit coefficient basis is sampled once per geometry; tint changes only color
+that basis. Straight profiles are evaluated once along their changing axis.
+The worker also builds the long strips and caches ZLIB/base64 payloads, so first
+display avoids blur work, strip construction and compression on the UI thread.
+Completion requests a native redraw without polling or a hint change. Native
+surface uploads use Kitty's compressed transfer; application image handling is
+unchanged. Hint content is not part of the raster key.
+
+The atlas and strip cache reserves up to 64 MiB of raw pixels, including queued
+jobs. The geometry basis has a separate 64 MiB limit. Once full, new keys fall back
 to ordinary frames; existing keys remain reusable. Cached images are not evicted
 and regenerated during the session. Client detach removes its geometry and
 capability state while retaining shared atlas entries.

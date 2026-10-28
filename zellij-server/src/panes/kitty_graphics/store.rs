@@ -22,6 +22,7 @@ struct StoredImage {
     refcount: usize,
     lru_stamp: u64,
     base64_cache: HashMap<Option<(u16, u16)>, String>,
+    native_zlib: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ impl KittyImageStore {
                 refcount: 0,
                 lru_stamp,
                 base64_cache: HashMap::new(),
+                native_zlib: None,
             },
         );
         self.total_bytes += size;
@@ -92,6 +94,16 @@ impl KittyImageStore {
     }
     pub fn get(&self, id: InternalImageId) -> Option<&KittyImage> {
         self.images.get(&id).map(|stored| &stored.image)
+    }
+    // Only native surface preparation supplies this already-compressed RGBA
+    // payload. Application images retain their original transfer path.
+    pub(crate) fn store_native_image(&mut self, image: DecodedImage, encoded: String) -> Result<InternalImageId, KittyError> {
+        let id = self.store_image(image)?;
+        self.images.get_mut(&id).unwrap().native_zlib = Some(encoded);
+        Ok(id)
+    }
+    pub(crate) fn native_zlib_base64(&self, id: InternalImageId) -> Option<String> {
+        self.images.get(&id)?.native_zlib.clone()
     }
     pub fn scaled_variant(&self, id: InternalImageId, cells: (u16, u16)) -> Option<&[u8]> {
         self.images

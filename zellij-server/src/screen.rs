@@ -2898,6 +2898,7 @@ impl Screen {
         let colors = self.terminal_colors.entry(client_id).or_default();
         if colors.update(update) {
             if self.recessed_frames.borrow_mut().update(client_id, colors) {
+                self.recessed_frames.borrow_mut().warm_up(client_id, self.bus.senders.to_screen.clone());
                 for tab in self.tabs.values_mut() {
                     tab.set_force_render();
                 }

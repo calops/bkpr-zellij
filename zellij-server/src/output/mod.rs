@@ -418,6 +418,7 @@ fn emit_kitty_transmit(
     width: usize,
     height: usize,
     b64: &str,
+    compressed: bool,
 ) -> Result<()> {
     let err_context = "failed to serialize kitty transmit";
     let mut parts: Vec<&str> = vec![];
@@ -435,10 +436,11 @@ fn emit_kitty_transmit(
         if part_index == 0 {
             write!(
                 out,
-                "\u{1b}_Ga=t,q=2,f=32,t=d,i={},s={},v={},m={};{}\u{1b}\\",
+                "\u{1b}_Ga=t,q=2,f=32,t=d,i={},s={},v={}{},m={};{}\u{1b}\\",
                 host_image_id,
                 width,
                 height,
+                if compressed { ",o=z" } else { "" },
                 if last == 0 { 0 } else { 1 },
                 part
             )
@@ -568,13 +570,15 @@ fn serialize_kitty_frame(kitty_input: KittyFrameInput) -> Result<String> {
                         Some(dims) => dims,
                         None => continue,
                     };
-                    let b64 = match kitty_image_store.base64_for(chunk.internal_image_id, variant) {
+                    let packed = variant.is_none().then(|| kitty_image_store.native_zlib_base64(chunk.internal_image_id)).flatten();
+                    let compressed = packed.is_some();
+                    let b64 = match packed.or_else(|| kitty_image_store.base64_for(chunk.internal_image_id, variant)) {
                         Some(b64) => b64,
                         None => continue,
                     };
                     let host_image_id = host_state.next_host_image_id;
                     host_state.next_host_image_id += 1;
-                    emit_kitty_transmit(&mut out, host_image_id, width, height, &b64)?;
+                    emit_kitty_transmit(&mut out, host_image_id, width, height, &b64, compressed)?;
                     host_state.transmitted.insert(image_key, host_image_id);
                     host_image_id
                 },
@@ -644,6 +648,7 @@ fn serialize_kitty_frame(kitty_input: KittyFrameInput) -> Result<String> {
 pub struct Output {
     pub(crate) recessed_frames: Option<Rc<RefCell<recessed_frames::FrameCache>>>,
     recessed_frame_requests: HashMap<(ClientId, PaneId), recessed_frames::FrameRequest>,
+    raised_surfaces: HashMap<ClientId, recessed_frames::raised::Scene>,
     pre_vte_instructions: HashMap<ClientId, Vec<String>>,
     post_vte_instructions: HashMap<ClientId, Vec<String>>,
     client_character_chunks: HashMap<ClientId, Vec<CharacterChunk>>,
@@ -718,6 +723,8 @@ impl Output {
         mut character_chunks: Vec<CharacterChunk>,
         z_index: Option<usize>,
     ) -> Result<()> {
+        self.decorate_raised_popup(client_id, z_index, &mut character_chunks);
+        let rounded_stack = self.raised_stack(client_id, z_index);
         if let Some(client_character_chunks) = self.client_character_chunks.get_mut(&client_id) {
             if self
                 .background_dimming
@@ -726,9 +733,14 @@ impl Output {
             {
                 crate::ui::pane_contents_and_ui::dim_character_chunks(&mut character_chunks);
             }
-            if let Some(floating_panes_stack) = &self.floating_panes_stack {
+            if let Some(floating_panes_stack) =
+                rounded_stack.as_ref().or(self.floating_panes_stack.as_ref())
+            {
                 let mut visible_character_chunks = floating_panes_stack
-                    .visible_character_chunks(character_chunks, z_index)
+                    .visible_character_chunks(
+                        character_chunks,
+                        if rounded_stack.is_some() { None } else { z_index },
+                    )
                     .with_context(|| {
                         format!("failed to add character chunks for client {}", client_id)
                     })?;
@@ -817,11 +829,14 @@ impl Output {
         sixel_image_chunks: Vec<SixelImageChunk>,
         z_index: Option<usize>,
     ) {
+        let rounded_stack = self.raised_stack(client_id, z_index);
         if let Some(character_cell_size) = *self.character_cell_size.borrow() {
-            let mut sixel_chunks = if let Some(floating_panes_stack) = &self.floating_panes_stack {
+            let mut sixel_chunks = if let Some(floating_panes_stack) =
+                rounded_stack.as_ref().or(self.floating_panes_stack.as_ref())
+            {
                 floating_panes_stack.visible_sixel_image_chunks(
                     sixel_image_chunks,
-                    z_index,
+                    if rounded_stack.is_some() { None } else { z_index },
                     &character_cell_size,
                 )
             } else {
@@ -837,6 +852,12 @@ impl Output {
         client_ids: impl Iterator<Item = ClientId>,
         z_index: Option<usize>,
     ) {
+        if !self.raised_surfaces.is_empty() {
+            for client in client_ids {
+                self.add_sixel_image_chunks_to_client(client, sixel_image_chunks.clone(), z_index);
+            }
+            return;
+        }
         if let Some(character_cell_size) = *self.character_cell_size.borrow() {
             let sixel_chunks = if let Some(floating_panes_stack) = &self.floating_panes_stack {
                 floating_panes_stack.visible_sixel_image_chunks(
@@ -860,16 +881,21 @@ impl Output {
         kitty_image_chunks: Vec<KittyImageChunk>,
         z_index: Option<usize>,
     ) {
+        let rounded_stack = self.raised_stack(client_id, z_index);
         self.client_rendered_kitty_panes
             .entry(client_id)
             .or_insert_with(HashSet::new)
             .insert(pane_id);
         let mut kitty_chunks = match (
             *self.character_cell_size.borrow(),
-            &self.floating_panes_stack,
+            rounded_stack.as_ref().or(self.floating_panes_stack.as_ref()),
         ) {
             (Some(character_cell_size), Some(floating_panes_stack)) => floating_panes_stack
-                .visible_kitty_image_chunks(kitty_image_chunks, z_index, &character_cell_size),
+                .visible_kitty_image_chunks(
+                    kitty_image_chunks,
+                    if rounded_stack.is_some() { None } else { z_index },
+                    &character_cell_size,
+                ),
             _ => kitty_image_chunks,
         };
         self.client_kitty_chunks
@@ -886,6 +912,14 @@ impl Output {
         client_ids: impl Iterator<Item = ClientId>,
         z_index: Option<usize>,
     ) {
+        if !self.raised_surfaces.is_empty() {
+            for client in client_ids {
+                self.add_kitty_image_chunks_to_client(
+                    client, pane_id, kitty_image_chunks.clone(), z_index,
+                );
+            }
+            return;
+        }
         let kitty_chunks = match (
             *self.character_cell_size.borrow(),
             &self.floating_panes_stack,

@@ -749,6 +749,12 @@ pub trait Pane {
     fn clear_pane_frame_color_override(&mut self, _client_id: Option<ClientId>);
     fn frame_color_override(&self) -> Option<PaletteColor>;
     fn invoked_with(&self) -> &Option<Run>;
+    fn surface_presentation(
+        &self,
+        _client: ClientId,
+    ) -> Option<&crate::panes::surface::SurfacePresentation> {
+        None
+    }
     fn set_title(&mut self, title: String);
     fn update_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
     fn start_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
@@ -5034,6 +5040,15 @@ impl Tab {
             self.link_handler.clone(),
             floating_panes_stack,
         );
+        if client_id_override.is_none() {
+            // Rounded surface activation exposes cells that the previous
+            // rectangular popup clipped out. Repaint the underlying cached
+            // grids too; repainting only the popup leaves stale fallback text.
+            for region in self.floating_panes.prepare_raised_surfaces(output) {
+                self.tiled_panes.render_region(region, output)?;
+                self.floating_panes.render_region(region, output)?;
+            }
+        }
         self.background_dimming
             .retain(|client_id, _| connected_clients.contains(client_id));
         self.background_dimming_clients.retain(|pane_id, _| {
