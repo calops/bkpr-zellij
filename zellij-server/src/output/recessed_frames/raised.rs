@@ -11,15 +11,21 @@ pub(crate) struct Scene {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Surface {
+    pane: PaneId,
     geom: PaneGeom,
     key: TileKey,
     layer: usize,
     coverage: Vec<PaneGeom>,
     presentation: SurfacePresentation,
+    joined: Option<Rc<joined::Plan>>,
+    clip_layers: Vec<PaneGeom>,
 }
 
 impl Surface {
     fn corner_cell(&self, x: usize, y: usize) -> bool {
+        if let Some(plan) = &self.joined {
+            return !plan.full_cell(x, y);
+        }
         let radius = self.key.radius as f64;
         let width = (self.geom.cols.as_usize() * self.key.width) as f64;
         let height = (self.geom.rows.as_usize() * self.key.height) as f64;
@@ -52,13 +58,24 @@ impl Surface {
         })
     }
 
-    fn new(geom: PaneGeom, key: TileKey, layer: usize, presentation: SurfacePresentation) -> Self {
+    fn new(
+        geom: PaneGeom,
+        key: TileKey,
+        layer: usize,
+        presentation: SurfacePresentation,
+        pane: PaneId,
+        joined: Option<Rc<joined::Plan>>,
+        clip_layers: Vec<PaneGeom>,
+    ) -> Self {
         let mut surface = Self {
+            pane,
             geom,
             key,
             layer,
             coverage: vec![],
             presentation,
+            joined,
+            clip_layers,
         };
         // Expose complete cells intersected by a rounded cutout. The opaque
         // portion of the cached corner image masks the lower cells precisely.
@@ -104,6 +121,11 @@ impl Surface {
                     && x + width <= self.geom.x + self.geom.cols.as_usize()
                     && chunk.y >= self.geom.y
                     && chunk.y < self.geom.y + self.geom.rows.as_usize();
+                let outline = self.joined.is_some()
+                    && (x == self.geom.x
+                        || x + width == self.geom.x + self.geom.cols.as_usize()
+                        || chunk.y == self.geom.y
+                        || chunk.y + 1 == self.geom.y + self.geom.rows.as_usize());
                 let cutout = inside && (x..x + width).any(|x| self.corner_cell(x, chunk.y));
                 if cutout {
                     if !run.terminal_characters.is_empty() {
@@ -113,6 +135,10 @@ impl Surface {
                     run.x = x + width;
                 } else {
                     if inside {
+                        if outline {
+                            character =
+                                TerminalCharacter::new_singlewidth_styled(' ', character.styles);
+                        }
                         character.styles.update(|styles| {
                             styles.background = bg;
                         });
@@ -130,6 +156,63 @@ impl Surface {
 }
 
 impl Output {
+    pub(crate) fn finish_raised_surfaces(&mut self, clients: &HashSet<ClientId>) -> Vec<Viewport> {
+        let Some(cache) = self.recessed_frames.as_ref() else {
+            return vec![];
+        };
+        let mut current = HashMap::new();
+        for client in clients {
+            if let Some(scene) = self.raised_surfaces.get(client) {
+                for surface in &scene.surfaces {
+                    if let Some(plan) = &surface.joined {
+                        let a = &plan.attachment;
+                        let g = surface.geom;
+                        current.insert(
+                            (*client, surface.pane),
+                            [
+                                a.x,
+                                a.y,
+                                a.columns,
+                                a.rows,
+                                g.x,
+                                g.y,
+                                g.cols.as_usize(),
+                                g.rows.as_usize(),
+                            ],
+                        );
+                    }
+                }
+            }
+        }
+        let mut cache = cache.borrow_mut();
+        let mut damage = vec![];
+        let mut add = |rects: [usize; 8]| {
+            for rect in rects.chunks_exact(4) {
+                damage.push(Viewport {
+                    x: rect[0],
+                    y: rect[1],
+                    cols: rect[2],
+                    rows: rect[3],
+                });
+            }
+        };
+        for (identity, old) in &cache.joined_regions {
+            if clients.contains(&identity.0) && current.get(identity) != Some(old) {
+                add(*old);
+            }
+        }
+        for (identity, new) in &current {
+            if cache.joined_regions.get(identity) != Some(new) {
+                add(*new);
+            }
+        }
+        cache
+            .joined_regions
+            .retain(|(client, _), _| !clients.contains(client));
+        cache.joined_regions.extend(current);
+        damage
+    }
+
     pub(crate) fn register_raised_popup(
         &mut self,
         client: ClientId,
@@ -141,12 +224,52 @@ impl Output {
         let Some(cache) = self.recessed_frames.clone() else {
             return false;
         };
-        let Some(key) = cache.borrow().raised_key(client, presentation.accent) else {
+        let Some(mut key) = cache.borrow().raised_key(client, presentation.accent) else {
             return false;
         };
+        if presentation.attachment.is_some() {
+            key.background = colors::lift(key.background, key.foreground);
+        }
+        let clip_layers = self
+            .floating_panes_stack
+            .as_ref()
+            .map(|stack| stack.layers.clone())
+            .unwrap_or_default();
+        let previous = cache
+            .borrow()
+            .raised_masks
+            .get(&(client, pane))
+            .filter(|surface| {
+                surface.geom == geom
+                    && surface.key == key
+                    && surface.layer == layer
+                    && surface.presentation == presentation
+            })
+            .cloned();
+        let joined = if let Some(attachment) = &presentation.attachment {
+            if let Some(previous) = &previous {
+                previous.joined.clone()
+            } else {
+                let plan = joined::Plan::prepare(
+                    &mut cache.borrow_mut(),
+                    &mut self.kitty_image_store.borrow_mut(),
+                    key,
+                    geom,
+                    attachment,
+                );
+                let Some(plan) = plan else {
+                    return false;
+                };
+                Some(Rc::new(plan))
+            }
+        } else {
+            None
+        };
         let (margin_x, margin_y) = key.raised_margins();
-        if (geom.cols.as_usize() * key.width).saturating_sub(2 * margin_x) < key.radius * 2
-            || (geom.rows.as_usize() * key.height).saturating_sub(2 * margin_y) < key.radius * 2
+        if joined.is_none()
+            && ((geom.cols.as_usize() * key.width).saturating_sub(2 * margin_x) < key.radius * 2
+                || (geom.rows.as_usize() * key.height).saturating_sub(2 * margin_y)
+                    < key.radius * 2)
         {
             return false;
         }
@@ -163,8 +286,11 @@ impl Output {
         let request = FrameRequest {
             geom: image_geom,
             z_index: Some(layer),
-            changed: true,
+            changed: previous
+                .as_ref()
+                .is_none_or(|surface| surface.clip_layers != clip_layers),
             atlas: Some((key, id)),
+            images_override: joined.as_ref().map(|plan| plan.images.clone()),
         };
         cache
             .borrow_mut()
@@ -182,11 +308,20 @@ impl Output {
                         && surface.key == key
                         && surface.layer == layer
                         && surface.presentation == presentation
+                        && surface.clip_layers == clip_layers
                 })
                 .cloned();
             cached.unwrap_or_else(|| {
                 changed = true;
-                let surface = Rc::new(Surface::new(geom, key, layer, presentation));
+                let surface = Rc::new(Surface::new(
+                    geom,
+                    key,
+                    layer,
+                    presentation,
+                    pane,
+                    joined,
+                    clip_layers,
+                ));
                 cache.raised_masks.insert((client, pane), surface.clone());
                 surface
             })
@@ -210,6 +345,39 @@ impl Output {
         z: Option<usize>,
         chunks: &mut Vec<CharacterChunk>,
     ) {
+        if z.is_none() {
+            if let Some(scene) = self.raised_surfaces.get(&client) {
+                for surface in &scene.surfaces {
+                    let Some(plan) = &surface.joined else {
+                        continue;
+                    };
+                    for chunk in chunks.iter_mut() {
+                        let mut x = chunk.x;
+                        for character in &mut chunk.terminal_characters {
+                            if plan.contains_item_cell(x, chunk.y)
+                                || (plan.guide_cell(x, chunk.y) && plan.full_cell(x, chunk.y))
+                            {
+                                if plan.guide_cell(x, chunk.y) {
+                                    *character = TerminalCharacter::new_singlewidth_styled(
+                                        ' ',
+                                        character.styles.clone(),
+                                    );
+                                }
+                                let color = if surface.corner_cell(x, chunk.y) {
+                                    surface.key.surface
+                                } else {
+                                    surface.key.background
+                                };
+                                character.styles.update(|styles| {
+                                    styles.background = Some(AnsiCode::RgbCode(color.into()));
+                                });
+                            }
+                            x += character.width();
+                        }
+                    }
+                }
+            }
+        }
         if let Some(surface) = self.raised_surfaces.get(&client).and_then(|scene| {
             scene
                 .surfaces

@@ -102,6 +102,38 @@ pub(super) fn coalesce(
             image.source_px_y = 0;
         }
     }
+    let repeated: Vec<_> = strips
+        .ids
+        .iter()
+        .enumerate()
+        .map(|(side, id)| (*id, side < 2))
+        .collect();
+    images = merge(images, key, &repeated);
+    // Region-local IDs stay stable when the pane width changes.
+    let mut sequences = [0u64; 8];
+    for image in &mut images {
+        let region = strips
+            .ids
+            .iter()
+            .position(|id| *id == image.internal_image_id)
+            .map(|side| side + 4)
+            .unwrap_or_else(|| match image.source_px_x / tile_width {
+                0 => 0,
+                2 => 1,
+                5 => 2,
+                _ => 3,
+            });
+        image.placement_uid = FRAME_UID | ((region as u64) << 48) | sequences[region];
+        sequences[region] += 1;
+    }
+    images
+}
+
+pub(super) fn merge(
+    mut images: Vec<KittyImageChunk>,
+    key: TileKey,
+    repeated: &[(InternalImageId, bool)],
+) -> Vec<KittyImageChunk> {
     for horizontal in [true, false] {
         images.sort_by_key(|image| {
             let (x, y) = position(*image, key);
@@ -128,11 +160,9 @@ pub(super) fn coalesce(
             if let Some(previous) = merged.last_mut() {
                 let (px, py) = position(*previous, key);
                 let (x, y) = position(image, key);
-                let repeated = if horizontal {
-                    strips.ids[..2].contains(&image.internal_image_id)
-                } else {
-                    strips.ids[2..].contains(&image.internal_image_id)
-                };
+                let repeated = repeated
+                    .iter()
+                    .any(|(id, axis)| *id == image.internal_image_id && *axis == horizontal);
                 let compatible = previous.internal_image_id == image.internal_image_id
                     && if horizontal {
                         py == y
@@ -174,24 +204,6 @@ pub(super) fn coalesce(
             merged.push(image);
         }
         images = merged;
-    }
-    // Region-local IDs stay stable when the pane width changes. Only changed
-    // destinations/extents need protocol updates; unchanged edges retain IDs.
-    let mut sequences = [0u64; 8];
-    for image in &mut images {
-        let region = strips
-            .ids
-            .iter()
-            .position(|id| *id == image.internal_image_id)
-            .map(|side| side + 4)
-            .unwrap_or_else(|| match image.source_px_x / tile_width {
-                0 => 0,
-                2 => 1,
-                5 => 2,
-                _ => 3,
-            });
-        image.placement_uid = FRAME_UID | ((region as u64) << 48) | sequences[region];
-        sequences[region] += 1;
     }
     images
 }

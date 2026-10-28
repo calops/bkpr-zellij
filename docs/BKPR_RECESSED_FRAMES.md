@@ -86,6 +86,23 @@ without timers or changes to focus behavior.
 
 ## Raised plugin surfaces
 
+Passive details plugins can select `bkpr_surface="raised-joined"` and attach a
+bounded sidebar item rectangle through the frame's OSC 7502 presentation. The
+rounded contour follows the union of that rectangle and the native popup,
+including inward seam corners. The plugin declares decorative guide prefixes
+separately: the raised material covers those guides while preserving item text
+and project images above it. The hover material lifts the confirmed background
+toward the terminal foreground in linear light. Native geometry, focus, pointer
+ownership and fallback rendering retain their existing policies.
+
+Joined contours reuse the same bevel, shadow, colorization and straight-strip
+pipeline. Raster keys describe local edge or corner geometry, independent of
+popup position and overall dimensions. Straight sections repeat cached strips;
+curves and seam junctions use cached cell tiles. Pixel results share the bounded
+image budget. A separate 16-entry LRU retains contour cell coverage and merged
+placements, so revisiting an item avoids rebuilding them. Worker completions
+batch render notifications, and unchanged surfaces skip graphics composition.
+
 Borderless, passive floating plugins can opt into `bkpr_surface="raised-outline"`
 through their existing userspace configuration. The plugin retains its outlined
 fallback frame, content, dimensions and lifecycle. On graphics-capable clients

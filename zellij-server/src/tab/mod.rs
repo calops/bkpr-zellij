@@ -5044,7 +5044,9 @@ impl Tab {
             // Rounded surface activation exposes cells that the previous
             // rectangular popup clipped out. Repaint the underlying cached
             // grids too; repainting only the popup leaves stale fallback text.
-            for region in self.floating_panes.prepare_raised_surfaces(output) {
+            let mut damage=self.floating_panes.prepare_raised_surfaces(output);
+            damage.extend(output.finish_raised_surfaces(&connected_clients));
+            for region in damage {
                 self.tiled_panes.render_region(region, output)?;
                 self.floating_panes.render_region(region, output)?;
             }
