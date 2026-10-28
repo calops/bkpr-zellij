@@ -1,6 +1,6 @@
 //! Pixel-aligned rounded frames. Geometry, focus and input remain native.
 //!
-//! Eight edge/corner tiles share an atlas. Each spans two rows/columns so a
+//! Eight edge/corner tiles share an atlas. Each covers the full blur support so a
 //! translucent inset shadow can extend over content glyphs. The cache
 //! owns one store reference per atlas, preventing repeated rasterization. The
 //! existing Kitty serializer caches base64 and uploads independently per client.
@@ -8,8 +8,10 @@ use super::*;
 use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
 
+mod clipping;
 pub(crate) mod compact;
 mod depth;
+mod strips;
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 // Grid placement IDs grow from one. Reserve the upper half for native frames.
@@ -32,11 +34,15 @@ struct TileKey {
 
 impl TileKey {
     fn tile_cells(self) -> usize {
-        if self.compact {
-            3
+        let blur = (self.width as f64 * 0.30).max(0.75) * 5.0;
+        let tail = self.radius as f64 + self.width as f64 * 0.35 + blur + 1.0;
+        let (x, y) = if self.compact {
+            (self.width, self.height)
         } else {
-            2
-        }
+            (self.thickness, self.thickness)
+        };
+        (((x as f64 + tail) / self.width as f64).ceil() as usize)
+            .max(((y as f64 + tail) / self.height as f64).ceil() as usize)
     }
 }
 
@@ -44,9 +50,19 @@ impl TileKey {
 pub(crate) struct FrameCache {
     clients: HashMap<ClientId, TileKey>,
     atlases: HashMap<TileKey, InternalImageId>,
+    strips: HashMap<TileKey, strips::Strips>,
+    geometry: HashMap<(ClientId, PaneId), CachedGeometry>,
     active_frames: HashMap<(ClientId, PaneId), FrameRequest>,
     host_backgrounds: HashMap<ClientId, zellij_utils::ipc::TerminalBackground>,
     bytes: usize,
+}
+
+#[derive(Debug)]
+struct CachedGeometry {
+    key: TileKey,
+    geom: PaneGeom,
+    neighbors: Vec<PaneGeom>,
+    images: Rc<Vec<KittyImageChunk>>,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +113,7 @@ impl FrameCache {
         self.host_backgrounds.remove(&client_id);
         self.active_frames
             .retain(|(client, _), _| *client != client_id);
+        self.geometry.retain(|(client, _), _| *client != client_id);
     }
 
     fn atlas(&mut self, key: TileKey, store: &mut KittyImageStore) -> Option<InternalImageId> {
@@ -104,20 +121,27 @@ impl FrameCache {
             return Some(*id);
         }
         let tile_cells = key.tile_cells();
-        let bytes = key.width * tile_cells * key.height * tile_cells * 8 * 4;
+        let bytes = key.width * tile_cells * key.height * tile_cells * 8 * 4 + strips::bytes(key);
         if self.bytes + bytes > MAX_BYTES {
             return None;
         }
-        let id = store
-            .store_image(DecodedImage {
-                bytes: rasterize(key),
-                width: (key.width * tile_cells * 8) as u32,
-                height: (key.height * tile_cells) as u32,
-                format: KittyFormat::Rgba32,
-            })
-            .ok()?;
+        let raster = rasterize(key);
+        let edge_strips = strips::create(key, &raster, store)?;
+        let id = match store.store_image(DecodedImage {
+            bytes: raster,
+            width: (key.width * tile_cells * 8) as u32,
+            height: (key.height * tile_cells) as u32,
+            format: KittyFormat::Rgba32,
+        }) {
+            Ok(id) => id,
+            Err(_) => {
+                edge_strips.release(store);
+                return None;
+            },
+        };
         store.add_placement_ref(id);
         self.atlases.insert(key, id);
+        self.strips.insert(key, edge_strips);
         self.bytes += bytes;
         Some(id)
     }
@@ -330,6 +354,9 @@ impl Output {
                         .get(client_id)
                         .is_some_and(|panes| panes.contains(pane_id))
                 });
+            let mut cache = cache.borrow_mut();
+            let live: HashSet<_> = cache.active_frames.keys().copied().collect();
+            cache.geometry.retain(|pane, _| live.contains(pane));
         }
         for ((client_id, pane_id), request) in std::mem::take(&mut self.recessed_frame_requests) {
             self.finish_recessed_frame(client_id, pane_id, request);
@@ -371,7 +398,7 @@ impl Output {
             let width = geom.cols.as_usize();
             let height = geom.rows.as_usize();
             let tile_cells = key.tile_cells();
-            let neighbors: Vec<_> = if key.compact && request.z_index.is_none() {
+            let mut neighbors: Vec<_> = if key.compact && request.z_index.is_none() {
                 self.recessed_frames
                     .as_ref()
                     .map(|cache| {
@@ -389,68 +416,98 @@ impl Output {
             } else {
                 vec![]
             };
-            let mut frame_images = Vec::with_capacity((width + height) * 4);
-            let horizontal = (0..width).flat_map(|x| {
-                (0..tile_cells).flat_map(move |y| [(x, y), (x, height - tile_cells + y)])
+            neighbors
+                .sort_by_key(|geom| (geom.x, geom.y, geom.cols.as_usize(), geom.rows.as_usize()));
+            let cached = self.recessed_frames.as_ref().and_then(|cache| {
+                cache
+                    .borrow()
+                    .geometry
+                    .get(&(client_id, pane_id))
+                    .filter(|cached| {
+                        cached.key == key && cached.geom == geom && cached.neighbors == neighbors
+                    })
+                    .map(|cached| cached.images.clone())
             });
-            let vertical = (tile_cells..height - tile_cells).flat_map(|y| {
-                (0..tile_cells).flat_map(move |x| [(x, y), (width - tile_cells + x, y)])
-            });
-            for (x, y) in horizontal.chain(vertical) {
-                let (tile, column, row) = match (x, y) {
-                    (_, _) if y < tile_cells && x < tile_cells => (0, x, y),
-                    (_, _) if y < tile_cells && x + tile_cells >= width => {
-                        (2, x + tile_cells - width, y)
-                    },
-                    (_, _) if y < tile_cells => (1, 0, y),
-                    (_, _) if y + tile_cells >= height && x < tile_cells => {
-                        (5, x, y + tile_cells - height)
-                    },
-                    (_, _) if y + tile_cells >= height && x + tile_cells >= width => {
-                        (7, x + tile_cells - width, y + tile_cells - height)
-                    },
-                    (_, _) if y + tile_cells >= height => (6, 0, y + tile_cells - height),
-                    (_, _) if x < tile_cells => (3, x, 0),
-                    (_, _) if x + tile_cells >= width => (4, x + tile_cells - width, 0),
-                    _ => continue,
-                };
-                let mut image = KittyImageChunk {
-                    cell_x: geom.x + x,
-                    cell_y: geom.y + y,
-                    internal_image_id: id,
-                    source_px_x: (tile * tile_cells + column) * key.width,
-                    source_px_y: row * key.height,
-                    source_px_width: key.width,
-                    source_px_height: key.height,
-                    cell_offset_x: 0,
-                    cell_offset_y: 0,
-                    z_index: FRAME_Z_INDEX,
-                    dest_cells: (0, 0),
-                    scaled_px: None,
-                    placement_uid: FRAME_UID + (y * width + x) as u64,
-                };
-                let continuation = if key.compact {
-                    compact::align_horizontal_edge(&mut image, geom, &neighbors, key)
-                } else {
-                    None
-                };
-                for mut part in std::iter::once(image).chain(continuation) {
-                    if !key.compact || compact::clip_shared_cell(&mut part, geom, &neighbors, key) {
-                        frame_images.push(part);
+            let frame_images = if let Some(images) = cached {
+                images
+            } else {
+                let mut frame_images = Vec::with_capacity((width + height) * 4);
+                let horizontal = (0..width).flat_map(|x| {
+                    (0..tile_cells).flat_map(move |y| [(x, y), (x, height - tile_cells + y)])
+                });
+                let vertical = (tile_cells..height - tile_cells).flat_map(|y| {
+                    (0..tile_cells).flat_map(move |x| [(x, y), (width - tile_cells + x, y)])
+                });
+                for (x, y) in horizontal.chain(vertical) {
+                    let (tile, column, row) = match (x, y) {
+                        (_, _) if y < tile_cells && x < tile_cells => (0, x, y),
+                        (_, _) if y < tile_cells && x + tile_cells >= width => {
+                            (2, x + tile_cells - width, y)
+                        },
+                        (_, _) if y < tile_cells => (1, 0, y),
+                        (_, _) if y + tile_cells >= height && x < tile_cells => {
+                            (5, x, y + tile_cells - height)
+                        },
+                        (_, _) if y + tile_cells >= height && x + tile_cells >= width => {
+                            (7, x + tile_cells - width, y + tile_cells - height)
+                        },
+                        (_, _) if y + tile_cells >= height => (6, 0, y + tile_cells - height),
+                        (_, _) if x < tile_cells => (3, x, 0),
+                        (_, _) if x + tile_cells >= width => (4, x + tile_cells - width, 0),
+                        _ => continue,
+                    };
+                    let mut image = KittyImageChunk {
+                        cell_x: geom.x + x,
+                        cell_y: geom.y + y,
+                        internal_image_id: id,
+                        source_px_x: (tile * tile_cells + column) * key.width,
+                        source_px_y: row * key.height,
+                        source_px_width: key.width,
+                        source_px_height: key.height,
+                        cell_offset_x: 0,
+                        cell_offset_y: 0,
+                        z_index: FRAME_Z_INDEX,
+                        dest_cells: (0, 0),
+                        scaled_px: None,
+                        placement_uid: FRAME_UID + (y * width + x) as u64,
+                    };
+                    let continuation = if key.compact {
+                        compact::align_horizontal_edge(&mut image, geom, &neighbors, key)
+                    } else {
+                        None
+                    };
+                    for mut part in std::iter::once(image).chain(continuation) {
+                        if !key.compact
+                            || compact::clip_shared_cell(&mut part, geom, &neighbors, key)
+                        {
+                            frame_images.push(part);
+                        }
                     }
                 }
-            }
-            if let Some(stack) = &self.floating_panes_stack {
-                frame_images = stack.visible_kitty_image_chunks(
-                    frame_images,
-                    request.z_index,
-                    &SizeInPixels {
-                        width: key.width,
-                        height: key.height,
-                    },
-                );
-            }
-            images.extend(frame_images);
+                let edge_strips = self.recessed_frames.as_ref().unwrap().borrow().strips[&key];
+                let frame_images = Rc::new(strips::coalesce(frame_images, key, edge_strips));
+                self.recessed_frames
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .geometry
+                    .insert(
+                        (client_id, pane_id),
+                        CachedGeometry {
+                            key,
+                            geom,
+                            neighbors,
+                            images: frame_images.clone(),
+                        },
+                    );
+                frame_images
+            };
+            images.extend(clipping::visible(
+                &frame_images,
+                self.floating_panes_stack.as_ref(),
+                request.z_index,
+                key,
+            ));
         }
         self.client_rendered_kitty_panes
             .entry(client_id)

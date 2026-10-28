@@ -142,17 +142,33 @@ pub(super) fn clip_shared_cell(
             }
         }
     }
-    image.source_px_x += left_crop;
-    image.source_px_y += top_crop;
-    image.source_px_width -= left_crop + right_crop;
-    image.source_px_height -= top_crop + bottom_crop;
-    image.cell_offset_x += left_crop as u32;
-    image.cell_offset_y += top_crop as u32;
-    image.source_px_width > 0 && image.source_px_height > 0
+    // The translated corner/continuation can occupy only part of this cell.
+    // Intersect its actual pixel interval rather than subtracting full-cell
+    // crops again, which can shorten the shadow or underflow a small fragment.
+    let x = image.cell_offset_x as usize;
+    let y = image.cell_offset_y as usize;
+    let left = x.max(left_crop);
+    let top = y.max(top_crop);
+    let right = (x + image.source_px_width).min(key.width - right_crop);
+    let bottom = (y + image.source_px_height).min(key.height - bottom_crop);
+    if left >= right || top >= bottom {
+        return false;
+    }
+    image.source_px_x += left - x;
+    image.source_px_y += top - y;
+    image.source_px_width = right - left;
+    image.source_px_height = bottom - top;
+    image.cell_offset_x = left as u32;
+    image.cell_offset_y = top as u32;
+    true
 }
 
 impl Output {
-    pub(crate) fn supports_compact_frames(&self, clients: impl Iterator<Item = ClientId>) -> bool {
+    pub(crate) fn supports_compact_frames(
+        &self,
+        clients: impl Iterator<Item = ClientId>,
+        geoms: &[PaneGeom],
+    ) -> bool {
         let Some(cache) = &self.recessed_frames else {
             return false;
         };
@@ -162,7 +178,11 @@ impl Output {
             let Some(key) = cache.clients.get(&client).copied() else {
                 return false;
             };
-            cache.atlas(key, &mut store).is_some()
+            geoms.iter().all(|geom| {
+                !geom.is_stacked()
+                    && geom.cols.as_usize() >= key.tile_cells() * 2
+                    && geom.rows.as_usize() >= key.tile_cells() * 2
+            }) && cache.atlas(key, &mut store).is_some()
         })
     }
 }

@@ -9,8 +9,9 @@ boundary, giving the surrounding surface the full reserved margin. Circular
 corners, bevels and shadows compose above application content: shadows shade
 backgrounds and glyphs together, and the rounded rim crops glyphs outside the
 opening. Native floating-pane clipping keeps popups above the underlying pane's
-frame. Three-cell tiles retain the circular radius and smooth shadow tails;
-the normal profile retains its original two-cell tiles and cache behavior.
+frame. Tile coverage includes the radius, directional offset and five Gaussian
+standard deviations, so corner shadows converge to the exact straight-edge
+gradient before the join. This also applies to the normal spacing profile.
 
 Each side clips its image to its own portion of a shared cell in physical pixels,
 including at junctions and odd pixel sizes. The neighboring pane reserves the
@@ -119,7 +120,15 @@ store also caches base64, while the existing per-client host state uploads each
 atlas only when that client needs it. Placement updates do not rasterize or
 re-encode images.
 
-The atlas cache admits up to 16 MiB of raw pixels. Once full, new keys fall back
+Straight-edge pixels are copied from the atlas into cached 1024-pixel strips.
+Adjacent crops coalesce into larger placements without scaling or changing
+pixel values. Corners coalesce into rectangles too. Region-local placement IDs
+remain stable across resizing, and unchanged pane/neighbor geometry reuses its
+placement list. Floating panes clip the merged rectangles in exact physical
+pixels, including translated sub-cell offsets. Layout adjacency is recalculated
+only when visible pane geometry or content offsets change.
+
+The atlas and strip cache admits up to 16 MiB of raw pixels. Once full, new keys fall back
 to ordinary frames; existing keys remain reusable. Cached images are not evicted
 and regenerated during the session. Client detach removes its geometry and
 capability state while retaining shared atlas entries.

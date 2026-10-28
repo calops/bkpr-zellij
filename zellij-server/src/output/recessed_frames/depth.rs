@@ -65,6 +65,8 @@ fn cast_shadow(key: TileKey, tile: usize, px: f64, py: f64) -> f64 {
     let outside = match tile {
         1 | 6 => normal_cdf((inset_y - y) / sigma),
         3 | 4 => normal_cdf((inset_x - x) / sigma),
+        _ if x >= inset_x + key.radius as f64 + support => normal_cdf((inset_y - y) / sigma),
+        _ if y >= inset_y + key.radius as f64 + support => normal_cdf((inset_x - x) / sigma),
         _ => {
             // Integrate the Gaussian over the actual rounded opening. The
             // horizontal integral is analytic; only the curved boundary needs
