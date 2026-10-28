@@ -4678,6 +4678,12 @@ impl Screen {
 
             if non_watcher_output_was_dirty || has_bell {
                 let serialized_output = output.serialize().context(err_context)?;
+                let backgrounds = output.terminal_background_updates();
+                if !backgrounds.is_empty() {
+                    self.bus.senders.send_to_server(
+                        ServerInstruction::SetTerminalBackgrounds(backgrounds),
+                    )?;
+                }
                 if !serialized_output.is_empty() {
                     let _ = self
                         .bus

@@ -592,7 +592,19 @@ fn serialize_kitty_frame(kitty_input: KittyFrameInput) -> Result<String> {
                 {
                     continue;
                 },
-                Some((host_placement_id, _, _)) => host_placement_id,
+                Some((host_placement_id, _, existing_host_image_id)) => {
+                    // Placement IDs are scoped to their image in Kitty. A
+                    // cached-image swap must retire the previous image's copy.
+                    if existing_host_image_id != host_image_id {
+                        write!(
+                            out,
+                            "\u{1b}_Ga=d,q=2,d=i,i={},p={}\u{1b}\\",
+                            existing_host_image_id, host_placement_id
+                        )
+                        .context(err_context)?;
+                    }
+                    host_placement_id
+                },
                 None => {
                     let host_placement_id = host_state.next_host_placement_id;
                     host_state.next_host_placement_id += 1;
@@ -904,7 +916,17 @@ impl Output {
 
         let mut serialized_render_instructions = HashMap::new();
 
-        for (client_id, client_character_chunks) in self.client_character_chunks.drain() {
+        let mut chunks_by_client = std::mem::take(&mut self.client_character_chunks);
+        for (client_id, mut client_character_chunks) in chunks_by_client.drain() {
+            if let Some(background) = self.terminal_background(client_id) {
+                for chunk in &mut client_character_chunks {
+                    // Preserve explicit application colors and pane-local OSC
+                    // 11 overrides while decoupling SGR 49 from the host surface.
+                    chunk.pane_default_bg.get_or_insert(AnsiCode::RgbCode(
+                        background.original.into(),
+                    ));
+                }
+            }
             let mut client_serialized_render_instructions = String::new();
 
             // append pre-vte instructions for this client

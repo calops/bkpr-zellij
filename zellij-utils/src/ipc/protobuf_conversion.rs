@@ -406,7 +406,13 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
     fn from(msg: ServerToClientMsg) -> Self {
         let message = match msg {
             ServerToClientMsg::Render { content } => {
-                server_to_client_msg::Message::Render(RenderMsg { content })
+                server_to_client_msg::Message::Render(RenderMsg { content, terminal_background: None })
+            },
+            ServerToClientMsg::RenderWithBackground { content, background } => {
+                let bytes = background.map(|b| [b.original, b.surface].concat()).unwrap_or_default();
+                server_to_client_msg::Message::Render(RenderMsg {
+                    content, terminal_background: Some(bytes),
+                })
             },
             ServerToClientMsg::UnblockInputThread => {
                 server_to_client_msg::Message::UnblockInputThread(UnblockInputThreadMsg {})
@@ -638,9 +644,20 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
 
     fn try_from(msg: ProtoServerToClientMsg) -> Result<Self> {
         match msg.message {
-            Some(server_to_client_msg::Message::Render(render)) => Ok(ServerToClientMsg::Render {
-                content: render.content,
-            }),
+            Some(server_to_client_msg::Message::Render(render)) => {
+                match render.terminal_background.as_deref() {
+                    Some([]) => Ok(ServerToClientMsg::RenderWithBackground {
+                        content: render.content, background: None,
+                    }),
+                    Some([r, g, b, sr, sg, sb]) => Ok(ServerToClientMsg::RenderWithBackground {
+                        content: render.content,
+                        background: Some(crate::ipc::TerminalBackground {
+                            original: [*r, *g, *b], surface: [*sr, *sg, *sb],
+                        }),
+                    }),
+                    _ => Ok(ServerToClientMsg::Render { content: render.content }),
+                }
+            },
             Some(server_to_client_msg::Message::UnblockInputThread(_)) => {
                 Ok(ServerToClientMsg::UnblockInputThread)
             },

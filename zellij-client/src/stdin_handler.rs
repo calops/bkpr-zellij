@@ -23,6 +23,7 @@ pub(crate) fn stdin_loop(
     explicitly_disable_kitty_keyboard_protocol: bool,
     support_kitty_graphics_protocol: bool,
     resize_sender: Option<std::sync::mpsc::Sender<()>>,
+    terminal_background: Arc<Mutex<crate::terminal_background::Background>>,
 ) {
     // On Windows we choose between the VT byte path (termwiz/kitty parsing)
     // and the native-console path (crossterm INPUT_RECORDs) early, before the
@@ -52,6 +53,7 @@ pub(crate) fn stdin_loop(
                 if support_kitty_graphics_protocol {
                     parser.expect_kitty_probe_reply();
                 }
+                terminal_background.lock().unwrap().prepare_query();
                 let mut stdout = os_input.get_stdout_writer();
                 stdout.write_all(query_string.as_bytes()).unwrap();
                 stdout.flush().unwrap();
@@ -130,14 +132,20 @@ pub(crate) fn stdin_loop(
                         // Strip + classify any host-reply sequences
                         // continuously. The residue is the byte stream
                         // the keyboard parser should see.
-                        let parse_output = {
+                        let mut parse_output = {
                             let mut p = stdin_ansi_parser.lock().unwrap();
                             p.feed(&buf)
                         };
+                        for reply in &mut parse_output.replies {
+                            if let HostReply::BackgroundColor(color) = reply {
+                                terminal_background.lock().unwrap().observe(color, &mut palette_stdout);
+                            }
+                        }
                         if parse_output.replies.iter().any(|reply| {
                             matches!(reply, HostReply::HostTerminalThemeChanged(_))
                         }) {
                             stdin_ansi_parser.lock().unwrap().expect_host_replies();
+                            terminal_background.lock().unwrap().prepare_query();
                             let _ = palette_stdout.write_all(build_palette_query_string().as_bytes());
                             let _ = palette_stdout.flush();
                         }

@@ -1,11 +1,14 @@
 //! Pixel-aligned rounded frames. Geometry, focus and input remain native.
 //!
-//! Eight edge/corner tiles share an atlas. Corners span two columns. The cache
+//! Eight edge/corner tiles share an atlas. Each spans two rows/columns so a
+//! translucent inset shadow can extend below content glyphs. The cache
 //! owns one store reference per atlas, preventing repeated rasterization. The
 //! existing Kitty serializer caches base64 and uploads independently per client.
 use super::*;
 use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
+
+mod depth;
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 // Grid placement IDs grow from one. Reserve the upper half for native frames.
@@ -17,6 +20,7 @@ struct TileKey {
     height: usize,
     background: [u8; 3],
     surface: [u8; 3],
+    foreground: [u8; 3],
     thickness: usize,
     radius: usize,
 }
@@ -26,6 +30,7 @@ pub(crate) struct FrameCache {
     clients: HashMap<ClientId, TileKey>,
     atlases: HashMap<TileKey, InternalImageId>,
     active_frames: HashMap<(ClientId, PaneId), FrameRequest>,
+    host_backgrounds: HashMap<ClientId, zellij_utils::ipc::TerminalBackground>,
     bytes: usize,
 }
 
@@ -55,6 +60,7 @@ impl FrameCache {
                     height,
                     background,
                     surface: surface(foreground, background),
+                    foreground,
                     thickness,
                     radius,
                 })
@@ -67,6 +73,7 @@ impl FrameCache {
 
     pub(crate) fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
+        self.host_backgrounds.remove(&client_id);
         self.active_frames
             .retain(|(client, _), _| *client != client_id);
     }
@@ -75,7 +82,7 @@ impl FrameCache {
         if let Some(id) = self.atlases.get(&key) {
             return Some(*id);
         }
-        let bytes = key.width * 2 * key.height * 8 * 4;
+        let bytes = key.width * 2 * key.height * 2 * 8 * 4;
         if self.bytes + bytes > MAX_BYTES {
             return None;
         }
@@ -83,7 +90,7 @@ impl FrameCache {
             .store_image(DecodedImage {
                 bytes: rasterize(key),
                 width: (key.width * 2 * 8) as u32,
-                height: key.height as u32,
+                height: (key.height * 2) as u32,
                 format: KittyFormat::Rgba32,
             })
             .ok()?;
@@ -115,44 +122,32 @@ fn surface(foreground: [u8; 3], background: [u8; 3]) -> [u8; 3] {
 // rather than rounding two independent curves on odd-sized cells.
 fn rasterize(key: TileKey) -> Vec<u8> {
     let stride = key.width * 2;
-    let mut rgba = Vec::with_capacity(stride * key.height * 8 * 4);
-    for y in 0..key.height {
+    let mut rgba = Vec::with_capacity(stride * key.height * 2 * 8 * 4);
+    for y in 0..key.height * 2 {
         for tile in 0..8 {
             for x in 0..stride {
-                let mut inside = 0;
+                let mut channels = [0.0; 4];
                 for sy in 0..4 {
                     for sx in 0..4 {
-                        let mut px = x as f64 + (sx as f64 + 0.5) / 4.0;
-                        let mut py = y as f64 + (sy as f64 + 0.5) / 4.0;
-                        if matches!(tile, 2 | 4 | 7) {
-                            px = stride as f64 - px;
+                        let px = x as f64 + (sx as f64 + 0.5) / 4.0;
+                        let py = y as f64 + (sy as f64 + 0.5) / 4.0;
+                        let sample = depth::sample(key, tile, px, py);
+                        for (sum, channel) in channels.iter_mut().zip(sample) {
+                            *sum += channel;
                         }
-                        if matches!(tile, 5..=7) {
-                            py = key.height as f64 - py;
-                        }
-                        let t = key.thickness as f64;
-                        let r = key.radius as f64;
-                        let content = match tile {
-                            1 | 6 => py >= t,
-                            3 | 4 => px >= t,
-                            _ => {
-                                let dx = (t + r - px).max(0.0);
-                                let dy = (t + r - py).max(0.0);
-                                px >= t && py >= t && dx * dx + dy * dy <= r * r
-                            },
-                        };
-                        inside += u16::from(content);
                     }
                 }
-                for channel in 0..3 {
-                    rgba.push(
-                        ((u16::from(key.background[channel]) * inside
-                            + u16::from(key.surface[channel]) * (16 - inside)
-                            + 8)
-                            / 16) as u8,
-                    );
+                // Kitty expects straight RGBA, while supersampling blends
+                // premultiplied channels to keep translucent shadow edges clean.
+                for channel in &channels[..3] {
+                    let value = if channels[3] > 0.0 {
+                        channel * 255.0 / channels[3]
+                    } else {
+                        0.0
+                    };
+                    rgba.push(value.round().clamp(0.0, 255.0) as u8);
                 }
-                rgba.push(255);
+                rgba.push((channels[3] / 16.0).round().clamp(0.0, 255.0) as u8);
             }
         }
     }
@@ -160,6 +155,57 @@ fn rasterize(key: TileKey) -> Vec<u8> {
 }
 
 impl Output {
+    pub(crate) fn terminal_background_updates(
+        &self,
+    ) -> Vec<(ClientId, Option<zellij_utils::ipc::TerminalBackground>)> {
+        let Some(cache) = &self.recessed_frames else {
+            return vec![];
+        };
+        let clients: HashSet<_> = {
+            let cache = cache.borrow();
+            cache
+                .clients
+                .keys()
+                .chain(cache.host_backgrounds.keys())
+                .copied()
+                .collect()
+        };
+        let mut updates = vec![];
+        for client in clients {
+            let background = self.terminal_background(client);
+            let mut cache = cache.borrow_mut();
+            if cache.host_backgrounds.get(&client).copied() != background {
+                if let Some(background) = background {
+                    cache.host_backgrounds.insert(client, background);
+                } else {
+                    cache.host_backgrounds.remove(&client);
+                }
+                updates.push((client, background));
+            }
+        }
+        updates
+    }
+
+    pub(crate) fn terminal_background(
+        &self,
+        client_id: ClientId,
+    ) -> Option<zellij_utils::ipc::TerminalBackground> {
+        let cache = self.recessed_frames.as_ref()?.borrow();
+        let key = cache
+            .active_frames
+            .iter()
+            .find_map(|((client, _), frame)| {
+                (*client == client_id)
+                    .then_some(frame.atlas)
+                    .flatten()
+                    .map(|(key, _)| key)
+            })?;
+        Some(zellij_utils::ipc::TerminalBackground {
+            original: key.background,
+            surface: key.surface,
+        })
+    }
+
     fn frame_atlas(
         &self,
         client_id: ClientId,
@@ -167,7 +213,7 @@ impl Output {
         enabled: bool,
     ) -> Option<(TileKey, InternalImageId)> {
         let cache = self.recessed_frames.as_ref()?;
-        let key = (enabled && geom.cols.as_usize() >= 4 && geom.rows.as_usize() >= 3)
+        let key = (enabled && geom.cols.as_usize() >= 4 && geom.rows.as_usize() >= 4)
             .then(|| cache.borrow().clients.get(&client_id).copied())
             .flatten()?;
         let id = cache
@@ -296,19 +342,23 @@ impl Output {
             let geom = request.geom;
             let width = geom.cols.as_usize();
             let height = geom.rows.as_usize();
-            let mut frame_images = Vec::with_capacity((width + height) * 2);
-            let horizontal = (0..width).flat_map(|x| [(x, 0), (x, height - 1)]);
-            let vertical = (1..height - 1).flat_map(|y| [(0, y), (width - 1, y)]);
+            let mut frame_images = Vec::with_capacity((width + height) * 4);
+            let horizontal =
+                (0..width).flat_map(|x| [(x, 0), (x, 1), (x, height - 2), (x, height - 1)]);
+            let vertical =
+                (2..height - 2).flat_map(|y| [(0, y), (1, y), (width - 2, y), (width - 1, y)]);
             for (x, y) in horizontal.chain(vertical) {
-                let (tile, column) = match (x, y) {
-                    (_, 0) if x < 2 => (0, x),
-                    (_, 0) if x + 2 >= width => (2, x + 2 - width),
-                    (_, 0) => (1, 0),
-                    (_, _) if y + 1 == height && x < 2 => (5, x),
-                    (_, _) if y + 1 == height && x + 2 >= width => (7, x + 2 - width),
-                    (_, _) if y + 1 == height => (6, 0),
-                    (0, _) => (3, 0),
-                    (_, _) if x + 1 == width => (4, 1),
+                let (tile, column, row) = match (x, y) {
+                    (_, _) if y < 2 && x < 2 => (0, x, y),
+                    (_, _) if y < 2 && x + 2 >= width => (2, x + 2 - width, y),
+                    (_, _) if y < 2 => (1, 0, y),
+                    (_, _) if y + 2 >= height && x < 2 => (5, x, y + 2 - height),
+                    (_, _) if y + 2 >= height && x + 2 >= width => {
+                        (7, x + 2 - width, y + 2 - height)
+                    },
+                    (_, _) if y + 2 >= height => (6, 0, y + 2 - height),
+                    (_, _) if x < 2 => (3, x, 0),
+                    (_, _) if x + 2 >= width => (4, x + 2 - width, 0),
                     _ => continue,
                 };
                 frame_images.push(KittyImageChunk {
@@ -316,7 +366,7 @@ impl Output {
                     cell_y: geom.y + y,
                     internal_image_id: id,
                     source_px_x: (tile * 2 + column) * key.width,
-                    source_px_y: 0,
+                    source_px_y: row * key.height,
                     source_px_width: key.width,
                     source_px_height: key.height,
                     cell_offset_x: 0,

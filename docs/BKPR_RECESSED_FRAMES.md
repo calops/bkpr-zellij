@@ -24,8 +24,51 @@ leave one pixel for the interior on short cells. Corners span two columns of
 the top/bottom frame strip for a larger circular curve with mirrored sample
 coordinates, including for odd cell dimensions. Horizontal and vertical edges
 use exactly the same pixel thickness. Spare frame-row height stays
-content-colored, since terminal text cannot occupy fractional rows. All pixels fit inside
-reserved frame cells; PTY geometry, input and hit testing remain native.
+content-colored, since terminal text cannot occupy fractional rows. Opaque frame
+pixels fit inside reserved frame cells; PTY geometry, input and hit testing
+remain native.
+
+## Depth effects
+
+The surrounding surface casts an inset shadow into the opening. Its actual mask
+is translated down/right by equal physical-pixel offsets and blurred with a
+Gaussian kernel, producing an upper/left cast shadow rather than a uniform edge
+gradient. Straight edges use the continuous Gaussian integral; corners integrate
+over the circular opening with 64 samples and an analytic horizontal integral.
+This avoids the visible terraces of a sparse binary-mask blur at large fonts.
+Final output still has eight-bit RGBA precision. Transparent black pixels can extend
+into one adjacent content row/column, below glyphs and composited over the
+application background. The opaque frame and PTY geometry are unchanged.
+
+A narrow bevel on the surrounding lip shares the same light direction: the
+upper/left facet is shaded and the lower/right facet catches a fine highlight.
+Normals come from the circular opening mask, so lighting continues through
+corners without changing the radius or separator thickness. Colors derive from
+the terminal palette. The rim is roughly one physical pixel wide at normal fonts.
+
+The shading lives in `output/recessed_frames/depth.rs`. Every pane uses the same
+material; there is no focus glow or focus-dependent variant. Each resolution
+and palette is rasterized once and reused across panes and focus changes,
+without timers or changes to focus behavior.
+
+## Outer terminal background
+
+While recessed frames are active, the native client sets the host's default
+background to the sidebar surface with OSC 11. Content chunks explicitly resolve
+their default background to the original queried color. Explicit application
+backgrounds and pane-local OSC 11 overrides keep their existing behavior.
+
+The client retains the exact original color response for restoration on detach,
+session switch, ordinary exit and handled errors/panics. Background queries from
+panes receive that original color while the host surface is owned. Palette
+refreshes filter our own surface out of host replies, preventing repeated
+darkening, and accept actual changed theme colors as the new baseline. An
+unrecoverable kill cannot execute terminal cleanup.
+
+The surface is sent only when it changes, as optional protobuf render metadata;
+older clients ignore it and render normally. Attaching a new client to an older
+server remains ordinary rendering. Unsupported clients and ordinary frames do
+not change the host background. No terminal configuration files are modified.
 
 ## Integration
 

@@ -16,6 +16,7 @@ mod nested_reannounce;
 pub mod remote_attach;
 mod stdin_ansi_parser;
 mod stdin_handler;
+mod terminal_background;
 #[cfg(windows)]
 mod stdin_handler_windows;
 #[cfg(feature = "web_server_capability")]
@@ -181,6 +182,7 @@ use zellij_utils::{
 pub(crate) enum ClientInstruction {
     Error(String),
     Render(String),
+    RenderWithBackground(String, Option<zellij_utils::ipc::TerminalBackground>),
     UnblockInputThread,
     Exit(ExitReason),
     Connected,
@@ -213,6 +215,9 @@ impl From<ServerToClientMsg> for ClientInstruction {
         match instruction {
             ServerToClientMsg::Exit { exit_reason } => ClientInstruction::Exit(exit_reason),
             ServerToClientMsg::Render { content } => ClientInstruction::Render(content),
+            ServerToClientMsg::RenderWithBackground { content, background } => {
+                ClientInstruction::RenderWithBackground(content, background)
+            },
             ServerToClientMsg::UnblockInputThread => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::Connected
             | ServerToClientMsg::ConnectedWithCapabilities { .. } => ClientInstruction::Connected,
@@ -258,7 +263,9 @@ impl From<&ClientInstruction> for ClientContext {
         match *client_instruction {
             ClientInstruction::Exit(_) => ClientContext::Exit,
             ClientInstruction::Error(_) => ClientContext::Error,
-            ClientInstruction::Render(_) => ClientContext::Render,
+            ClientInstruction::Render(_) | ClientInstruction::RenderWithBackground(..) => {
+                ClientContext::Render
+            },
             ClientInstruction::UnblockInputThread => ClientContext::UnblockInputThread,
             ClientInstruction::Connected => ClientContext::Connected,
             ClientInstruction::Log(_) => ClientContext::Log,
@@ -1296,12 +1303,17 @@ pub fn start_client(
     > = channels::bounded(50);
     let send_input_instructions = SenderWithContext::new(send_input_instructions);
 
+    let terminal_background = Arc::new(Mutex::new(terminal_background::Background::default()));
     if os_input.should_install_panic_hook() {
         std::panic::set_hook({
             use zellij_utils::errors::handle_panic;
             let send_client_instructions = send_client_instructions.clone();
             let os_input = os_input.clone();
+            let terminal_background = terminal_background.clone();
             Box::new(move |info| {
+                if let Ok(mut background) = terminal_background.try_lock() {
+                    background.restore(&mut os_input.get_stdout_writer());
+                }
                 os_input.disable_mouse().non_fatal();
                 os_input.restore_console_mode();
                 if let Ok(()) = os_input.unset_raw_mode() {
@@ -1322,6 +1334,7 @@ pub fn start_client(
             let os_input = os_input.clone();
             let send_input_instructions = send_input_instructions.clone();
             let stdin_ansi_parser = stdin_ansi_parser.clone();
+            let terminal_background = terminal_background.clone();
             move || {
                 stdin_loop(
                     os_input,
@@ -1330,6 +1343,7 @@ pub fn start_client(
                     explicitly_disable_kitty_keyboard_protocol,
                     support_kitty_graphics_protocol,
                     Some(resize_sender),
+                    terminal_background,
                 )
             }
         });
@@ -1473,6 +1487,10 @@ pub fn start_client(
         .unwrap();
 
     let handle_error = |backtrace: String| {
+        terminal_background
+            .lock()
+            .unwrap()
+            .restore(&mut os_input.get_stdout_writer());
         os_input.disable_mouse().non_fatal();
         os_input.unset_raw_mode().unwrap();
         os_input.restore_console_mode();
@@ -1513,13 +1531,25 @@ pub fn start_client(
             ClientInstruction::Error(backtrace) => {
                 handle_error(backtrace);
             },
-            ClientInstruction::Render(output) => {
+            instruction @ (ClientInstruction::Render(_)
+            | ClientInstruction::RenderWithBackground(..)) => {
                 let mut stdout = os_input.get_stdout_writer();
                 if let Some(sync) = synchronised_output {
                     stdout
                         .write_all(sync.start_seq())
                         .expect("cannot write to stdout");
                 }
+                let output = match instruction {
+                    ClientInstruction::Render(output) => output,
+                    ClientInstruction::RenderWithBackground(output, background) => {
+                        terminal_background
+                            .lock()
+                            .unwrap()
+                            .apply(background, &mut stdout);
+                        output
+                    },
+                    _ => unreachable!(),
+                };
                 stdout
                     .write_all(output.as_bytes())
                     .expect("cannot write to stdout");
@@ -1632,6 +1662,12 @@ pub fn start_client(
             ClientInstruction::ForwardQueryToHost {
                 token, query_bytes, ..
             } => {
+                if let Some(reply_bytes) = terminal_background.lock().unwrap().reply(&query_bytes) {
+                    let _ = send_input_instructions.send(
+                        InputInstruction::ForwardedReplyFromHostComplete { token, reply_bytes },
+                    );
+                    continue;
+                }
                 // 1. Register and write this batch under the parser lock,
                 //    preserving the order of all host-query boundaries.
                 //    A slot may still be open here: the server's backstop
@@ -1705,6 +1741,10 @@ pub fn start_client(
         let _ = out.flush();
     }
 
+    terminal_background
+        .lock()
+        .unwrap()
+        .restore(&mut os_input.get_stdout_writer());
     nested_reannounce.stop();
 
     router_thread.join().unwrap();
