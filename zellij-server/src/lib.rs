@@ -146,6 +146,7 @@ pub enum ServerInstruction {
     /// A forced target must still be a connected regular client; never fall back.
     ForwardQueryToHost(u32, Vec<u8>, bool, Option<ClientId>),
     SetClipboardPasteMode(ClientId, Option<u64>),
+    SetTerminalBackgrounds(Vec<(ClientId, Option<zellij_utils::ipc::TerminalBackground>)>),
     KeyPassthroughChanged(ClientId, PaneId, PaneId, bool, Option<Direction>, bool),
     EmitNestedSessionFrameToClient(ClientId, Vec<u8>),
 }
@@ -154,7 +155,9 @@ impl From<&ServerInstruction> for ServerContext {
     fn from(server_instruction: &ServerInstruction) -> Self {
         match *server_instruction {
             ServerInstruction::FirstClientConnected(..) => ServerContext::NewClient,
-            ServerInstruction::Render(..) => ServerContext::Render,
+            ServerInstruction::Render(..) | ServerInstruction::SetTerminalBackgrounds(..) => {
+                ServerContext::Render
+            },
             ServerInstruction::UnblockInputThread => ServerContext::UnblockInputThread,
             ServerInstruction::ClientExit(..) => ServerContext::ClientExit,
             ServerInstruction::RemoveClient(..) => ServerContext::RemoveClient,
@@ -1647,6 +1650,20 @@ pub fn start_server_impl(
                         .senders
                         .send_to_plugin(PluginInstruction::RemoveClient(client_id))
                         .unwrap();
+                }
+            },
+            ServerInstruction::SetTerminalBackgrounds(backgrounds) => {
+                for (client_id, background) in backgrounds {
+                    send_to_client!(
+                        client_id,
+                        os_input,
+                        ServerToClientMsg::RenderWithBackground {
+                            content: String::new(),
+                            background,
+                        },
+                        session_state,
+                        session_data
+                    );
                 }
             },
             ServerInstruction::Render(serialized_output) => {

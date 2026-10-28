@@ -30,6 +30,9 @@ message ServerToClientMsg {
 
 message RenderMsg {
   string content = 1;
+  // Optional render metadata. Older clients render content without changing
+  // their host background. Empty bytes request restoration on newer clients.
+  optional bytes terminal_background = 2;
 }
 
 message UnblockInputThreadMsg {

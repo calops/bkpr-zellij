@@ -434,7 +434,7 @@ impl<'a> PaneContentsAndUi<'a> {
             client_id,
             self.pane.pid(),
             frame_geom,
-            recessed.then_some(pane_focused_for_client_id),
+            recessed,
             self.z_index,
             frame.as_mut().map(|(characters, _)| characters),
         );

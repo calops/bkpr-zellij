@@ -3431,6 +3431,8 @@ pub mod server_to_client_msg {
 pub struct RenderMsg {
     #[prost(string, tag="1")]
     pub content: ::prost::alloc::string::String,
+    #[prost(bytes="vec", optional, tag="2")]
+    pub terminal_background: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Empty message
 #[allow(clippy::derive_partial_eq_without_eq)]

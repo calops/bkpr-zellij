@@ -916,7 +916,17 @@ impl Output {
 
         let mut serialized_render_instructions = HashMap::new();
 
-        for (client_id, client_character_chunks) in self.client_character_chunks.drain() {
+        let mut chunks_by_client = std::mem::take(&mut self.client_character_chunks);
+        for (client_id, mut client_character_chunks) in chunks_by_client.drain() {
+            if let Some(background) = self.terminal_background(client_id) {
+                for chunk in &mut client_character_chunks {
+                    // Preserve explicit application colors and pane-local OSC
+                    // 11 overrides while decoupling SGR 49 from the host surface.
+                    chunk.pane_default_bg.get_or_insert(AnsiCode::RgbCode(
+                        background.original.into(),
+                    ));
+                }
+            }
             let mut client_serialized_render_instructions = String::new();
 
             // append pre-vte instructions for this client

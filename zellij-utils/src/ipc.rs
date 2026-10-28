@@ -264,10 +264,21 @@ pub enum ClientToServerMsg {
 }
 
 // Types of messages sent from the server to the client
+/// Render-only host background. Pane defaults remain `original`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalBackground {
+    pub original: [u8; 3],
+    pub surface: [u8; 3],
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ServerToClientMsg {
     Render {
         content: String,
+    },
+    RenderWithBackground {
+        content: String,
+        background: Option<TerminalBackground>,
     },
     UnblockInputThread,
     Exit {
