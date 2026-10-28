@@ -27,6 +27,22 @@ use exactly the same pixel thickness. Spare frame-row height stays
 content-colored, since terminal text cannot occupy fractional rows. All pixels fit inside
 reserved frame cells; PTY geometry, input and hit testing remain native.
 
+## Depth effects
+
+The content edge has a soft inset shadow, strongest toward the top and left.
+It follows the same circular distance field as the rounded opening. Its smooth
+falloff reaches zero within the reserved frame cells before meeting PTY content.
+
+The pane focused by this client also has a subtle outer halo, derived from the
+actual terminal foreground and surrounding surface. It fades back to the exact
+surface color at the outside of the border. Focus is native and client-specific;
+mouse hover and another attached client's focus do not activate it.
+
+The shading lives in `output/recessed_frames/depth.rs`. Focused and unfocused
+atlases are separate cached variants. Switching focus reuses existing pixels
+and per-client uploads; it does not rasterize on every switch or run a timer.
+Resolution, terminal palette and focus appearance are part of the cache key.
+
 ## Integration
 
 The implementation lives in `zellij-server/src/output/recessed_frames.rs`.

@@ -7,6 +7,8 @@ use super::*;
 use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
 
+mod depth;
+
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 // Grid placement IDs grow from one. Reserve the upper half for native frames.
 const FRAME_UID: u64 = 1 << 63;
@@ -17,6 +19,8 @@ struct TileKey {
     height: usize,
     background: [u8; 3],
     surface: [u8; 3],
+    foreground: [u8; 3],
+    focused: bool,
     thickness: usize,
     radius: usize,
 }
@@ -55,6 +59,8 @@ impl FrameCache {
                     height,
                     background,
                     surface: surface(foreground, background),
+                    foreground,
+                    focused: false,
                     thickness,
                     radius,
                 })
@@ -119,38 +125,19 @@ fn rasterize(key: TileKey) -> Vec<u8> {
     for y in 0..key.height {
         for tile in 0..8 {
             for x in 0..stride {
-                let mut inside = 0;
+                let mut channels = [0.0; 3];
                 for sy in 0..4 {
                     for sx in 0..4 {
-                        let mut px = x as f64 + (sx as f64 + 0.5) / 4.0;
-                        let mut py = y as f64 + (sy as f64 + 0.5) / 4.0;
-                        if matches!(tile, 2 | 4 | 7) {
-                            px = stride as f64 - px;
+                        let px = x as f64 + (sx as f64 + 0.5) / 4.0;
+                        let py = y as f64 + (sy as f64 + 0.5) / 4.0;
+                        let sample = depth::sample(key, tile, px, py);
+                        for (sum, channel) in channels.iter_mut().zip(sample) {
+                            *sum += channel;
                         }
-                        if matches!(tile, 5..=7) {
-                            py = key.height as f64 - py;
-                        }
-                        let t = key.thickness as f64;
-                        let r = key.radius as f64;
-                        let content = match tile {
-                            1 | 6 => py >= t,
-                            3 | 4 => px >= t,
-                            _ => {
-                                let dx = (t + r - px).max(0.0);
-                                let dy = (t + r - py).max(0.0);
-                                px >= t && py >= t && dx * dx + dy * dy <= r * r
-                            },
-                        };
-                        inside += u16::from(content);
                     }
                 }
-                for channel in 0..3 {
-                    rgba.push(
-                        ((u16::from(key.background[channel]) * inside
-                            + u16::from(key.surface[channel]) * (16 - inside)
-                            + 8)
-                            / 16) as u8,
-                    );
+                for channel in channels {
+                    rgba.push((channel / 16.0).round().clamp(0.0, 255.0) as u8);
                 }
                 rgba.push(255);
             }
@@ -164,12 +151,14 @@ impl Output {
         &self,
         client_id: ClientId,
         geom: PaneGeom,
-        enabled: bool,
+        focused: Option<bool>,
     ) -> Option<(TileKey, InternalImageId)> {
         let cache = self.recessed_frames.as_ref()?;
-        let key = (enabled && geom.cols.as_usize() >= 4 && geom.rows.as_usize() >= 3)
+        let focused = focused?;
+        let mut key = (geom.cols.as_usize() >= 4 && geom.rows.as_usize() >= 3)
             .then(|| cache.borrow().clients.get(&client_id).copied())
             .flatten()?;
+        key.focused = focused;
         let id = cache
             .borrow_mut()
             .atlas(key, &mut self.kitty_image_store.borrow_mut())?;
@@ -206,14 +195,14 @@ impl Output {
         client_id: ClientId,
         pane_id: PaneId,
         geom: PaneGeom,
-        enabled: bool,
+        focused: Option<bool>,
         z_index: Option<usize>,
         mut characters: Option<&mut Vec<CharacterChunk>>,
     ) {
         let Some(cache) = self.recessed_frames.clone() else {
             return;
         };
-        let atlas = self.frame_atlas(client_id, geom, enabled);
+        let atlas = self.frame_atlas(client_id, geom, focused);
 
         if let (Some((key, _)), Some(chunks)) = (atlas, characters.as_mut()) {
             decorate_characters(chunks, key);
