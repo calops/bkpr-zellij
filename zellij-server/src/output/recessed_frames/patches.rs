@@ -66,7 +66,7 @@ pub(super) struct Images {
 #[derive(Default, Debug)]
 pub(super) struct Rasterizer {
     basis: HashMap<Key, (Vec<[u16; 4]>, Vec<[u16; 4]>, usize, usize)>,
-    bytes: usize,
+    budget: cache::Budget<Key>,
 }
 
 impl Rasterizer {
@@ -77,14 +77,20 @@ impl Rasterizer {
         canonical.material.foreground = [0, 0, 255];
         let (w, h) = key.dimensions();
         if !self.basis.contains_key(&canonical) {
-            if self.bytes + w * h * 16 > MAX_BYTES {
-                return None;
-            }
             let basis = sample(&canonical);
             let size = basis.0.len() * 16;
+            if !self.budget.possible(size) {
+                return None;
+            }
+            while !self.budget.fits(size) {
+                let victim = self.budget.oldest(|_| true)?;
+                self.basis.remove(&victim);
+                self.budget.remove(&victim);
+            }
             self.basis.insert(canonical.clone(), basis);
-            self.bytes += size;
+            self.budget.insert(canonical.clone(), size);
         }
+        self.budget.touch(&canonical);
         let (body, shadow, sw, sh) = &self.basis[&canonical];
         let encode = |basis: &[[u16; 4]]| {
             let small = raster::colorize(key.material, basis);

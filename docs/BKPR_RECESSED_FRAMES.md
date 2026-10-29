@@ -86,6 +86,25 @@ without timers or changes to focus behavior.
 
 ## Raised plugin surfaces
 
+Focused plugins can opt into `bkpr_surface="raised-regions"`. Their OSC 7502
+presentation describes up to three disjoint rectangles relative to the existing
+native viewport, each with an optional terminal ANSI accent. The native renderer
+uses the same prewarmed raised atlases, bevel/shadow sampling, cached straight
+strips and placement coalescer as passive cards. Per-pane region plans retain
+merged image placements and rounded cell coverage; raster work stays on the
+background worker and is independent of each rectangle's overall dimensions.
+Neutral and form/search accent variants are queued when client colors and cell
+pixels become available, before a focused popup is opened.
+
+The terminal-colors snapshot advertises `raised_regions` only after graphics,
+truecolor, resolved colors and cell dimensions are confirmed. Plugins combine
+that capability with the current mode's rounded-corner setting and their own
+minimum layout size. They retain responsibility for titles inside cards, content
+layout, keyboard focus, cursor, pointer actions and exact-size readiness. With
+the capability absent, the toggle off, or a compact viewport, the original
+outlined layout remains the fallback. Mode updates must carry the current
+rounded-corner setting after reconfiguration, including to existing helpers.
+
 Passive details plugins can select `bkpr_surface="raised-joined"` and attach a
 bounded sidebar item rectangle through the frame's OSC 7502 presentation. The
 rounded contour follows the union of that rectangle and the native popup,
@@ -175,12 +194,26 @@ sidebar; terminal titles and application content are unaffected. Cursor handling
 focus, input and floating-pane clipping remain native.
 Watcher output, which does not serialize Kitty images, retains ordinary frames.
 Eight edge/corner tiles share one RGBA atlas. Cache keys include cell dimensions,
-background/surface colors, thickness and radius. Each key is rasterized once
-and held by a reference in the native image store. Earlier resolutions and
-palettes remain available when clients change font size or theme. The image
+background/surface colors, thickness, radius and presentation strategy. Each
+resident key is rasterized once and held by a reference in the native image
+store. The 64 MiB asset budget includes queued work and reclaims least recently
+used inactive assets when font or palette variants fill it. Current client pane
+materials, all materials of visible multi-card views and materials needed by
+the frame being assembled remain protected. Eviction releases image references
+and invalidates only dependent placement plans. Earlier resolutions and palettes
+remain available until pressure evicts them. Separate bounded LRU budgets retain
+the palette-independent raster bases, so recoloring can reuse sampled geometry.
+Failed jobs release reservations and pending markers; worker disconnection
+clears abandoned requests and permits synchronous fallback. The image
 store also caches base64, while the existing per-client host state uploads each
 atlas only when that client needs it. Placement updates do not rasterize or
 re-encode images.
+
+Pane size admission checks actual insets and corner diameter rather than the
+larger blur-tile footprint: the eight-slice compositor already crops those tiles
+for shorter panes. Focused cards use a half-cell-width inset on each side in both
+axes, yielding roughly a cell-width between adjacent cards. Their accent hue is
+blended after the neutral luminance lift so input and form tints stay visible.
 
 Straight-edge pixels are copied from the atlas into cached 1024-pixel strips.
 Adjacent crops coalesce into larger placements without scaling or changing

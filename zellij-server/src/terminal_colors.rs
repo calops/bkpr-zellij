@@ -86,7 +86,8 @@ impl TerminalColors {
                 std::mem::replace(&mut self.truecolor, supported) != supported
             },
             TerminalColorUpdate::ResetPalette => {
-                let changed = self.foreground.is_some() || self.background.is_some()
+                let changed = self.foreground.is_some()
+                    || self.background.is_some()
                     || self.ansi.iter().any(Option::is_some);
                 self.foreground = None;
                 self.background = None;
@@ -98,7 +99,9 @@ impl TerminalColors {
 
     pub fn event(&self) -> Event {
         // Fixed-size RGB/bool data cannot fail JSON serialization.
-        Event::CustomMessage("bkpr_terminal_colors".into(), serde_json::to_string(self).unwrap())
+        let mut payload = serde_json::to_value(self).unwrap();
+        payload["raised_regions"] = self.frame_colors().is_some().into();
+        Event::CustomMessage("bkpr_terminal_colors".into(), payload.to_string())
     }
 }
 
@@ -132,7 +135,9 @@ mod tests {
         ]));
         assert_eq!(colors.ansi[2], Some([17, 34, 51]));
         assert!(colors.ansi[0].is_none());
-        let Event::CustomMessage(name, payload) = colors.event() else { panic!() };
+        let Event::CustomMessage(name, payload) = colors.event() else {
+            panic!()
+        };
         assert_eq!(name, "bkpr_terminal_colors");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["ansi"].as_array().unwrap().len(), 16);

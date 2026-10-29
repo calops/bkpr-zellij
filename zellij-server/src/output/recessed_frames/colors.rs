@@ -30,6 +30,10 @@ pub(super) fn lift(background: [u8; 3], foreground: [u8; 3]) -> [u8; 3] {
 }
 
 pub(super) fn tint(background: [u8; 3], accent: [u8; 3]) -> [u8; 3] {
+    tint_amount(background, accent, 0.40)
+}
+
+pub(super) fn tint_amount(background: [u8; 3], accent: [u8; 3], mut amount: f64) -> [u8; 3] {
     let base = background.map(linear);
     let accent = accent.map(linear);
     let light = luminance(base);
@@ -40,7 +44,6 @@ pub(super) fn tint(background: [u8; 3], accent: [u8; 3]) -> [u8; 3] {
     let target = accent.map(|channel| channel * light / accent_light);
     // Both endpoints have the same luminance. Reduce chroma at the gamut edge
     // rather than clipping channels and accidentally changing brightness.
-    let mut amount: f64 = 0.40;
     for channel in 0..3 {
         let delta = target[channel] - base[channel];
         if delta > 0.0 {

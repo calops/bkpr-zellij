@@ -33,7 +33,7 @@ pub(super) struct Rasterizer {
     // Sixteen-bit premultiplied coefficients: background, surface, highlight,
     // alpha. Keep more precision than the final eight-bit RGBA transport.
     basis: HashMap<TileKey, Vec<[u16; 4]>>,
-    bytes: usize,
+    budget: cache::Budget<TileKey>,
     patches: super::patches::Rasterizer,
 }
 
@@ -50,12 +50,18 @@ impl Rasterizer {
         let height = key.height * span;
         if !self.basis.contains_key(&geometry) {
             let bytes = width * height * 8;
-            if self.bytes + bytes > MAX_BYTES {
+            if !self.budget.possible(bytes) {
                 return None;
             }
+            while !self.budget.fits(bytes) {
+                let victim = self.budget.oldest(|_| true)?;
+                self.basis.remove(&victim);
+                self.budget.remove(&victim);
+            }
             self.basis.insert(geometry, basis(geometry));
-            self.bytes += bytes;
+            self.budget.insert(geometry, bytes);
         }
+        self.budget.touch(&geometry);
         let bytes = colorize(key, &self.basis[&geometry]);
         let strips = strips::prepare(key, &bytes)
             .into_iter()
@@ -148,6 +154,7 @@ enum Job {
     Atlas(TileKey),
     Patch(super::patches::Key),
 }
+#[derive(Debug)]
 pub(super) enum Completed {
     Atlas(TileKey, Option<Prepared>),
     Patch(super::patches::Key, Option<super::patches::Prepared>),
@@ -198,7 +205,68 @@ impl Worker {
         self.jobs.send(Job::Patch(key)).is_ok()
     }
 
-    pub fn completed(&self) -> Vec<Completed> {
-        self.results.try_iter().collect()
+    pub fn completed(&self) -> (Vec<Completed>, bool) {
+        let mut results = vec![];
+        loop {
+            match self.results.try_recv() {
+                Ok(result) => results.push(result),
+                Err(mpsc::TryRecvError::Empty) => return (results, false),
+                Err(mpsc::TryRecvError::Disconnected) => return (results, true),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn key() -> TileKey {
+        TileKey {
+            width: 2,
+            height: 4,
+            background: [30; 3],
+            foreground: [200; 3],
+            surface: [20; 3],
+            thickness: 1,
+            radius: 2,
+            compact: true,
+            raised: false,
+            region: false,
+        }
+    }
+
+    #[test]
+    fn failed_raster_jobs_release_admission_and_can_be_requested_again() {
+        let (jobs, requests) = mpsc::channel();
+        let (complete, results) = mpsc::channel();
+        let mut cache = FrameCache {
+            worker: Some(Worker { jobs, results }),
+            ..Default::default()
+        };
+        let mut store = KittyImageStore::default();
+        let key = key();
+        assert!(cache.request(key, &mut store));
+        assert!(matches!(requests.recv().unwrap(), Job::Atlas(_)));
+        complete.send(Completed::Atlas(key, None)).unwrap();
+        cache.poll(&mut store);
+        assert!(!cache.requested.contains(&key));
+        assert!(cache.budget.fits(MAX_BYTES));
+        assert!(cache.request(key, &mut store));
+        assert!(matches!(requests.recv().unwrap(), Job::Atlas(_)));
+    }
+
+    #[test]
+    fn a_disconnected_worker_falls_back_without_poisoning_pending_keys() {
+        let (jobs, requests) = mpsc::channel();
+        let (_complete, results) = mpsc::channel();
+        drop(requests);
+        let mut cache = FrameCache {
+            worker: Some(Worker { jobs, results }),
+            ..Default::default()
+        };
+        let mut store = KittyImageStore::default();
+        assert!(cache.atlas(key(), &mut store).is_some());
+        assert!(cache.requested.is_empty());
+        assert!(cache.worker.is_none());
     }
 }

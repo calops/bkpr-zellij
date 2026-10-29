@@ -178,11 +178,10 @@ impl Output {
             let Some(key) = cache.clients.get(&client).copied() else {
                 return false;
             };
-            geoms.iter().all(|geom| {
-                !geom.is_stacked()
-                    && geom.cols.as_usize() >= key.tile_cells() * 2
-                    && geom.rows.as_usize() >= key.tile_cells() * 2
-            }) && cache.atlas(key, &mut store).is_some()
+            geoms
+                .iter()
+                .all(|geom| !geom.is_stacked() && key.fits(*geom))
+                && cache.atlas(key, &mut store).is_some()
         })
     }
 }

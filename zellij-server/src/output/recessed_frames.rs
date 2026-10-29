@@ -8,6 +8,7 @@ use super::*;
 use crate::panes::kitty_graphics::parser::{DecodedImage, KittyFormat};
 use crate::terminal_colors::TerminalColors;
 
+mod cache;
 mod clipping;
 mod colors;
 pub(crate) mod compact;
@@ -18,6 +19,7 @@ mod patches;
 mod placements;
 pub(crate) mod raised;
 mod raster;
+mod regions;
 mod strips;
 
 // Includes queued variants: prewarming cannot overrun the admission budget.
@@ -39,9 +41,15 @@ struct TileKey {
     radius: usize,
     compact: bool,
     raised: bool,
+    region: bool,
 }
 
 impl TileKey {
+    fn fits(self, geom: PaneGeom) -> bool {
+        let (x, y) = self.insets();
+        geom.cols.as_usize() * self.width >= 2 * (x + self.radius)
+            && geom.rows.as_usize() * self.height >= 2 * (y + self.radius)
+    }
     fn raised_padding(self) -> (usize, usize) {
         let support = (self.width as f64 * 0.30).max(0.75) * 5.0;
         let margin = (self.width as f64 * 0.35 + support + 1.0).ceil() as usize;
@@ -52,6 +60,10 @@ impl TileKey {
     }
 
     fn raised_margins(self) -> (usize, usize) {
+        if self.region {
+            let margin = self.width.div_ceil(2);
+            return (margin, margin);
+        }
         // Hints retain their existing rows and two-column inset. Place the
         // surface half a cell-width away from that content on every side.
         let padding = self.width.div_ceil(2).min(self.height);
@@ -87,6 +99,7 @@ pub(crate) struct FrameCache {
     strips: HashMap<TileKey, strips::Strips>,
     geometry: HashMap<(ClientId, PaneId), CachedGeometry>,
     raised_masks: HashMap<(ClientId, PaneId), Rc<raised::Surface>>,
+    region_plans: HashMap<(ClientId, PaneId), Rc<regions::Plan>>,
     active_frames: HashMap<(ClientId, PaneId), FrameRequest>,
     host_backgrounds: HashMap<ClientId, zellij_utils::ipc::TerminalBackground>,
     worker: Option<raster::Worker>,
@@ -97,7 +110,8 @@ pub(crate) struct FrameCache {
     patch_rasterizer: patches::Rasterizer,
     joined_regions: HashMap<(ClientId, PaneId), [usize; 8]>,
     joined_layouts: std::collections::VecDeque<Rc<joined::Layout>>,
-    bytes: usize,
+    budget: cache::Budget<cache::Asset>,
+    pins: HashSet<TileKey>,
 }
 
 #[derive(Debug)]
@@ -147,6 +161,7 @@ impl FrameCache {
                     radius,
                     compact,
                     raised: false,
+                    region: false,
                 })
             });
         if let Some(key) = next {
@@ -158,6 +173,8 @@ impl FrameCache {
     pub(crate) fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
         self.accents.remove(&client_id);
+        self.region_plans
+            .retain(|(client, _), _| *client != client_id);
         self.joined_regions
             .retain(|(client, _), _| *client != client_id);
         self.host_backgrounds.remove(&client_id);
@@ -172,25 +189,32 @@ impl FrameCache {
         &mut self,
         client: ClientId,
         notify: Option<zellij_utils::channels::SenderWithContext<crate::screen::ScreenInstruction>>,
+        store: &mut KittyImageStore,
     ) {
         let Some(base) = self.clients.get(&client).copied() else {
             return;
         };
+        self.poll(store);
         if self.worker.is_none() {
             self.worker = notify.and_then(raster::Worker::start);
         }
         if self.worker.is_none() {
             return;
         }
-        self.request(base);
+        self.request(base, store);
         for accent in [None, Some(3), Some(4)] {
             if let Some(key) = self.raised_key(client, accent) {
-                self.request(key);
+                self.request(key, store);
+            }
+        }
+        for accent in [None, Some(1), Some(2), Some(3), Some(4), Some(6)] {
+            if let Some(key) = self.region_key(client, accent) {
+                self.request(key, store);
             }
         }
         if let Some(mut key) = self.raised_key(client, None) {
             key.background = colors::lift(key.background, key.foreground);
-            self.request(key);
+            self.request(key, store);
         }
     }
 
@@ -208,18 +232,40 @@ impl FrameCache {
         Some(key)
     }
 
-    fn request(&mut self, key: TileKey) -> bool {
-        if self.requested.contains(&key) {
+    fn region_key(&self, client: ClientId, accent: Option<u8>) -> Option<TileKey> {
+        let mut key = self.raised_key(client, None)?;
+        key.region = true;
+        key.background = colors::lift(key.background, key.foreground);
+        if let Some(color) = accent.and_then(|index| {
+            self.accents
+                .get(&client)?
+                .get(index as usize)
+                .copied()
+                .flatten()
+        }) {
+            key.background = colors::tint_amount(key.background, color, 0.65);
+        }
+        Some(key)
+    }
+
+    fn request(&mut self, key: TileKey, store: &mut KittyImageStore) -> bool {
+        if self.requested.contains(&key) || self.atlases.contains_key(&key) {
             return false;
         }
         let span = key.tile_cells();
         let bytes = key.width * span * key.height * span * 8 * 4 + strips::bytes(key);
-        if self.bytes + bytes > MAX_BYTES {
+        if !self.admit(cache::Asset::Atlas(key), bytes, store) {
             return false;
         }
         self.requested.insert(key);
-        self.bytes += bytes;
-        self.worker.as_ref().is_none_or(|worker| worker.queue(key))
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.queue(key))
+        {
+            self.stop_worker(Some(cache::Asset::Atlas(key)));
+        }
+        true
     }
 
     fn install(
@@ -243,21 +289,35 @@ impl FrameCache {
     }
 
     fn poll(&mut self, store: &mut KittyImageStore) {
-        let completed = self
+        let (completed, disconnected) = self
             .worker
             .as_ref()
             .map(|worker| worker.completed())
             .unwrap_or_default();
         for result in completed {
             match result {
-                raster::Completed::Atlas(key, Some(prepared)) => {
-                    self.install(key, prepared, store);
+                raster::Completed::Atlas(key, prepared) => {
+                    self.requested.remove(&key);
+                    if prepared
+                        .and_then(|prepared| self.install(key, prepared, store))
+                        .is_none()
+                    {
+                        self.budget.remove(&cache::Asset::Atlas(key));
+                    }
                 },
-                raster::Completed::Patch(key, Some(prepared)) => {
-                    self.install_patch(key, prepared, store);
+                raster::Completed::Patch(key, prepared) => {
+                    self.patch_requested.remove(&key);
+                    if prepared
+                        .and_then(|prepared| self.install_patch(key.clone(), prepared, store))
+                        .is_none()
+                    {
+                        self.budget.remove(&cache::Asset::Patch(key));
+                    }
                 },
-                _ => {},
             }
+        }
+        if disconnected {
+            self.stop_worker(None);
         }
     }
 
@@ -291,30 +351,48 @@ impl FrameCache {
         store: &mut KittyImageStore,
     ) -> Option<patches::Images> {
         if let Some(images) = self.patch_images.get(key) {
+            self.budget.touch(&cache::Asset::Patch(key.clone()));
             return Some(*images);
         }
-        if self.patch_requested.contains(key) || self.bytes + key.bytes() > MAX_BYTES {
+        if self.patch_requested.contains(key)
+            || !self.admit(cache::Asset::Patch(key.clone()), key.bytes(), store)
+        {
             return None;
         }
-        self.bytes += key.bytes();
         self.patch_requested.insert(key.clone());
         if let Some(worker) = &self.worker {
-            worker.queue_patch(key.clone());
-            None
-        } else {
-            let prepared = self.patch_rasterizer.prepare(key)?;
-            self.install_patch(key.clone(), prepared, store)
+            if worker.queue_patch(key.clone()) {
+                return None;
+            }
+            self.stop_worker(Some(cache::Asset::Patch(key.clone())));
         }
+        let result = self
+            .patch_rasterizer
+            .prepare(key)
+            .and_then(|prepared| self.install_patch(key.clone(), prepared, store));
+        self.patch_requested.remove(key);
+        if result.is_none() {
+            self.budget.remove(&cache::Asset::Patch(key.clone()));
+        }
+        result
     }
 
     fn atlas(&mut self, key: TileKey, store: &mut KittyImageStore) -> Option<InternalImageId> {
         self.poll(store);
         if let Some(id) = self.atlases.get(&key) {
+            self.budget.touch(&cache::Asset::Atlas(key));
             return Some(*id);
         }
-        if self.request(key) && self.worker.is_none() {
-            let prepared = self.rasterizer.prepare(key)?;
-            return self.install(key, prepared, store);
+        if self.request(key, store) && self.worker.is_none() {
+            let result = self
+                .rasterizer
+                .prepare(key)
+                .and_then(|prepared| self.install(key, prepared, store));
+            self.requested.remove(&key);
+            if result.is_none() {
+                self.budget.remove(&cache::Asset::Atlas(key));
+            }
+            return result;
         }
         None
     }
@@ -400,9 +478,7 @@ impl Output {
         let key = enabled
             .then(|| cache.borrow().clients.get(&client_id).copied())
             .flatten()?;
-        if geom.cols.as_usize() < key.tile_cells() * 2
-            || geom.rows.as_usize() < key.tile_cells() * 2
-        {
+        if !key.fits(geom) {
             return None;
         }
         let id = cache
@@ -503,9 +579,13 @@ impl Output {
             let live: HashSet<_> = cache.active_frames.keys().copied().collect();
             cache.geometry.retain(|pane, _| live.contains(pane));
             cache.raised_masks.retain(|pane, _| live.contains(pane));
+            cache.region_plans.retain(|pane, _| live.contains(pane));
         }
         for ((client_id, pane_id), request) in std::mem::take(&mut self.recessed_frame_requests) {
             self.finish_recessed_frame(client_id, pane_id, request);
+        }
+        if let Some(cache) = &self.recessed_frames {
+            cache.borrow_mut().pins.clear();
         }
     }
 

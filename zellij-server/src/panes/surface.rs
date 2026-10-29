@@ -9,6 +9,18 @@ pub struct SurfacePresentation {
     pub accent: Option<u8>,
     #[serde(default)]
     pub attachment: Option<SurfaceAttachment>,
+    #[serde(default)]
+    pub regions: Vec<SurfaceRegion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceRegion {
+    pub x: usize,
+    pub y: usize,
+    pub columns: usize,
+    pub rows: usize,
+    pub accent: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -28,6 +40,7 @@ impl Default for SurfacePresentation {
             version: 1,
             accent: None,
             attachment: None,
+            regions: vec![],
         }
     }
 }
@@ -38,6 +51,14 @@ impl SurfacePresentation {
         let end = body.iter().take(1025).position(|byte| *byte == b'\x07')?;
         let presentation: Self = serde_json::from_slice(&body[..end]).ok()?;
         (presentation.version == 1
+            && presentation.regions.len() <= 3
+            && presentation.regions.iter().all(|r| {
+                r.columns > 0
+                    && r.rows > 0
+                    && r.x.checked_add(r.columns).is_some_and(|v| v <= 100000)
+                    && r.y.checked_add(r.rows).is_some_and(|v| v <= 100000)
+                    && r.accent.is_none_or(|index| index < 16)
+            })
             && presentation.accent.is_none_or(|index| index < 16)
             && presentation.attachment.as_ref().is_none_or(|rect| {
                 rect.columns > 0

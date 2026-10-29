@@ -12,7 +12,7 @@ pub(super) struct Strips {
 impl Strips {
     pub(super) fn release(self, store: &mut KittyImageStore) {
         for id in self.ids {
-            store.remove_placement_ref(id);
+            store.free(id);
         }
     }
 }

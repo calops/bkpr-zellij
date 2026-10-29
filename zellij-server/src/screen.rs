@@ -2898,7 +2898,7 @@ impl Screen {
         let colors = self.terminal_colors.entry(client_id).or_default();
         if colors.update(update) {
             if self.recessed_frames.borrow_mut().update(client_id, colors) {
-                self.recessed_frames.borrow_mut().warm_up(client_id, self.bus.senders.to_screen.clone());
+                self.recessed_frames.borrow_mut().warm_up(client_id, self.bus.senders.to_screen.clone(), &mut self.kitty_image_store.borrow_mut());
                 for tab in self.tabs.values_mut() {
                     tab.set_force_render();
                 }
@@ -7366,6 +7366,10 @@ impl Screen {
 
         // global configuration
         self.style.colors = theme;
+        self.style.rounded_corners = rounded_corners;
+        for mode in self.mode_info.values_mut() {
+            mode.update_rounded_corners(rounded_corners);
+        }
         self.default_mode_info.update_theme(theme);
         self.default_mode_info
             .update_rounded_corners(rounded_corners);
