@@ -7834,6 +7834,9 @@ impl Tab {
     }
     pub fn update_rounded_corners(&mut self, rounded_corners: bool) {
         self.style.rounded_corners = rounded_corners;
+        for mode in self.mode_info.borrow_mut().values_mut() {
+            mode.update_rounded_corners(rounded_corners);
+        }
         self.floating_panes
             .update_pane_rounded_corners(rounded_corners);
         self.tiled_panes

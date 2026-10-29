@@ -11,7 +11,7 @@ pub(super) struct Plan {
 
 #[derive(Debug)]
 pub(super) struct Layout {
-    key: TileKey,
+    pub(super) key: TileKey,
     geom: PaneGeom,
     attachment: SurfaceAttachment,
     cells: Vec<patches::Cell>,

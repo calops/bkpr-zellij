@@ -13,7 +13,7 @@ impl FloatingPanes {
             return damage;
         };
         for (id, pane) in &mut self.panes {
-            if pane.selectable() || !pane.borderless() {
+            if !pane.borderless() {
                 continue;
             }
             let Some(Run::Plugin(plugin)) = pane.invoked_with() else {
@@ -23,7 +23,11 @@ impl FloatingPanes {
                 continue;
             };
             let style = config.inner().get("bkpr_surface").map(String::as_str);
-            if !matches!(style, Some("raised-outline" | "raised-joined")) {
+            if !matches!(
+                style,
+                Some("raised-outline" | "raised-joined" | "raised-regions")
+            ) || (pane.selectable() && style != Some("raised-regions"))
+            {
                 continue;
             }
             let geom = pane.current_geom();
@@ -36,6 +40,11 @@ impl FloatingPanes {
                     .surface_presentation(client)
                     .cloned()
                     .unwrap_or_default();
+                if style == Some("raised-regions") {
+                    changed |=
+                        output.register_raised_regions(client, *id, geom, layer + 1, presentation);
+                    continue;
+                }
                 if style == Some("raised-joined")
                     && presentation.attachment.as_ref().is_none_or(|rect| {
                         let area = self.display_area.borrow();

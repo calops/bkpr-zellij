@@ -11,10 +11,10 @@ pub(crate) struct Scene {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Surface {
-    pane: PaneId,
-    geom: PaneGeom,
-    key: TileKey,
-    layer: usize,
+    pub(super) pane: PaneId,
+    pub(super) geom: PaneGeom,
+    pub(super) key: TileKey,
+    pub(super) layer: usize,
     coverage: Vec<PaneGeom>,
     presentation: SurfacePresentation,
     joined: Option<Rc<joined::Plan>>,
@@ -22,7 +22,15 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    fn corner_cell(&self, x: usize, y: usize) -> bool {
+    pub(super) fn full_cell(&self, x: usize, y: usize) -> bool {
+        self.coverage.iter().any(|row| {
+            x >= row.x
+                && x < row.x + row.cols.as_usize()
+                && y >= row.y
+                && y < row.y + row.rows.as_usize()
+        })
+    }
+    pub(super) fn corner_cell(&self, x: usize, y: usize) -> bool {
         if let Some(plan) = &self.joined {
             return !plan.full_cell(x, y);
         }
@@ -58,7 +66,7 @@ impl Surface {
         })
     }
 
-    fn new(
+    pub(super) fn new(
         geom: PaneGeom,
         key: TileKey,
         layer: usize,
@@ -230,6 +238,7 @@ impl Output {
         if presentation.attachment.is_some() {
             key.background = colors::lift(key.background, key.foreground);
         }
+        cache.borrow_mut().pins.insert(key);
         let clip_layers = self
             .floating_panes_stack
             .as_ref()
@@ -339,12 +348,28 @@ impl Output {
         changed
     }
 
+    pub(super) fn add_raised_surface(&mut self, client: ClientId, surface: Rc<Surface>) {
+        if let Some(stack) = &self.floating_panes_stack {
+            self.raised_surfaces
+                .entry(client)
+                .or_insert_with(|| Scene {
+                    stack: stack.clone(),
+                    surfaces: vec![],
+                })
+                .surfaces
+                .push(surface);
+        }
+    }
+
     pub(in crate::output) fn decorate_raised_popup(
         &self,
         client: ClientId,
         z: Option<usize>,
         chunks: &mut Vec<CharacterChunk>,
     ) {
+        if self.decorate_regions(client, z, chunks) {
+            return;
+        }
         if z.is_none() {
             if let Some(scene) = self.raised_surfaces.get(&client) {
                 for surface in &scene.surfaces {
@@ -404,11 +429,18 @@ impl Output {
             .enumerate()
             .skip(z.unwrap_or(0))
             .flat_map(|(index, geom)| {
-                surfaces
+                let matching: Vec<_> = surfaces
                     .iter()
-                    .find(|surface| surface.layer == index + 1)
-                    .map(|surface| surface.coverage.clone())
-                    .unwrap_or_else(|| vec![*geom])
+                    .filter(|surface| surface.layer == index + 1)
+                    .collect();
+                if matching.is_empty() {
+                    vec![*geom]
+                } else {
+                    matching
+                        .into_iter()
+                        .flat_map(|surface| surface.coverage.clone())
+                        .collect()
+                }
             })
             .collect();
         Some(FloatingPanesStack { layers })
